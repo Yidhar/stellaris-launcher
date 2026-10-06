@@ -1229,7 +1229,7 @@ impl App {
                 x += sizes[k].x + gap;
                 self.draw_card(&mut row, &cards[order[k]], r, theme::RADIUS, &format!("card{k}"), &acts);
             }
-            // the handle: a tall glass capsule right after the cards, its chevron pointing where the row will go
+            // the handle: a tall click area right after the cards, its chevron pointing where the row will go
             let hx = area.left() + row_w + shift + gap * (0.5 + 0.5 * ease);
             let hh = (height * 0.62).max(64.0);
             let handle = Rect::from_min_size(pos2(hx, area.center().y - hh / 2.0), vec2(handle_w, hh));
@@ -1239,8 +1239,8 @@ impl App {
             let peek_resp = if folded { Some(ui.interact(peek_rect, egui::Id::new("news-peek"), Sense::click())) } else { None };
             let hot = resp.hovered() || peek_resp.as_ref().is_some_and(|r| r.hovered());
             let lit = ui.ctx().animate_bool_with_time(resp.id.with("lit"), hot, 0.15);
-            ui.painter().add(theme::glass_shapes(ui.ctx(), handle, handle_w / 2.0));
-            ui.painter().rect_filled(handle, egui::CornerRadius::same((handle_w / 2.0) as u8), theme::white((18.0 * lit) as u8));
+            // only the chevron: quiet until the pointer comes near, then a faint fill shows where to click
+            ui.painter().rect_filled(handle, egui::CornerRadius::same((handle_w / 2.0) as u8), theme::white((14.0 * lit) as u8));
             let icon = if folded { Icon::Right } else { Icon::Left };
             icon.draw(ui.painter(), handle.center(), 18.0, if hot { LABEL } else { SECONDARY }, 2.0);
             let hint = if folded { tr(lang, "play.news_show") } else { tr(lang, "play.news_hide") };
