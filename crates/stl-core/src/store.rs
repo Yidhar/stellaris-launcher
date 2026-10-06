@@ -51,6 +51,11 @@ pub struct Store {
     /// fetch the public news feed; None = yes
     #[serde(default)]
     pub news_online: Option<bool>,
+    /// the Mods page: `name`, `updated` or `source`; and `list` or `compact`
+    #[serde(default)]
+    pub mods_sort: Option<String>,
+    #[serde(default)]
+    pub mods_view: Option<String>,
     /// load the playset's DLL plugins when starting; None = yes
     #[serde(default)]
     pub use_plugins: Option<bool>,

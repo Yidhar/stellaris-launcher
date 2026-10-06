@@ -224,16 +224,6 @@ pub fn plain_rows(ui: &mut Ui, id: &str, row_height: f32, total: usize, add: imp
     ui.advance_cursor_after_rect(rect);
 }
 
-/// `plain_rows` on a glass card.
-pub fn glass_rows(ui: &mut Ui, id: &str, row_height: f32, total: usize, add: impl FnOnce(&mut Ui, std::ops::Range<usize>)) {
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().add(glass_shapes(ui.ctx(), rect, 16.0));
-    let mut child = ui.new_child(UiBuilder::new().id_salt(("glass-rows", id)).max_rect(rect.shrink2(vec2(0.0, 6.0))).layout(Layout::top_down(Align::Min)));
-    child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
-    plain_rows(&mut child, id, row_height, total, add);
-    ui.advance_cursor_after_rect(rect);
-}
-
 /// A glass card over a given rectangle, with a margin, whose content is laid out by `add`.
 pub fn glass_pane(ui: &mut Ui, rect: Rect, radius: f32, margin: f32, add: impl FnOnce(&mut Ui)) {
     ui.painter().add(glass_shapes(ui.ctx(), rect, radius));
@@ -500,6 +490,15 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, time: f64) {
         ui.painter().rect_filled(fill, cr(3.0), LABEL);
     }
     ui.ctx().request_repaint();
+}
+
+/// A number in a small capsule (a count next to a heading).
+pub fn count_badge(ui: &mut Ui, n: usize) -> Response {
+    let galley = ui.painter().layout_no_wrap(n.to_string(), FontId::new(13.0, bold()), LABEL);
+    let (rect, resp) = ui.allocate_exact_size(vec2((galley.size().x + 18.0).max(28.0), 24.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(12.0), white(34));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, LABEL);
+    resp
 }
 
 /// A small coloured capsule label.

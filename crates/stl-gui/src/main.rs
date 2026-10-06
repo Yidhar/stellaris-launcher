@@ -21,7 +21,7 @@ use stl_core::store::Store;
 use stl_core::saves::{self, Save};
 use stl_core::{modmake, workshop};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
-use theme::{bold, chip, circle_button, glass, glass_pane, glass_rows, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
+use theme::{bold, chip, circle_button, glass, glass_pane, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
 const STEAM_APP_ID: u32 = 281990;
 
@@ -45,6 +45,8 @@ struct UploadForm {
     /// 0 unchanged, 1 private, 2 friends, 3 unlisted, 4 public
     visibility: usize,
     note: String,
+    /// a Workshop item to update, typed in for a mod whose descriptor does not name one
+    item_id: String,
     rx: Option<Receiver<UpMsg>>,
     stage: Option<(workshop::Stage, u64, u64)>,
     result: Option<Result<workshop::Outcome, String>>,
@@ -117,6 +119,9 @@ enum Act {
     UseGameDir(String),
     Open(String),
     CreateMod,
+    RescanMods,
+    SetModsSort(&'static str),
+    SetModsView(&'static str),
     OpenUpload(String),
     StartUpload,
 }
@@ -171,6 +176,10 @@ struct App {
     /// development: open the playset drop-down on the first frame
     dev_popup: bool,
     make: Option<MakeForm>,
+    /// the "Upload mod" picker is open
+    pick_upload: bool,
+    /// when each mod was last changed (for the sort by date), filled when needed
+    mod_times: std::collections::HashMap<String, Option<std::time::SystemTime>>,
     upload: Option<UploadForm>,
     /// the newest save, for the Continue button
     last_save: Option<Save>,
@@ -259,6 +268,8 @@ impl App {
             focus_playset_filter: false,
             dev_popup: false,
             make: None,
+            pick_upload: false,
+            mod_times: std::collections::HashMap::new(),
             upload: None,
             last_save: None,
             shown_page: Page::Play,
@@ -292,6 +303,8 @@ impl App {
                 app.dev_slow = v.parse().unwrap_or(1.0);
             } else if let Some(v) = a.strip_prefix("--then=") {
                 app.dev_then = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied();
+            } else if a == "--pick" {
+                app.pick_upload = true;
             } else if a == "--make" {
                 app.make = Some(MakeForm { name: "My New Mod".into(), version: "1.0.0".into(), tags: vec!["Gameplay".into()], add_to_playset: true, error: None });
             } else if let Some(v) = a.strip_prefix("--upload=") {
@@ -470,6 +483,21 @@ impl App {
             change_note: f.note.trim().to_string(),
             existing: f.m.remote_file_id.as_deref().and_then(|v| v.parse().ok()),
         };
+        let mut up = up;
+        let typed = f.item_id.trim().to_string();
+        let mut record_typed = None;
+        if up.existing.is_none() && !typed.is_empty() {
+            match typed.parse::<u64>() {
+                Ok(id) => {
+                    up.existing = Some(id);
+                    record_typed = Some(id);
+                }
+                Err(_) => {
+                    f.result = Some(Err(tr(self.lang, "up.bad_id").to_string()));
+                    return;
+                }
+            }
+        }
         let m = f.m.clone();
         let (tx, rx) = channel();
         f.rx = Some(rx);
@@ -479,6 +507,10 @@ impl App {
             let r = workshop::upload(&game.dir, &up, &mut |id| modmake::set_remote_file_id(&m, id), &mut |stage, done, total| {
                 let _ = tx_p.send(UpMsg::Progress(stage, done, total));
             });
+            let r = match (r, record_typed) {
+                (Ok(o), Some(id)) => modmake::set_remote_file_id(&m, id).map(|_| o),
+                (r, _) => r,
+            };
             let _ = tx.send(UpMsg::Done(r.map_err(|e| format!("{e:#}"))));
         });
     }
@@ -730,10 +762,25 @@ impl App {
             Act::OpenUpload(id) => {
                 if let Some(m) = self.mods.iter().find(|m| m.id == id) {
                     let existing = m.remote_file_id.is_some();
-                    self.upload = Some(UploadForm { m: m.clone(), visibility: if existing { 0 } else { 1 }, note: String::new(), rx: None, stage: None, result: None });
+                    self.upload = Some(UploadForm { m: m.clone(), visibility: if existing { 0 } else { 1 }, note: String::new(), item_id: String::new(), rx: None, stage: None, result: None });
+                    self.pick_upload = false;
                 }
             }
             Act::StartUpload => self.start_upload(),
+            Act::RescanMods => {
+                if let Ok(g) = &self.game {
+                    self.mods = mods::scan(&g.data_dir);
+                }
+                self.mod_times.clear();
+            }
+            Act::SetModsSort(v) => {
+                self.store.mods_sort = Some(v.to_string());
+                self.save();
+            }
+            Act::SetModsView(v) => {
+                self.store.mods_view = Some(v.to_string());
+                self.save();
+            }
         }
     }
 
@@ -1382,56 +1429,111 @@ impl App {
     fn page_mods(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let acts = Acts::default();
-        let count = self.mods.len().to_string();
-        large_title(ui, tr(lang, "mods.title"), Some(&tr_args(lang, "mods.count", &[&count])), |ui| {
-            theme::search_field(ui, &mut self.filter, tr(lang, "mods.search"), 280.0);
-            ui.add_space(4.0);
-            if pill_button(ui, &format!("+  {}", tr(lang, "mods.create")), ButtonStyle::Tinted(Color32::WHITE), self.game.is_ok()).clicked() {
-                self.make = Some(MakeForm { name: String::new(), version: "1.0.0".into(), tags: Vec::new(), add_to_playset: true, error: None });
-            }
-        });
+        ui.add_space(8.0);
         let active = self.store.active_index();
         let version = self.game.as_ref().ok().map(|g| g.version().to_string()).unwrap_or_default();
+        let sort = self.store.mods_sort.clone().unwrap_or_else(|| "name".into());
+        let compact = self.store.mods_view.as_deref() == Some("compact");
         let filter = self.filter.to_lowercase();
-        let shown: Vec<usize> = (0..self.mods.len()).filter(|&i| filter.is_empty() || self.mods[i].name.to_lowercase().contains(&filter)).collect();
-        glass_rows(ui, "mods-library", 58.0, shown.len(), |ui, range| {
-            let mut rows = Rows::starting_at(range.start);
-            for k in range {
-                let m = &self.mods[shown[k]];
-                let inside = self.store.playsets[active].mod_pos(&m.id).is_some();
-                let own = m.kind == Kind::Local && m.path.is_some() && m.problem.is_none();
-                rows.row(ui, 58.0, 68.0, false, |ui| {
-                    stack(ui, 58.0, 42.0, |ui| {
-                        ui.add(egui::Label::new(RichText::new(&m.name).size(15.0).color(if m.problem.is_some() { RED } else { LABEL })).truncate());
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let (t, c) = Self::kind_chip(lang, m.kind);
-                            chip(ui, t, c);
-                            if let Some(sv) = m.supported_version.as_ref().filter(|sv| !mods::supports(sv, &version)) {
-                                chip(ui, &tr_args(lang, "mods.for_version", &[sv]), ORANGE).on_hover_text(tr(lang, "mods.mismatch"));
-                            }
-                            if let Some(p) = &m.problem {
-                                chip(ui, tr(lang, "mods.unusable"), RED).on_hover_text(p);
-                            }
-                        });
+        let mut shown: Vec<usize> = (0..self.mods.len()).filter(|&i| filter.is_empty() || self.mods[i].name.to_lowercase().contains(&filter)).collect();
+        match sort.as_str() {
+            "updated" => {
+                for m in &self.mods {
+                    self.mod_times.entry(m.id.clone()).or_insert_with(|| {
+                        let p = m.path.clone().unwrap_or_else(|| m.file.clone());
+                        std::fs::metadata(&p).and_then(|x| x.modified()).ok()
                     });
-                }, |ui| {
-                    if inside {
-                        if circle_button(ui, Icon::Check, GREEN, Color32::WHITE, true).on_hover_text(tr(lang, "mods.remove")).clicked() {
-                            acts.push(Act::ModDrop(m.id.clone()));
-                        }
-                    } else if circle_button(ui, Icon::Plus, BLUE.gamma_multiply(0.35), BLUE, true).on_hover_text(tr(lang, "mods.add")).clicked() {
-                        acts.push(Act::ModAdd(m.id.clone()));
-                    }
-                    if own {
-                        ui.add_space(8.0);
-                        if circle_button(ui, Icon::Upload, theme::white(26), LABEL, true).on_hover_text(tr(lang, "mods.upload")).clicked() {
-                            acts.push(Act::OpenUpload(m.id.clone()));
-                        }
-                    }
-                });
+                }
+                shown.sort_by(|&a, &b| self.mod_times.get(&self.mods[b].id).cmp(&self.mod_times.get(&self.mods[a].id)));
             }
+            "source" => {
+                let rank = |k: Kind| match k {
+                    Kind::Local => 0,
+                    Kind::Workshop => 1,
+                    Kind::ParadoxMods => 2,
+                };
+                shown.sort_by_key(|&i| rank(self.mods[i].kind));
+            }
+            _ => {}
+        }
+        let total = shown.len();
+        let rect = ui.available_rect_before_wrap();
+        glass_pane(ui, rect, theme::RADIUS, 18.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(tr(lang, "mods.title")).size(17.0).family(bold()));
+                theme::count_badge(ui, total);
+                ui.add_space(6.0);
+                let sorts = [("name", "mods.sort_name"), ("updated", "mods.sort_updated"), ("source", "mods.sort_source")];
+                let labels: Vec<String> = sorts.iter().map(|(_, k)| tr(lang, k).to_string()).collect();
+                let cur = sorts.iter().position(|(v, _)| *v == sort).unwrap_or(0);
+                if let Some(i) = segmented(ui, &labels, cur, 270.0) {
+                    acts.push(Act::SetModsSort(sorts[i].0));
+                }
+                let views = [tr(lang, "mods.view_list").to_string(), tr(lang, "mods.view_compact").to_string()];
+                if let Some(i) = segmented(ui, &views, compact as usize, 160.0) {
+                    acts.push(Act::SetModsView(if i == 1 { "compact" } else { "list" }));
+                }
+                if circle_button(ui, Icon::Refresh, theme::white(22), LABEL, true).on_hover_text(tr(lang, "mods.refresh")).clicked() {
+                    acts.push(Act::RescanMods);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, tr(lang, "mods.upload_btn"), ButtonStyle::Tinted(Color32::WHITE), self.game.is_ok()).clicked() {
+                        self.pick_upload = true;
+                    }
+                    let w = ui.available_width().min(260.0);
+                    theme::search_field(ui, &mut self.filter, tr(lang, "mods.search"), w);
+                });
+            });
+            ui.add_space(10.0);
+            let row_h = if compact { 40.0 } else { 58.0 };
+            plain_rows(ui, "mods-library", row_h, total, |ui, range| {
+                let mut rows = Rows::starting_at(range.start);
+                for k in range {
+                    let m = &self.mods[shown[k]];
+                    let inside = self.store.playsets[active].mod_pos(&m.id).is_some();
+                    let own = m.kind == Kind::Local && m.path.is_some() && m.problem.is_none();
+                    let chips = |ui: &mut Ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let (t, c) = Self::kind_chip(lang, m.kind);
+                        chip(ui, t, c);
+                        if let Some(sv) = m.supported_version.as_ref().filter(|sv| !mods::supports(sv, &version)) {
+                            chip(ui, &tr_args(lang, "mods.for_version", &[sv]), ORANGE).on_hover_text(tr(lang, "mods.mismatch"));
+                        }
+                        if let Some(p) = &m.problem {
+                            chip(ui, tr(lang, "mods.unusable"), RED).on_hover_text(p);
+                        }
+                    };
+                    let name_color = if m.problem.is_some() { RED } else { LABEL };
+                    rows.row(ui, row_h, 68.0, false, |ui| {
+                        if compact {
+                            ui.add(egui::Label::new(RichText::new(&m.name).size(14.5).color(name_color)).truncate());
+                            chips(ui);
+                        } else {
+                            stack(ui, row_h, 42.0, |ui| {
+                                ui.add(egui::Label::new(RichText::new(&m.name).size(15.0).color(name_color)).truncate());
+                                ui.horizontal(|ui| chips(ui));
+                            });
+                        }
+                    }, |ui| {
+                        if inside {
+                            if circle_button(ui, Icon::Check, GREEN, Color32::WHITE, true).on_hover_text(tr(lang, "mods.remove")).clicked() {
+                                acts.push(Act::ModDrop(m.id.clone()));
+                            }
+                        } else if circle_button(ui, Icon::Plus, BLUE.gamma_multiply(0.35), BLUE, true).on_hover_text(tr(lang, "mods.add")).clicked() {
+                            acts.push(Act::ModAdd(m.id.clone()));
+                        }
+                        if own {
+                            ui.add_space(8.0);
+                            if circle_button(ui, Icon::Upload, theme::white(26), LABEL, true).on_hover_text(tr(lang, "mods.upload")).clicked() {
+                                acts.push(Act::OpenUpload(m.id.clone()));
+                            }
+                        }
+                    });
+                }
+            });
         });
+        ui.advance_cursor_after_rect(rect);
         self.acts.extend(acts.take());
     }
 
@@ -1790,6 +1892,7 @@ impl eframe::App for App {
             page.set_opacity(ease);
             self.render_page(&mut page, self.page);
         });
+        self.pick_sheet(ctx);
         self.make_sheet(ctx);
         self.upload_sheet(ctx);
         self.window_frame(ctx);
@@ -1802,6 +1905,69 @@ impl eframe::App for App {
 impl App {
     fn sheet_frame() -> egui::Frame {
         egui::Frame::new().fill(Color32::from_rgb(30, 30, 34)).stroke(egui::Stroke::new(1.0, theme::white(30))).corner_radius(theme::RADIUS as u8).inner_margin(egui::Margin::same(24))
+    }
+
+    /// "Upload mod": the list of your own mods, each saying whether it is on the Workshop already; choosing one opens the upload sheet.
+    fn pick_sheet(&mut self, ctx: &egui::Context) {
+        if !self.pick_upload {
+            return;
+        }
+        let lang = self.lang;
+        let own: Vec<Mod> = self.mods.iter().filter(|m| m.kind == Kind::Local && m.path.is_some() && m.problem.is_none()).cloned().collect();
+        let mut close = false;
+        let mut chosen = None;
+        let mut new = false;
+        let resp = egui::Modal::new(egui::Id::new("pick-upload")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(RichText::new(tr(lang, "mods.upload_btn")).size(22.0).family(bold()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(tr(lang, "pick.hint")).size(13.0).color(SECONDARY));
+            ui.add_space(12.0);
+            if own.is_empty() {
+                ui.label(RichText::new(tr(lang, "pick.none")).size(14.0).color(SECONDARY));
+            }
+            egui::ScrollArea::vertical().id_salt("pick-upload-list").max_height(320.0).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut rows = Rows::new();
+                for m in &own {
+                    let status = match &m.remote_file_id {
+                        Some(id) => tr_args(lang, "pick.on_workshop", &[id]),
+                        None => tr(lang, "pick.not_uploaded").to_string(),
+                    };
+                    let r = rows.row(ui, 54.0, 24.0, true, |ui| {
+                        stack(ui, 54.0, 38.0, |ui| {
+                            ui.add(egui::Label::new(RichText::new(&m.name).size(15.0).family(bold())).truncate());
+                            ui.label(RichText::new(&status).size(12.0).color(if m.remote_file_id.is_some() { GREEN } else { SECONDARY }));
+                        });
+                    }, |ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                        Icon::Right.draw(ui.painter(), r.center(), 16.0, SECONDARY, 1.8);
+                    });
+                    if r.clicked() {
+                        chosen = Some(m.id.clone());
+                    }
+                }
+            });
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if pill_button(ui, &format!("+  {}", tr(lang, "mods.create")), ButtonStyle::Plain(BLUE), self.game.is_ok()).clicked() {
+                    new = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, tr(lang, "common.cancel"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if let Some(id) = chosen {
+            self.acts.push(Act::OpenUpload(id));
+        } else if new {
+            self.pick_upload = false;
+            self.make = Some(MakeForm { name: String::new(), version: "1.0.0".into(), tags: Vec::new(), add_to_playset: true, error: None });
+        } else if close || resp.should_close() {
+            self.pick_upload = false;
+        }
     }
 
     /// The "new mod" sheet: name, version, tags; it shows where the mod will be made.
@@ -1914,6 +2080,11 @@ impl App {
                 if !running {
                     f.visibility = i + offset;
                 }
+            }
+            if existing.is_none() {
+                ui.add_space(12.0);
+                ui.label(RichText::new(tr(lang, "up.item_id")).size(12.5).color(SECONDARY));
+                theme::text_field(ui, &mut f.item_id, "", 240.0);
             }
             ui.add_space(12.0);
             ui.label(RichText::new(tr(lang, "up.note")).size(12.5).color(SECONDARY));
