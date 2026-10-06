@@ -12,3 +12,6 @@ path = "src/main.rs"
 stl-core = { path = "../stl-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+embed-resource = "3"

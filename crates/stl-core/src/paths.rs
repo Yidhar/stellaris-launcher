@@ -29,8 +29,26 @@ pub fn app_data_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(base).join("stellaris-launcher"))
 }
 
-/// The folders of the Steam libraries that may hold games (`...\steamapps`). Found once per process (it asks the registry through `reg.exe`,
-/// which costs a few process starts; the Mods page asks for every cover it shows).
+/// A string value from the registry (`HKEY_CURRENT_USER` or `HKEY_LOCAL_MACHINE`), read through the API: no `reg.exe`, which as a console
+/// program flashed a console window every time the windowed launcher started it.
+fn registry_string(local_machine: bool, key: &str, value: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (k, v) = (wide(key), wide(value));
+    let root = if local_machine { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+    let mut buf = vec![0u16; 1024];
+    let mut bytes = (buf.len() * 2) as u32;
+    let rc = unsafe { RegGetValueW(root, k.as_ptr(), v.as_ptr(), RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes) };
+    if rc != 0 {
+        return None;
+    }
+    let len = (bytes as usize / 2).min(buf.len());
+    let s = String::from_utf16_lossy(&buf[..len]).trim_end_matches('\0').to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The folders of the Steam libraries that may hold games (`...\steamapps`). Found once per process (the Mods page asks for every cover it
+/// shows).
 pub fn steam_libraries() -> Vec<PathBuf> {
     static LIBS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
     LIBS.get_or_init(find_steam_libraries).clone()
@@ -38,15 +56,10 @@ pub fn steam_libraries() -> Vec<PathBuf> {
 
 fn find_steam_libraries() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for key in [r"HKCU\Software\Valve\Steam", r"HKLM\SOFTWARE\WOW6432Node\Valve\Steam"] {
+    for (machine, key) in [(false, r"Software\Valve\Steam"), (true, r"SOFTWARE\WOW6432Node\Valve\Steam")] {
         for value in ["SteamPath", "InstallPath"] {
-            if let Ok(out) = std::process::Command::new("reg").args(["query", key, "/v", value]).output() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                for line in text.lines() {
-                    if let Some(rest) = line.split("REG_SZ").nth(1) {
-                        roots.push(PathBuf::from(rest.trim().replace('/', "\\")));
-                    }
-                }
+            if let Some(p) = registry_string(machine, key, value) {
+                roots.push(PathBuf::from(p.replace('/', "\\")));
             }
         }
     }

@@ -15,3 +15,6 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 rfd = "0.15"
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+[build-dependencies]
+embed-resource = "3"
