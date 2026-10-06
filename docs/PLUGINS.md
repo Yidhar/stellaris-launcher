@@ -78,11 +78,16 @@ Rules for the plugin:
 - An earlier version kept plugins in `%APPDATA%\stellaris-launcher\plugins`; they are moved here once (that folder becomes
   `plugins.migrated`).
 
-## A plugin that is loaded without the launcher
+## How plugins get into the game: only the launcher
 
-A proxy DLL in the game folder (a stand-in for a library the game loads) may load plugins itself. It should look in
-`Documents\Paradox Interactive\Stellaris\plugins\<id>\` (the Documents folder from `SHGetKnownFolderPath(FOLDERID_Documents)`), check
-`game.exe_timestamps` the same way, and load the DLL by its full path. The plugin then behaves the same whoever loaded it.
+Plugins are loaded **only by the launcher's injection** (above). There is no proxy-DLL / stand-in loading (`d3dx9_43.dll` or any other library
+the game looks for):
+
+- A plugin package contains nothing for the game folder, and a plugin never writes into the game folder.
+- A plugin does not load other plugins and does not install loaders.
+- Starting the game from Steam or the Paradox Launcher starts it **without** plugins; that is intended. Use `stl launch` or the Play button.
+- `DllMain` stays minimal (no waiting, no loading of libraries under the loader lock); start your work on a thread of your own, or from your
+  first hook. The game is already running when you are loaded: hook what exists, and do not assume you saw its start-up.
 
 ## Commands
 
