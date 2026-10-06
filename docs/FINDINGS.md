@@ -80,6 +80,12 @@ launcher on the Steam and Paradox platforms (`NoDrm` on Epic/GOG/Humble/Microsof
 mods, so changing the playset does not invalidate it. A launcher of ours should leave DLC state and the signature to the official launcher (or
 only read it); forging entitlements is out of scope.
 
+**What the game itself does with these** (strings of `stellaris.exe`, and file times): it knows the arguments `-pdx-launcher-session-token`,
+`-gdpr-compliant` and `-continuelastsave` (and `-nakama`, 14 mentions), reads `dlc_load.json`, hashes the directories of
+`checksum_manifest.txt` (`gfx/FX/.checksum_manifest.txt`), and **writes `dlc_signature` itself** ("Failed to create dlc signature file"; the file
+on this machine was rewritten at the time of a direct start by our scripts, with no launcher involved). So a direct start needs neither the launcher
+nor its signature; the launcher's job is the playset (writing `dlc_load.json`), the account token and the updates.
+
 ## 5. Updates
 
 The launcher updates itself in place of replacing: `cpatch.exe` talks to the launcher over a socket (`127.0.0.1:11000`), downloads xdelta patches
@@ -106,5 +112,7 @@ right after the game was spawned (it pauses patch operations while spawning). Mo
 
 1. Replacement launcher (start the game itself, own UI) or companion (leave the official launcher, add a DLL manager that cooperates with it)?
 2. What does the game do with `--pdx-launcher-session-token` when it is missing — which online features, if any, does a direct start lose?
+   (The token is a game argument; the code behind it is in the exe, not the launcher. Direct starts have worked for a month; a list of what is lost
+   needs a start with and without it.)
 3. Does the official launcher rewrite `dlc_load.json` on Play (to be confirmed by starting it once with a marker mod in the file)?
 4. Multiplayer: does the game compare plugin DLLs? (It hashes `checksum_manifest.txt` directories only — game files, not DLLs; to be confirmed.)
