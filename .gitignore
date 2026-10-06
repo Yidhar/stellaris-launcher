@@ -1,0 +1,6 @@
+# the launcher's code is Paradox's: decoded copies and scratch work stay local, never committed
+decoded/
+work/
+*.sqlite
+*.sqlite-*
+__pycache__/
