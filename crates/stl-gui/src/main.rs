@@ -529,7 +529,7 @@ impl App {
         let _ = can_play;
         large_title(ui, "Stellaris", Some(&subtitle), |_| {});
         let avail = ui.available_rect_before_wrap();
-        let right_w = 350.0f32.min(avail.width() * 0.42);
+        let right_w = 320.0f32.min(avail.width() * 0.42);
         let gap = 22.0;
         let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - right_w - gap, avail.bottom()));
         let right_rect = Rect::from_min_max(pos2(avail.right() - right_w, avail.top()), avail.max);
@@ -572,37 +572,50 @@ impl App {
                 self.news.switched = now;
             }
             let hero_i = main[self.news.hero.min(main.len() - 1)];
-            let aspect = |assets: &mut Assets, c: &Card| -> f32 {
-                c.image.as_ref().and_then(|p| assets.image(p, 1400)).map(|t| (t.size.x / t.size.y).clamp(1.3, 3.2)).unwrap_or(2.0)
-            };
-            let hero_h = (width / aspect(&mut self.assets, &cards[hero_i])).min(ui.available_height() * 0.62);
-            let (hero_rect, _) = ui.allocate_exact_size(vec2(width, hero_h), Sense::hover());
-            self.draw_card(ui, &cards[hero_i], hero_rect, 20.0, "hero", &acts);
-            if main.len() > 1 {
-                let dots_y = hero_rect.bottom() - 14.0;
-                let total = main.len() as f32 * 14.0;
-                for k in 0..main.len() {
-                    let c = pos2(hero_rect.center().x - total / 2.0 + 7.0 + k as f32 * 14.0, dots_y);
-                    let r = Rect::from_center_size(c, Vec2::splat(14.0));
-                    if ui.interact(r, egui::Id::new(("dot", k)), Sense::click()).clicked() {
-                        self.news.hero = k;
-                        self.news.switched = now;
+            // every card at the size of its picture (one pixel a point, as the official launcher shows them), left to right and then down;
+            // only a card wider than the column is scaled down
+            let order: Vec<usize> = std::iter::once(hero_i).chain(others.iter().copied()).collect();
+            let gap = 12.0;
+            let sizes: Vec<Vec2> = order
+                .iter()
+                .map(|&i| {
+                    let s = cards[i].image.as_ref().and_then(|p| self.assets.image(p, 1400)).map(|t| t.size).unwrap_or(vec2(246.0, 230.0));
+                    if s.x > width { s * (width / s.x) } else { s }
+                })
+                .collect();
+            let mut offsets = Vec::new();
+            let (mut x, mut y, mut row_h) = (0.0f32, 0.0f32, 0.0f32);
+            for s in &sizes {
+                if x > 0.0 && x + s.x > width + 0.5 {
+                    x = 0.0;
+                    y += row_h + gap;
+                    row_h = 0.0;
+                }
+                offsets.push(vec2(x, y));
+                x += s.x + gap;
+                row_h = row_h.max(s.y);
+            }
+            let total_h = y + row_h;
+            egui::ScrollArea::vertical().id_salt("news").auto_shrink([false, false]).show(ui, |ui| {
+                let (area, _) = ui.allocate_exact_size(vec2(width, total_h), Sense::hover());
+                for (k, &i) in order.iter().enumerate() {
+                    let r = Rect::from_min_size(area.min + offsets[k], sizes[k]);
+                    self.draw_card(ui, &cards[i], r, 16.0, &format!("card{k}"), &acts);
+                    if k == 0 && main.len() > 1 {
+                        let total = main.len() as f32 * 14.0;
+                        for d in 0..main.len() {
+                            let c = pos2(r.center().x - total / 2.0 + 7.0 + d as f32 * 14.0, r.bottom() - 14.0);
+                            let hit = Rect::from_center_size(c, Vec2::splat(14.0));
+                            if ui.interact(hit, egui::Id::new(("dot", d)), Sense::click()).clicked() {
+                                self.news.hero = d;
+                                self.news.switched = now;
+                            }
+                            ui.painter().circle_filled(c, 3.5, if d == self.news.hero { Color32::WHITE } else { theme::white(110) });
+                        }
+                        ui.ctx().request_repaint_after(Duration::from_secs(1));
                     }
-                    ui.painter().circle_filled(c, 3.5, if k == self.news.hero { Color32::WHITE } else { theme::white(110) });
                 }
-                ui.ctx().request_repaint_after(Duration::from_secs(1));
-            }
-            ui.add_space(14.0);
-            let n = others.len().min(4);
-            if n > 0 {
-                let tile_w = (width - 12.0 * (n as f32 - 1.0)) / n as f32;
-                let tile_h = others.iter().take(n).map(|&i| tile_w / aspect(&mut self.assets, &cards[i])).fold(f32::MAX, f32::min).clamp(70.0, 170.0);
-                let (row, _) = ui.allocate_exact_size(vec2(width, tile_h), Sense::hover());
-                for (k, &i) in others.iter().take(n).enumerate() {
-                    let r = Rect::from_min_size(pos2(row.left() + k as f32 * (tile_w + 12.0), row.top()), vec2(tile_w, tile_h));
-                    self.draw_card(ui, &cards[i], r, 16.0, &format!("tile{k}"), &acts);
-                }
-            }
+            });
         }
         if self.news.rx.is_some() || self.assets.busy() {
             ui.ctx().request_repaint_after(Duration::from_millis(300));
