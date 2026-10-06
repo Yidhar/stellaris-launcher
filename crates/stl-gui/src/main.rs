@@ -1861,11 +1861,7 @@ impl App {
     fn page_settings(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let acts = Acts::default();
-        large_title(ui, tr(lang, "set.title"), None, |ui| {
-            if pill_button(ui, tr(lang, "set.reload"), ButtonStyle::Tinted(BLUE), true).clicked() {
-                acts.push(Act::Reload);
-            }
-        });
+        ui.add_space(8.0);
         egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
             let w = ui.available_width().min(820.0);
             ui.set_max_width(w);
@@ -1985,6 +1981,12 @@ impl App {
                         });
                     }, |_| {});
                 }
+                // read the game, the mods, the plugins and the news again (the button the page title used to carry)
+                rows.row(ui, 48.0, 140.0, false, |ui| { ui.label(RichText::new(tr(lang, "set.reload_hint")).color(SECONDARY)); }, |ui| {
+                    if pill_button(ui, tr(lang, "set.reload"), ButtonStyle::Tinted(BLUE), true).clicked() {
+                        acts.push(Act::Reload);
+                    }
+                });
             });
             // account
             theme::section(ui, tr(lang, "set.account"));
