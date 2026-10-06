@@ -9,6 +9,7 @@ pub mod gamesettings;
 pub mod import;
 pub mod ironman;
 pub mod leveldb;
+pub mod selfupdate;
 pub mod launch;
 pub mod modmake;
 pub mod mods;

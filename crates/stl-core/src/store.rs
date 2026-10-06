@@ -54,6 +54,9 @@ pub struct Store {
     /// the Play page's news strip is folded away to the side
     #[serde(default)]
     pub news_folded: Option<bool>,
+    /// look for a newer launcher on start and download it in the background; None = yes
+    #[serde(default)]
+    pub auto_update: Option<bool>,
     /// the Mods page: `name`, `updated` or `source`; and `list` or `compact`
     #[serde(default)]
     pub mods_sort: Option<String>,

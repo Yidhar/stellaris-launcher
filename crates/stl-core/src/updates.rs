@@ -14,6 +14,9 @@ pub struct Release {
     /// the tag without a leading `v`
     pub version: String,
     pub page: String,
+    /// the release notes (Markdown)
+    pub notes: String,
+    pub prerelease: bool,
     pub assets: Vec<(String, String)>,
 }
 
@@ -74,7 +77,14 @@ pub fn parse_release(json: &str) -> Result<Release> {
         .as_array()
         .map(|a| a.iter().filter_map(|x| Some((x["name"].as_str()?.to_string(), x["browser_download_url"].as_str()?.to_string()))).collect())
         .unwrap_or_default();
-    Ok(Release { version: tag.trim_start_matches(['v', 'V']).to_string(), page: d["html_url"].as_str().unwrap_or("").to_string(), tag, assets })
+    Ok(Release {
+        version: tag.trim_start_matches(['v', 'V']).to_string(),
+        page: d["html_url"].as_str().unwrap_or("").to_string(),
+        notes: d["body"].as_str().unwrap_or("").to_string(),
+        prerelease: d["prerelease"].as_bool().unwrap_or(false),
+        tag,
+        assets,
+    })
 }
 
 /// `owner/repo` from what a manifest may hold (`owner/repo`, or a github.com URL).

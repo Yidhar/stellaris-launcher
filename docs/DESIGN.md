@@ -35,6 +35,8 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
 | `dlc` | the installed DLC (`dlc/*/*.dlc`): name, category, Steam id, thumbnail; the playset's `disabled_dlcs` goes into `dlc_load.json` at launch |
 | `news`, `net` | the public news-card feed (Braze content cards, anonymous GET over WinHTTP) and the official launcher's cache of it; pictures cached under `%APPDATA%\stellaris-launcher\cache` |
 | `artwork` | background and logo pictures found in the Paradox Launcher's theme cache and Steam's library cache (read only) |
+| `selfupdate` | the launcher's own updates: latest GitHub release → download + SHA-256 check → staged in `%APPDATA%\stellaris-launcher\update\<version>` → installed next to the exe (running files renamed to `.old`, rolled back on failure) |
+| `leveldb` | a read-only LevelDB reader (tables, journal, snappy) for the official launcher's Local Storage, where it keeps the signed-in account's news cards |
 | `launch` | the sequence: playset → mods → plugin checks → seed files → spawn → wait for the window → load plugins |
 
 ## Decisions
@@ -61,12 +63,18 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
    a blur shader. Lists are inset groups with hairlines, switches are green capsules, pages are a bottom tab bar. Icons are strokes, so no icon
    font is needed. Texts come from `i18n.rs` (English, 简体, 繁體, 日本語, 한국어, Deutsch, Français, Español, Русский); a test checks every language
    has every key and the same placeholders.
-8. **Rust, `windows-sys`, `rusqlite` (bundled), `serde`**: one static exe of a few MB. The same crate serves the CLI and the window.
+8. **The launcher updates itself, never silently replacing a running program.** A newer release is downloaded and checked in the background and
+   only *staged*; it is installed when the launcher restarts (the title-bar button, or the next start). Each replaced file is first renamed to
+   `.old`, so an update that fails half-way puts everything back; a release without a published SHA-256 is refused; a build run from cargo's
+   `target\` is never replaced. The version installed last is remembered and not offered again, so a release whose tag says more than its build
+   cannot loop; CI also refuses to publish a tag that differs from `Cargo.toml`. `STL_UPDATE_REPO` / `STL_UPDATE_API` point it elsewhere
+   (a fork, or a local server standing in for GitHub in tests).
+9. **Rust, `windows-sys`, `rusqlite` (bundled), `serde`**: one static exe of a few MB. The same crate serves the CLI and the window.
 
 ## Roadmap
 
 1. **Done:** the core, the CLI, plugin loading, playsets and import; tests of every module; a live run against the real game.
 2. **Done:** the window (Play with news, Playsets with Mods | DLC | Plugins, Mods library, Plugins, Settings); drag-to-reorder mods is still up/down buttons.
 3. Mod conflict report (files two mods both provide, with the load-order winner) — the feature the official launcher hides behind a flag.
-4. Release builds in CI, a zip with `stl.exe` and the window.
+4. **Done:** release builds in CI, a zip with `stl.exe` and the window; the launcher updates itself from those releases.
 5. Plugin dependencies and update checks.

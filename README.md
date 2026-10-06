@@ -25,7 +25,13 @@ stl news [--refresh]                    the news cards of the official launcher'
 stl plugin install <folder> [--link]    DLL plugins (see docs/PLUGINS.md); stl plugin enable <id>
 stl launch [--continue] [--playset X]   write dlc_load.json, start the game, load the plugins
 stl stop                                close the game
+stl self-update [--check]               update the launcher from its GitHub releases (with the window closed)
 ```
+
+**Updates.** The window looks for a newer release of the launcher when it starts (and every six hours while it runs), downloads it in the
+background, checks it against the `.sha256` published beside the zip and keeps it in `%APPDATA%\stellaris-launcher\update`. A button in the title
+bar then shows the release notes and restarts into the new version; or the next start installs it before the window opens. The running exe is
+renamed to `.old` (Windows allows that, not overwriting it) and removed on the following start. Switch it off in Settings → Launcher updates.
 
 ## How it differs from the Paradox Launcher
 
@@ -38,6 +44,7 @@ stl stop                                close the game
 - Your playsets are ours (`%APPDATA%\stellaris-launcher\playsets.json`), imported once from the official database, which is never written.
   Each playset can also switch DLC off (`disabled_dlcs` of `dlc_load.json`, which is what the official launcher edits); a playset that never set
   it leaves the file's list alone. `dlc_signature` is the game's own and is never touched.
+- **It updates itself** from its GitHub releases (above); the Paradox Launcher's own updater is not involved.
 - **DLL plugins are first class**: a manifest next to the DLL, per-playset on/off, a check that the plugin was made for the installed game build,
   loaded once the game's window exists.
 

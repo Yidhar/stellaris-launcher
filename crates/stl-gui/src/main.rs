@@ -169,6 +169,9 @@ enum Act {
     SetBackground(&'static str),
     SetNewsOnline(bool),
     FoldNews(bool),
+    CheckSelfUpdate,
+    InstallSelfUpdate,
+    SetAutoUpdate(bool),
     ChangeGameDir,
     UseGameDir(String),
     Open(String),
@@ -200,9 +203,74 @@ impl Acts {
     }
 }
 
+/// Release notes as GitHub writes them, read plainly: headings in bold, list items with a bullet, `**` and backticks dropped.
+fn release_notes(ui: &mut Ui, md: &str) {
+    ui.spacing_mut().item_spacing.y = 4.0;
+    for line in md.lines() {
+        let t = line.trim_end();
+        let plain = |s: &str| s.replace("**", "").replace('`', "");
+        if t.trim().is_empty() {
+            ui.add_space(4.0);
+        } else if let Some(h) = t.trim_start().strip_prefix('#') {
+            ui.label(RichText::new(plain(h.trim_start_matches('#').trim())).size(15.0).family(bold()));
+        } else if let Some(item) = t.trim_start().strip_prefix("- ").or_else(|| t.trim_start().strip_prefix("* ")) {
+            let indent = (t.len() - t.trim_start().len()) as f32 * 4.0;
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(indent);
+                ui.label(RichText::new(format!("•  {}", plain(item))).size(13.5));
+            });
+        } else {
+            ui.add(egui::Label::new(RichText::new(plain(t)).size(13.5)).wrap());
+        }
+    }
+}
+
+thread_local! {
+    static CTX: std::cell::RefCell<Option<egui::Context>> = const { std::cell::RefCell::new(None) };
+}
+
+fn set_ctx_of_acts(ctx: &egui::Context) {
+    CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+}
+
+/// The window's context, for actions that close or reopen it.
+fn ctx_of_acts() -> Option<egui::Context> {
+    CTX.with(|c| c.borrow().clone())
+}
+
 /// The news cards' height.
 fn news_card_height(_ui: &Ui) -> f32 {
     128.0
+}
+
+/// The launcher's own update: looked for on start (and every few hours), downloaded in the background, installed on a restart.
+#[derive(Default)]
+struct SelfUpdate {
+    rx: Option<Receiver<SelfUpdateMsg>>,
+    phase: SelfPhase,
+    /// the sheet with the release notes is open
+    sheet: bool,
+    /// when it was last looked for
+    checked: Option<Instant>,
+    /// the user asked (Settings): say so when it is up to date
+    manual: bool,
+    install_error: Option<String>,
+}
+
+#[derive(Default, Clone, PartialEq)]
+enum SelfPhase {
+    #[default]
+    Idle,
+    Checking,
+    Downloading(String),
+    Ready(stl_core::selfupdate::Staged),
+    UpToDate,
+    Failed(String),
+}
+
+enum SelfUpdateMsg {
+    Downloading(String),
+    Done(SelfPhase),
 }
 
 struct News {
@@ -242,6 +310,7 @@ struct App {
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
+    self_update: SelfUpdate,
     /// the game's graphics settings, and the monitors (read when the Settings page is first shown)
     gfx: Option<Graphics>,
     displays: Vec<gamesettings::Display>,
@@ -349,6 +418,7 @@ impl App {
             make: None,
             config: None,
             updates: PluginUpdates::default(),
+            self_update: SelfUpdate::default(),
             gfx: None,
             displays: Vec::new(),
             gfx_status: None,
@@ -380,7 +450,7 @@ impl App {
         };
         app.reload();
         app.lang = resolve_lang(&app.store, &app.game);
-        // for screenshots while developing: --page=1 --seg=1 --lang=ja --popup --many=30 --make --upload=<part of a mod name>
+        // for screenshots while developing: --page=1 --seg=1 --lang=ja --popup --many=30 --make --upload=<part of a mod name> --update-sheet --popup=<id>
         for a in std::env::args().skip(1) {
             if let Some(v) = a.strip_prefix("--page=") {
                 app.page = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied().unwrap_or(Page::Play);
@@ -404,6 +474,8 @@ impl App {
                 if let Some(m) = app.mods.iter().find(|m| m.name.contains(v)) {
                     app.acts.push(Act::OpenUpload(m.id.clone()));
                 }
+            } else if a == "--update-sheet" {
+                app.self_update.sheet = true;
             } else if a == "--popup" {
                 app.dev_popup = Some("playset-popup".into());
             } else if let Some(v) = a.strip_prefix("--popup=") {
@@ -421,6 +493,12 @@ impl App {
         app.load_news_local();
         if app.store.news_online != Some(false) {
             app.refresh_news();
+        }
+        // a release downloaded earlier and not installed yet shows at once; otherwise look for one
+        if let Some(s) = stl_core::selfupdate::staged() {
+            app.self_update.phase = SelfPhase::Ready(s);
+        } else if app.store.auto_update != Some(false) {
+            app.check_self_update(false);
         }
         app
     }
@@ -725,6 +803,86 @@ impl App {
         }
     }
 
+    /// Looks for a newer launcher and, when there is one, downloads and unpacks it beside (never over) the running one.
+    fn check_self_update(&mut self, manual: bool) {
+        if self.self_update.rx.is_some() || matches!(self.self_update.phase, SelfPhase::Ready(_)) {
+            return;
+        }
+        let (tx, rx) = channel();
+        self.self_update.rx = Some(rx);
+        self.self_update.phase = SelfPhase::Checking;
+        self.self_update.checked = Some(Instant::now());
+        self.self_update.manual = manual;
+        std::thread::spawn(move || {
+            use stl_core::selfupdate as su;
+            let phase = match su::check() {
+                Ok(None) => SelfPhase::UpToDate,
+                Err(e) => SelfPhase::Failed(format!("{e:#}")),
+                Ok(Some(a)) => {
+                    let _ = tx.send(SelfUpdateMsg::Downloading(a.release.version.clone()));
+                    match su::stage(&a) {
+                        Ok(s) => SelfPhase::Ready(s),
+                        Err(e) => SelfPhase::Failed(format!("{e:#}")),
+                    }
+                }
+            };
+            let _ = tx.send(SelfUpdateMsg::Done(phase));
+        });
+    }
+
+    fn drain_self_update(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.self_update.rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(SelfUpdateMsg::Downloading(v)) => self.self_update.phase = SelfPhase::Downloading(v),
+                    Ok(SelfUpdateMsg::Done(p)) => {
+                        if let SelfPhase::Failed(e) = &p {
+                            self.say(format!("launcher update: {e}"));
+                        }
+                        self.self_update.phase = p;
+                        self.self_update.rx = None;
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(250));
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.self_update.rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+        // while it runs, look again every six hours
+        let due = self.self_update.checked.is_some_and(|t| t.elapsed() > Duration::from_secs(6 * 3600));
+        if due && self.store.auto_update != Some(false) && matches!(self.self_update.phase, SelfPhase::UpToDate | SelfPhase::Failed(_)) {
+            self.check_self_update(false);
+        }
+    }
+
+    /// Puts the downloaded release in place, starts it and closes this window.
+    fn install_self_update(&mut self, ctx: Option<egui::Context>) {
+        let SelfPhase::Ready(s) = self.self_update.phase.clone() else { return };
+        self.save();
+        match stl_core::selfupdate::install(&s) {
+            Ok(exe) => {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                match std::process::Command::new(&exe).args(&args).spawn() {
+                    Ok(_) => {
+                        if let Some(ctx) = ctx {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        } else {
+                            std::process::exit(0);
+                        }
+                    }
+                    Err(e) => self.self_update.install_error = Some(format!("{}: {e}", exe.display())),
+                }
+            }
+            Err(e) => self.self_update.install_error = Some(format!("{e:#}")),
+        }
+    }
+
     fn drain_upload(&mut self) {
         let mut finished = None;
         if let Some(f) = self.upload.as_mut() {
@@ -920,6 +1078,15 @@ impl App {
             Act::SetBackground(b) => {
                 self.store.background = Some(b.to_string());
                 self.save();
+            }
+            Act::CheckSelfUpdate => self.check_self_update(true),
+            Act::InstallSelfUpdate => self.install_self_update(ctx_of_acts()),
+            Act::SetAutoUpdate(on) => {
+                self.store.auto_update = Some(on);
+                self.save();
+                if on && matches!(self.self_update.phase, SelfPhase::Idle | SelfPhase::Failed(_)) {
+                    self.check_self_update(false);
+                }
             }
             Act::FoldNews(f) => {
                 self.store.news_folded = Some(f);
@@ -2127,6 +2294,41 @@ impl App {
                 });
             });
             theme::footnote(ui, tr(lang, "set.news_note"));
+            // the launcher's own updates
+            theme::section(ui, tr(lang, "upd.section"));
+            glass(ui, 16.0, 0.0, |ui| {
+                let mut rows = Rows::new();
+                rows.row(ui, 48.0, 46.0, false, |ui| { ui.label(tr(lang, "upd.auto")); }, |ui| {
+                    let mut on = self.store.auto_update != Some(false);
+                    if switch(ui, &mut on).changed() {
+                        acts.push(Act::SetAutoUpdate(on));
+                    }
+                });
+                let status = match &self.self_update.phase {
+                    SelfPhase::Idle => tr_args(lang, "upd.version", &[stl_core::selfupdate::current_version()]),
+                    SelfPhase::Checking => tr(lang, "upd.checking").to_string(),
+                    SelfPhase::Downloading(v) => tr_args(lang, "upd.downloading", &[v]),
+                    SelfPhase::Ready(s) => tr_args(lang, "upd.ready", &[&s.version]),
+                    SelfPhase::UpToDate => tr_args(lang, "upd.up_to_date", &[stl_core::selfupdate::current_version()]),
+                    SelfPhase::Failed(e) => format!("{} {e}", tr(lang, "upd.failed")),
+                };
+                let failed = matches!(self.self_update.phase, SelfPhase::Failed(_));
+                let ready = matches!(self.self_update.phase, SelfPhase::Ready(_));
+                let busy = self.self_update.rx.is_some();
+                rows.row(ui, 52.0, 150.0, false, |ui| {
+                    ui.add(egui::Label::new(RichText::new(status).size(13.5).color(if failed { RED } else { SECONDARY })).wrap());
+                }, |ui| {
+                    if ready {
+                        if pill_button(ui, tr(lang, "upd.install"), ButtonStyle::Filled(BLUE), true).clicked() {
+                            self.self_update.install_error = None;
+                            self.self_update.sheet = true;
+                        }
+                    } else if pill_button(ui, tr(lang, "upd.check"), ButtonStyle::Tinted(BLUE), !busy).clicked() {
+                        acts.push(Act::CheckSelfUpdate);
+                    }
+                });
+            });
+            theme::footnote(ui, &tr_args(lang, "upd.note", &[&stl_core::selfupdate::repo()]));
             // about
             theme::section(ui, tr(lang, "set.about"));
             glass(ui, 16.0, 16.0, |ui| {
@@ -2221,6 +2423,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        set_ctx_of_acts(ctx);
         // development: STL_FRAME_LOG=1 prints the frames that took long (with the page on show)
         let frame_start = Instant::now();
         let _slow = SlowFrame(frame_start, self.page);
@@ -2237,6 +2440,7 @@ impl eframe::App for App {
         self.poll_process();
         self.drain_launch();
         self.drain_news();
+        self.drain_self_update(ctx);
         self.drain_upload();
         self.drain_updates();
         self.drain_ironman();
@@ -2321,6 +2525,7 @@ impl eframe::App for App {
         self.pick_sheet(ctx);
         self.config_sheet(ctx);
         self.make_sheet(ctx);
+        self.self_update_sheet(ctx);
         self.upload_sheet(ctx);
         self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
@@ -2514,6 +2719,61 @@ impl App {
             self.make = Some(MakeForm { name: String::new(), version: "1.0.0".into(), tags: Vec::new(), add_to_playset: true, error: None });
         } else if close || resp.should_close() {
             self.pick_upload = false;
+        }
+    }
+
+    /// The new launcher's version and notes; restart into it now, or let the next start do it.
+    fn self_update_sheet(&mut self, ctx: &egui::Context) {
+        if !self.self_update.sheet {
+            return;
+        }
+        let SelfPhase::Ready(s) = self.self_update.phase.clone() else {
+            self.self_update.sheet = false;
+            return;
+        };
+        let lang = self.lang;
+        let mut close = false;
+        let mut install = false;
+        let resp = egui::Modal::new(egui::Id::new("self-update")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(RichText::new(tr_args(lang, "upd.title", &[&s.version])).size(22.0).family(bold()));
+            ui.label(RichText::new(tr_args(lang, "upd.current", &[stl_core::selfupdate::current_version()])).size(12.5).color(SECONDARY));
+            ui.add_space(12.0);
+            let notes = if s.notes.trim().is_empty() { tr(lang, "upd.no_notes").to_string() } else { s.notes.replace("\r\n", "\n") };
+            glass(ui, 12.0, 12.0, |ui| {
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    release_notes(ui, &notes);
+                });
+            });
+            if !s.page.is_empty() {
+                ui.add_space(6.0);
+                if ui.add(egui::Label::new(RichText::new(tr(lang, "upd.page")).size(12.5).color(BLUE)).sense(Sense::click())).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    open_link(&s.page);
+                }
+            }
+            ui.add_space(10.0);
+            ui.label(RichText::new(tr(lang, "upd.later_note")).size(12.5).color(SECONDARY));
+            if let Some(e) = &self.self_update.install_error {
+                ui.add_space(6.0);
+                ui.label(RichText::new(e).size(12.5).color(RED));
+            }
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill_button(ui, tr(lang, "upd.restart"), ButtonStyle::Filled(BLUE), self.running.is_empty()).clicked() {
+                    install = true;
+                }
+                if pill_button(ui, tr(lang, "upd.later"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                    close = true;
+                }
+                if !self.running.is_empty() {
+                    ui.label(RichText::new(tr(lang, "upd.game_running")).size(12.0).color(SECONDARY));
+                }
+            });
+        });
+        if close || resp.should_close() {
+            self.self_update.sheet = false;
+        } else if install {
+            self.acts.push(Act::InstallSelfUpdate);
         }
     }
 
@@ -2932,6 +3192,21 @@ impl App {
         if theme::window_button(&mut buttons, Icon::Minimize, false).clicked() {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         }
+        // the launcher's own update: quiet while it downloads, a small capsule once it can be installed
+        buttons.add_space(10.0);
+        match &self.self_update.phase {
+            SelfPhase::Ready(s) => {
+                let text = tr_args(self.lang, "upd.badge", &[&s.version]);
+                if theme::update_badge(&mut buttons, &text).on_hover_text(tr(self.lang, "upd.badge_hint")).clicked() {
+                    self.self_update.install_error = None;
+                    self.self_update.sheet = true;
+                }
+            }
+            SelfPhase::Downloading(v) => {
+                buttons.label(RichText::new(tr_args(self.lang, "upd.downloading", &[v])).size(12.0).color(SECONDARY));
+            }
+            _ => {}
+        }
     }
 
     /// The picture behind everything (dimmed), or a plain gradient while there is none; tells the glass cards which picture to blur.
@@ -2962,6 +3237,19 @@ impl App {
 }
 
 fn main() -> eframe::Result<()> {
+    // after an update: the replaced files; and a release downloaded last time is installed now, before anything is shown
+    stl_core::selfupdate::cleanup();
+    // (--update-sheet, for screenshots while developing, shows the sheet instead)
+    let auto = Store::load().map(|s| s.auto_update != Some(false)).unwrap_or(true) && !std::env::args().any(|a| a == "--update-sheet");
+    if auto {
+        if let Some(staged) = stl_core::selfupdate::staged() {
+            if let Ok(exe) = stl_core::selfupdate::install(&staged) {
+                if std::process::Command::new(&exe).args(std::env::args().skip(1)).spawn().is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 780.0])

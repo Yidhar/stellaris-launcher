@@ -17,6 +17,15 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches the version
+        # the launcher updates itself to the newest release by its tag and compares it with the version built in; a tag that says more than
+        # the build would be offered again and again
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $built = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $tag = $env:GITHUB_REF_NAME.TrimStart('v')
+          if ($tag -ne $built) { throw "tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($built)" }
       - name: Tests
         run: cargo test --workspace --locked
       - name: Build
@@ -42,4 +51,5 @@ jobs:
             A launcher for Stellaris that starts the game itself and manages playsets, mods and DLL plugins. Windows x64, Stellaris 4.5.
             Unpack and run `stellaris-launcher.exe` (the window) or `stl.exe` (the command line; `stl --help`). `stl import-official` copies your
             playsets from the Paradox Launcher (its database is only read). Nothing is installed; your data is in `%APPDATA%\stellaris-launcher`.
-            See docs/DESIGN.md and docs/PLUGINS.md.
+            The launcher looks for newer releases here, downloads them in the background (checked against the .sha256 beside the zip)
+            and installs them when it restarts. See docs/DESIGN.md and docs/PLUGINS.md.

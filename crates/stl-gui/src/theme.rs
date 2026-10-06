@@ -43,9 +43,16 @@ fn cr(r: f32) -> CornerRadius {
 /// Segoe UI for Latin and Cyrillic; behind it a CJK font, the one of the language first (Han characters differ between Chinese and Japanese).
 pub fn install_fonts(ctx: &egui::Context, lang: Lang) {
     let mut fonts = egui::FontDefinitions::default();
-    let dir = r"C:\Windows\Fonts";
+    // the system's font folder (wherever Windows is installed), then the user's own (fonts installed without admin rights)
+    let dirs: Vec<std::path::PathBuf> = [
+        std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR")).map(|w| std::path::PathBuf::from(w).join("Fonts")),
+        std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join("Microsoft").join("Windows").join("Fonts")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mut load = |name: &str, file: &str| -> bool {
-        match std::fs::read(format!(r"{dir}\{file}")) {
+        match dirs.iter().find_map(|d| std::fs::read(d.join(file)).ok()).ok_or(()) {
             Ok(bytes) => {
                 fonts.font_data.insert(name.to_string(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
                 true
@@ -609,6 +616,17 @@ pub fn circle_button(ui: &mut Ui, icon: Icon, fill: Color32, fg: Color32, enable
 }
 
 /// A button of the window's title bar: a small round glass button; the close one turns red.
+/// The title bar's "an update is ready" capsule: small, blue, an arrow and the text.
+pub fn update_badge(ui: &mut Ui, text: &str) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(12.5, FontFamily::Proportional), LABEL);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 40.0, 26.0), Sense::click());
+    let lit = ui.ctx().animate_bool_with_time(resp.id.with("lit"), resp.hovered(), 0.15);
+    ui.painter().rect_filled(rect, cr(13.0), BLUE.gamma_multiply(0.78 + 0.22 * lit));
+    Icon::Download.draw(ui.painter(), pos2(rect.left() + 16.0, rect.center().y), 13.0, LABEL, 1.8);
+    ui.painter().galley(pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub fn window_button(ui: &mut Ui, icon: Icon, danger: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
     let fill = if resp.is_pointer_button_down_on() {
@@ -695,6 +713,7 @@ pub enum Icon {
     Left,
     Right,
     Upload,
+    Download,
     ViewList,
     ViewCompact,
     Globe,
@@ -799,6 +818,11 @@ impl Icon {
             Icon::Upload => {
                 line(vec![at(0.0, 0.2), at(0.0, -0.36)]);
                 line(vec![at(-0.2, -0.16), at(0.0, -0.36), at(0.2, -0.16)]);
+                line(vec![at(-0.36, 0.12), at(-0.36, 0.36), at(0.36, 0.36), at(0.36, 0.12)]);
+            }
+            Icon::Download => {
+                line(vec![at(0.0, -0.36), at(0.0, 0.2)]);
+                line(vec![at(-0.2, 0.0), at(0.0, 0.2), at(0.2, 0.0)]);
                 line(vec![at(-0.36, 0.12), at(-0.36, 0.36), at(0.36, 0.36), at(0.36, 0.12)]);
             }
             Icon::Up => line(vec![at(-0.3, 0.14), at(0.0, -0.16), at(0.3, 0.14)]),

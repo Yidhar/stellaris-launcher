@@ -338,15 +338,6 @@ pub fn refresh(game_id: &str, platform: &str, language: &str) -> Result<Vec<Card
 mod tests {
     use super::*;
 
-    const FEED: &str = r#"{
-      "secondary-1": { "slotType": "secondary-1", "contentGroups": [ { "contentItems": [
-        { "id": "b", "content": { "title": {"en": "Patch notes", "de": "Patchnotizen"}, "text": {"en": "x"}, "image": {"src": "https://img/b.jpg?1"}, "link": {"href": "https://forum/x"} } } ] } ] },
-      "main": { "slotType": "main", "contentGroups": [ { "contentItems": [
-        { "id": "a", "content": { "title": {"en": ""}, "text": {"en": ""}, "image": {"src": "https://img/a.png"}, "link": {"href": "https://shop/y"} } },
-        { "id": "dup", "content": { "title": {"en": ""}, "text": {"en": ""}, "image": {"src": "https://img/a.png"}, "link": {"href": "https://shop/y"} } },
-        { "id": "empty", "content": { "title": {"en": ""}, "text": {"en": ""}, "image": {"src": ""}, "link": {} } } ] } ] }
-    }"#;
-
     #[test]
     fn picks_one_visible_group_per_slot_like_the_official_launcher() {
         let feed = r#"{

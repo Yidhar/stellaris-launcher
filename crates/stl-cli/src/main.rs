@@ -38,6 +38,12 @@ enum Cmd {
     },
     /// start the Steam API, say which game and account it sees, stop it (changes nothing)
     WorkshopCheck,
+    /// update the launcher itself from its GitHub releases (the window must be closed; the new files replace the ones next to stl.exe)
+    SelfUpdate {
+        /// only say whether there is a newer version
+        #[arg(long)]
+        check: bool,
+    },
     /// list the playsets
     Playsets,
     /// work with a playset
@@ -505,6 +511,34 @@ fn run() -> Result<()> {
                     }
                 }
             }
+        }
+        Cmd::SelfUpdate { check } => {
+            use stl_core::selfupdate as su;
+            stl_core::selfupdate::cleanup();
+            println!("stellaris-launcher {} (releases: github.com/{})", su::current_version(), su::repo());
+            let staged = match su::staged() {
+                Some(s) => s,
+                None => match su::check()? {
+                    None => {
+                        println!("up to date");
+                        return Ok(());
+                    }
+                    Some(a) => {
+                        println!("newer: {} ({})", a.release.version, a.zip.0);
+                        if *check {
+                            return Ok(());
+                        }
+                        println!("downloading and checking {} …", a.zip.0);
+                        su::stage(&a)?
+                    }
+                },
+            };
+            if *check {
+                println!("{} is downloaded and ready to install", staged.version);
+                return Ok(());
+            }
+            let exe = su::install(&staged)?;
+            println!("installed {} into {}", staged.version, exe.parent().map(|p| p.display().to_string()).unwrap_or_default());
         }
         Cmd::WorkshopCheck => {
             let game = open_game(&cli, &store)?;
