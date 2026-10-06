@@ -288,6 +288,14 @@ pub fn list() -> Result<(Vec<Plugin>, Vec<String>)> {
     let dir = plugins_dir()?;
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                // what an earlier replacement left while the game still held it; gone once the game has let go
+                if name.ends_with(".old") || name.ends_with(".removed") {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+                continue;
+            }
             if e.path().is_dir() {
                 match load_dir(&e.path(), false) {
                     Ok(p) => plugins.push(p),
@@ -345,31 +353,56 @@ pub fn install(src: &Path, link: bool) -> Result<Plugin> {
         write_links(&links)?;
         return Ok(probe);
     }
-    let dst = plugins_dir()?.join(&probe.manifest.id);
-    // an update keeps the user's settings: config/ is set aside, the new version copied, and the old files put back over the new defaults
-    let mut kept: Vec<(std::ffi::OsString, Vec<u8>)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dst.join(CONFIG_DIR)) {
-        for e in rd.flatten() {
-            if e.path().is_file() {
-                if let Ok(bytes) = std::fs::read(e.path()) {
-                    kept.push((e.file_name(), bytes));
-                }
-            }
+    let root = plugins_dir()?;
+    std::fs::create_dir_all(&root)?;
+    let dst = root.join(&probe.manifest.id);
+    // Everything is prepared beside the installed plugin first, and the two folders are then swapped by renaming, so that a failure at any
+    // point (a DLL the game holds, a full disk) leaves the installed plugin and its settings exactly as they were.
+    let staging = root.join(format!(".{}.new", probe.manifest.id));
+    let _ = std::fs::remove_dir_all(&staging);
+    let prepared = (|| -> Result<()> {
+        copy_dir(&src, &staging)?;
+        // an update keeps the user's settings: the installed config/ goes over the new defaults
+        let old_config = dst.join(CONFIG_DIR);
+        if old_config.is_dir() {
+            copy_dir(&old_config, &staging.join(CONFIG_DIR))?;
         }
+        load_dir(&staging, false)?.ensure_config()?;
+        Ok(())
+    })();
+    if let Err(e) = prepared {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e.context(format!("{} was not changed", dst.display())));
     }
-    if dst.exists() {
-        std::fs::remove_dir_all(&dst).with_context(|| format!("cannot replace {} (is the game running with it loaded?)", dst.display()))?;
+    if let Err(e) = swap_in(&staging, &dst) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
     }
-    copy_dir(&src, &dst)?;
-    if !kept.is_empty() {
-        std::fs::create_dir_all(dst.join(CONFIG_DIR))?;
-        for (name, bytes) in kept {
-            std::fs::write(dst.join(CONFIG_DIR).join(name), bytes)?;
+    load_dir(&dst, false)
+}
+
+/// Puts `staging` in the place of `dst`: `dst` is first renamed aside (which fails, changing nothing, while the game holds a file in it), then
+/// `staging` renamed to `dst`, then the old folder deleted (or left as `.<id>.old` if something still holds it; the next install removes it).
+fn swap_in(staging: &Path, dst: &Path) -> Result<()> {
+    let name = dst.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let aside = dst.with_file_name(format!(".{name}.old"));
+    if aside.exists() {
+        std::fs::remove_dir_all(&aside).with_context(|| format!("an earlier replaced copy {} is still in use (close the game)", aside.display()))?;
+    }
+    let had_old = dst.exists();
+    if had_old {
+        std::fs::rename(dst, &aside).with_context(|| format!("cannot replace {}: a file in it is in use (close the game first); nothing was changed", dst.display()))?;
+    }
+    if let Err(e) = std::fs::rename(staging, dst) {
+        if had_old {
+            let _ = std::fs::rename(&aside, dst);
         }
+        return Err(anyhow::Error::from(e).context(format!("cannot put the new version in {}; the installed one was kept", dst.display())));
     }
-    let p = load_dir(&dst, false)?;
-    p.ensure_config()?;
-    Ok(p)
+    if had_old {
+        let _ = std::fs::remove_dir_all(&aside);
+    }
+    Ok(())
 }
 
 pub fn remove(id: &str) -> Result<()> {
@@ -378,7 +411,13 @@ pub fn remove(id: &str) -> Result<()> {
         let links: Vec<PathBuf> = read_links().into_iter().filter(|l| *l != p.dir).collect();
         write_links(&links)
     } else {
-        std::fs::remove_dir_all(&p.dir).with_context(|| format!("cannot remove {} (is the game running with it loaded?)", p.dir.display()))
+        // renamed aside first, so that a held file makes the removal fail whole instead of half-way
+        let name = p.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let aside = p.dir.with_file_name(format!(".{name}.removed"));
+        let _ = std::fs::remove_dir_all(&aside);
+        std::fs::rename(&p.dir, &aside).with_context(|| format!("cannot remove {}: a file in it is in use (close the game first); nothing was changed", p.dir.display()))?;
+        let _ = std::fs::remove_dir_all(&aside);
+        Ok(())
     }
 }
 
@@ -442,6 +481,31 @@ mod tests {
         assert!(parse_manifest(r#"{"id":"p","name":"P","dll":"p.dll","config":[{"file":"../x.ini"}]}"#).is_err());
         assert!(parse_manifest(r#"{"id":"p","name":"P","dll":"p.dll","config":[{"file":"sub/x.ini"}]}"#).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_held_file_leaves_the_installed_folder_untouched() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!("stl-test-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dst = root.join("p");
+        let staging = root.join(".p.new");
+        std::fs::create_dir_all(dst.join("config")).unwrap();
+        std::fs::write(dst.join("p.dll"), b"old").unwrap();
+        std::fs::write(dst.join("config/p.ini"), b"mine").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("p.dll"), b"new").unwrap();
+        {
+            // held the way a loaded DLL is: no sharing of delete
+            let _held = std::fs::OpenOptions::new().read(true).share_mode(1).open(dst.join("p.dll")).unwrap();
+            assert!(swap_in(&staging, &dst).is_err());
+            assert_eq!(std::fs::read(dst.join("p.dll")).unwrap(), b"old");
+            assert_eq!(std::fs::read(dst.join("config/p.ini")).unwrap(), b"mine");
+        }
+        swap_in(&staging, &dst).unwrap();
+        assert_eq!(std::fs::read(dst.join("p.dll")).unwrap(), b"new");
+        assert!(!staging.exists() && !root.join(".p.old").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

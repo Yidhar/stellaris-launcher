@@ -74,14 +74,16 @@ Rules for the plugin:
 ## What the launcher does
 
 - **Install** (`stl plugin install <folder>`, or the Plugins page): copies the folder to `plugins\<id>\`. Over an existing install it keeps the
-  files of `config\` (the user's settings win over new defaults), then makes the declared settings files that are missing.
+  files of `config\` (the user's settings win over new defaults), then makes the declared settings files that are missing. The new version is
+  prepared in `plugins\.<id>.new\` and swapped in by renaming, so a failure leaves the installed plugin untouched. While the game runs it
+  keeps the old DLL (the old folder waits as `.<id>.old` and is deleted once released); the new version loads at the next start.
 - **Link** (`--link`, "Link a plugin under development"): uses the folder where it is (for development); its `config\` is in that folder.
 - **Launch**: skips (and says why) a plugin that is not installed, whose DLL is missing, or that lists builds not including this one; makes
   missing settings files; starts the game; waits for its window and `delay_ms`; loads each plugin with `LoadLibraryW` in a remote thread. A
   plugin already in the process is not loaded twice. The launcher never calls `FreeLibrary` in the game.
 - **Updates**: the Plugins page checks every plugin that has `update` once per session (and on *Check for updates*); a newer release shows
   a badge and an *Update* button, which downloads the zip, checks its SHA-256, and installs it like any plugin folder (the user's `config\`
-  is kept). The game must be closed (its DLL is in use). A linked plugin is not updated. `stl plugin update [<id>] [--check]` does the same.
+  is kept). While the game runs, the update takes effect at its next start. A linked plugin is not updated. `stl plugin update [<id>] [--check]` does the same.
 - **Settings**: the gear button of a plugin opens its `config\` files as text, with *Save*, *Restore default* and *Open folder*.
 - An earlier version kept plugins in `%APPDATA%\stellaris-launcher\plugins`; they are moved here once (that folder becomes
   `plugins.migrated`).

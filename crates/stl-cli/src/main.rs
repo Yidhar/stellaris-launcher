@@ -551,11 +551,11 @@ fn run() -> Result<()> {
                         Ok(Some(a)) => {
                             println!("{} {} -> {}  ({})", p.manifest.id, p.manifest.version, a.release.version, a.release.page);
                             if !*check {
-                                if !process::find_processes("stellaris.exe").is_empty() {
-                                    bail!("close the game first: its DLL is in use");
-                                }
                                 let n = stl_core::updates::apply(p, &a)?;
                                 println!("  installed {} {}", n.manifest.id, n.manifest.version);
+                                if !process::find_processes("stellaris.exe").is_empty() {
+                                    println!("  the running game keeps the old version until it is started again");
+                                }
                             }
                         }
                         Err(e) => println!("{}: {e:#}", p.manifest.id),

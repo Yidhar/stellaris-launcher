@@ -606,10 +606,6 @@ impl App {
         if self.updates.installing.is_some() {
             return;
         }
-        if !self.running.is_empty() {
-            self.updates.message = Some((tr(self.lang, "pl.close_game").to_string(), false));
-            return;
-        }
         let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id).cloned() else { return };
         let Some(Ok(Some(a))) = self.updates.found.get(id).cloned() else { return };
         let (tx, rx) = channel();
@@ -649,7 +645,11 @@ impl App {
             match r {
                 Ok(v) => {
                     self.updates.found.insert(id.clone(), Ok(None));
-                    self.updates.message = Some((tr_args(self.lang, "pl.updated", &[&id, &v]), true));
+                    let mut msg = tr_args(self.lang, "pl.updated", &[&id, &v]);
+                    if !self.running.is_empty() {
+                        msg = format!("{msg} · {}", tr(self.lang, "pl.next_start"));
+                    }
+                    self.updates.message = Some((msg, true));
                     self.say(format!("updated {id} to {v}"));
                 }
                 Err(e) => {
