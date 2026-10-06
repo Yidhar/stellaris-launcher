@@ -131,6 +131,12 @@ struct App {
     filter: String,
     new_name: String,
     confirm_delete: bool,
+    /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
+    playset_filter: String,
+    ps_filter: String,
+    focus_playset_filter: bool,
+    /// development: open the playset drop-down on the first frame
+    dev_popup: bool,
     game_dir_text: String,
     assets: Assets,
     news: News,
@@ -146,6 +152,24 @@ fn resolve_lang(store: &Store, game: &Result<Game, String>) -> Lang {
         .and_then(Lang::from_code)
         .or_else(|| game.as_ref().ok().and_then(|g| i18n::game_language(&g.data_dir)))
         .unwrap_or(Lang::En)
+}
+
+/// "Cygnus v4.5.1 (358e)" -> ("Cygnus", "4.5.1", "358e"); a string of another shape comes back whole as the number.
+fn version_parts(v: &str) -> (String, String, String) {
+    let (mut name, mut number, mut build) = (Vec::new(), String::new(), String::new());
+    for t in v.split_whitespace() {
+        if number.is_empty() && t.len() > 1 && t.starts_with('v') && t[1..].starts_with(|c: char| c.is_ascii_digit()) {
+            number = t[1..].to_string();
+        } else if t.len() > 2 && t.starts_with('(') && t.ends_with(')') {
+            build = t[1..t.len() - 1].to_string();
+        } else if number.is_empty() {
+            name.push(t);
+        }
+    }
+    if number.is_empty() {
+        return (String::new(), v.trim().to_string(), build);
+    }
+    (name.join(" "), number, build)
 }
 
 fn open_link(url: &str) {
@@ -182,6 +206,10 @@ impl App {
             filter: String::new(),
             new_name: String::new(),
             confirm_delete: false,
+            playset_filter: String::new(),
+            ps_filter: String::new(),
+            focus_playset_filter: false,
+            dev_popup: false,
             game_dir_text: String::new(),
             assets: Assets::new(ctx),
             news: News { cards: Vec::new(), rx: None, hero: 0, switched: 0.0, error: None },
@@ -191,7 +219,7 @@ impl App {
         };
         app.reload();
         app.lang = resolve_lang(&app.store, &app.game);
-        // for screenshots while developing: --page=1 --seg=1 --lang=ja
+        // for screenshots while developing: --page=1 --seg=1 --lang=ja --popup --many=30
         for a in std::env::args().skip(1) {
             if let Some(v) = a.strip_prefix("--page=") {
                 app.page = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied().unwrap_or(Page::Play);
@@ -199,6 +227,13 @@ impl App {
                 app.seg = v.parse().unwrap_or(0);
             } else if let Some(v) = a.strip_prefix("--lang=") {
                 app.lang = Lang::from_code(v).unwrap_or(Lang::En);
+            } else if a == "--popup" {
+                app.dev_popup = true;
+            } else if let Some(v) = a.strip_prefix("--many=") {
+                // this many extra playsets, in memory only (nothing is saved unless something is changed)
+                for i in 1..=v.parse::<usize>().unwrap_or(0) {
+                    let _ = app.store.add_playset(&format!("Test playset {i:02}"));
+                }
             }
         }
         theme::install_fonts(ctx, app.lang);
@@ -522,48 +557,93 @@ impl App {
 
     // ---------------------------------------------------------------- Play
     fn page_play(&mut self, ui: &mut Ui) {
-        let (subtitle, can_play) = match &self.game {
-            Ok(g) => (format!("{} · {}", g.settings.version, pe::describe(g.exe_timestamp).split(' ').next().unwrap_or("")), true),
-            Err(_) => (String::new(), false),
-        };
-        let _ = can_play;
-        large_title(ui, "Stellaris", Some(&subtitle), |_| {});
+        // The plan: the artwork stays free. The eye starts at the top left (logo, then the version in large type), drops to the bottom right where
+        // the one bright thing is (the Play button of the control card), and the news sit quietly along the bottom left, small.
         let avail = ui.available_rect_before_wrap();
-        let right_w = 320.0f32.min(avail.width() * 0.42);
-        let gap = 22.0;
-        let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - right_w - gap, avail.bottom()));
-        let right_rect = Rect::from_min_max(pos2(avail.right() - right_w, avail.top()), avail.max);
-        let mut left = ui.new_child(UiBuilder::new().max_rect(left_rect));
-        self.news_column(&mut left);
-        let mut right = ui.new_child(UiBuilder::new().max_rect(right_rect));
-        self.play_panel(&mut right);
+        let panel_w = 340.0f32.min(avail.width() * 0.4);
+        let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - panel_w - 24.0, avail.bottom()));
+        let right_rect = Rect::from_min_max(pos2(avail.right() - panel_w, avail.top()), avail.max);
+        let mut brand = ui.new_child(UiBuilder::new().id_salt("play-brand").max_rect(left_rect));
+        self.brand(&mut brand);
+        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 146.0), left_rect.max);
+        let mut news = ui.new_child(UiBuilder::new().id_salt("play-news").max_rect(news_rect));
+        self.news_strip(&mut news);
+        // the card sits on the bottom edge: it is as high as it was laid out last frame (one frame late, then right)
+        let height_id = egui::Id::new("play-panel-height");
+        let last: f32 = ui.ctx().data(|d| d.get_temp(height_id)).unwrap_or(400.0);
+        let panel_rect = Rect::from_min_max(pos2(right_rect.left(), (right_rect.bottom() - last).max(right_rect.top())), right_rect.max);
+        let mut panel = ui.new_child(UiBuilder::new().id_salt("play-panel").max_rect(panel_rect));
+        self.play_panel(&mut panel);
+        let used = panel.min_rect().height();
+        if (used - last).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(height_id, used));
+            ui.ctx().request_repaint();
+        }
         ui.advance_cursor_after_rect(avail);
     }
 
-    fn news_column(&mut self, ui: &mut Ui) {
+    /// Logo, and the game version as the largest thing on the page.
+    fn brand(&mut self, ui: &mut Ui) {
+        let (codename, number, build, date) = match &self.game {
+            Ok(g) => {
+                let (c, n, b) = version_parts(&g.settings.version);
+                (c, n, b, pe::describe(g.exe_timestamp).split(' ').next().unwrap_or("").to_string())
+            }
+            Err(_) => Default::default(),
+        };
+        ui.add_space(16.0);
+        let logo = self.logo.clone();
+        match logo.as_ref().and_then(|p| self.assets.image(p, 700)) {
+            Some(t) => {
+                let h = 88.0;
+                let (r, _) = ui.allocate_exact_size(vec2(h * t.size.x / t.size.y, h), Sense::hover());
+                ui.painter().image(t.handle.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                ui.label(RichText::new("Stellaris").size(56.0).family(bold()).color(LABEL));
+            }
+        }
+        ui.add_space(14.0);
+        if number.is_empty() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.label(RichText::new(format!("v{number}")).size(54.0).family(bold()).color(LABEL));
+            if !codename.is_empty() {
+                theme::tag(ui, &codename, BLUE);
+            }
+        });
+        let mut detail = Vec::new();
+        if !build.is_empty() {
+            detail.push(format!("build {build}"));
+        }
+        if !date.is_empty() {
+            detail.push(date);
+        }
+        if !detail.is_empty() {
+            ui.label(RichText::new(detail.join("  ·  ")).size(15.0).color(SECONDARY));
+        }
+    }
+
+    /// The news cards, small, in one row along the bottom (a tooltip shows one at full size); a quiet line when there are none.
+    fn news_strip(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let now = ui.input(|i| i.time);
         let acts = Acts::default();
         let loading = self.news.rx.is_some();
-        theme::large_title_small(ui, tr(lang, "play.news"), |ui| {
-            if circle_button(ui, Icon::Refresh, theme::white(30), LABEL, !loading).clicked() {
+        let cards = self.news.cards.clone();
+        let height = 104.0;
+        let width = ui.available_width();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(tr(lang, "play.news").to_uppercase()).size(12.0).color(SECONDARY));
+            if circle_button(ui, Icon::Refresh, theme::white(22), SECONDARY, !loading).clicked() {
                 acts.push(Act::RefreshNews);
             }
         });
-        let width = ui.available_width();
-        let cards = self.news.cards.clone();
-        if cards.is_empty() {
-            glass(ui, 20.0, 24.0, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(30.0);
-                    ui.label(RichText::new(if loading { "…" } else { tr(lang, "play.news_empty") }).size(16.0).color(SECONDARY));
-                    if let Some(e) = &self.news.error {
-                        ui.label(RichText::new(e).size(12.0).color(SECONDARY));
-                    }
-                    ui.add_space(30.0);
-                });
-            });
-        } else {
+        ui.add_space(2.0);
+        if !cards.is_empty() {
             let main: Vec<usize> = cards.iter().enumerate().filter(|(_, c)| c.slot == "main").map(|(i, _)| i).collect();
             let main = if main.is_empty() { vec![0] } else { main };
             let others: Vec<usize> = (0..cards.len()).filter(|i| !main.contains(i)).collect();
@@ -572,50 +652,39 @@ impl App {
                 self.news.switched = now;
             }
             let hero_i = main[self.news.hero.min(main.len() - 1)];
-            // every card at the size of its picture (one pixel a point, as the official launcher shows them), left to right and then down;
-            // only a card wider than the column is scaled down
             let order: Vec<usize> = std::iter::once(hero_i).chain(others.iter().copied()).collect();
-            let gap = 12.0;
+            let gap = 10.0;
             let sizes: Vec<Vec2> = order
                 .iter()
                 .map(|&i| {
                     let s = cards[i].image.as_ref().and_then(|p| self.assets.image(p, 1400)).map(|t| t.size).unwrap_or(vec2(246.0, 230.0));
-                    if s.x > width { s * (width / s.x) } else { s }
+                    vec2(s.x * height / s.y, height)
                 })
                 .collect();
-            let mut offsets = Vec::new();
-            let (mut x, mut y, mut row_h) = (0.0f32, 0.0f32, 0.0f32);
-            for s in &sizes {
-                if x > 0.0 && x + s.x > width + 0.5 {
-                    x = 0.0;
-                    y += row_h + gap;
-                    row_h = 0.0;
-                }
-                offsets.push(vec2(x, y));
-                x += s.x + gap;
-                row_h = row_h.max(s.y);
-            }
-            let total_h = y + row_h;
-            egui::ScrollArea::vertical().id_salt("news").auto_shrink([false, false]).show(ui, |ui| {
-                let (area, _) = ui.allocate_exact_size(vec2(width, total_h), Sense::hover());
+            let total: f32 = sizes.iter().map(|s| s.x).sum::<f32>() + gap * (sizes.len() as f32 - 1.0);
+            egui::ScrollArea::horizontal().id_salt("news").auto_shrink([false, true]).show(ui, |ui| {
+                let (area, _) = ui.allocate_exact_size(vec2(total.max(width), height), Sense::hover());
+                let mut x = 0.0;
                 for (k, &i) in order.iter().enumerate() {
-                    let r = Rect::from_min_size(area.min + offsets[k], sizes[k]);
-                    self.draw_card(ui, &cards[i], r, 16.0, &format!("card{k}"), &acts);
+                    let r = Rect::from_min_size(area.min + vec2(x, 0.0), sizes[k]);
+                    x += sizes[k].x + gap;
+                    self.draw_card(ui, &cards[i], r, 12.0, &format!("card{k}"), &acts);
                     if k == 0 && main.len() > 1 {
-                        let total = main.len() as f32 * 14.0;
+                        let dots = main.len() as f32 * 11.0;
                         for d in 0..main.len() {
-                            let c = pos2(r.center().x - total / 2.0 + 7.0 + d as f32 * 14.0, r.bottom() - 14.0);
-                            let hit = Rect::from_center_size(c, Vec2::splat(14.0));
-                            if ui.interact(hit, egui::Id::new(("dot", d)), Sense::click()).clicked() {
+                            let c = pos2(r.center().x - dots / 2.0 + 5.5 + d as f32 * 11.0, r.bottom() - 9.0);
+                            if ui.interact(Rect::from_center_size(c, Vec2::splat(11.0)), egui::Id::new(("dot", d)), Sense::click()).clicked() {
                                 self.news.hero = d;
                                 self.news.switched = now;
                             }
-                            ui.painter().circle_filled(c, 3.5, if d == self.news.hero { Color32::WHITE } else { theme::white(110) });
+                            ui.painter().circle_filled(c, 2.6, if d == self.news.hero { Color32::WHITE } else { theme::white(110) });
                         }
                         ui.ctx().request_repaint_after(Duration::from_secs(1));
                     }
                 }
             });
+        } else {
+            ui.label(RichText::new(if loading { "…".to_string() } else { self.news.error.clone().unwrap_or_else(|| tr(lang, "play.news_empty").to_string()) }).size(12.5).color(SECONDARY));
         }
         if self.news.rx.is_some() || self.assets.busy() {
             ui.ctx().request_repaint_after(Duration::from_millis(300));
@@ -626,9 +695,12 @@ impl App {
     fn draw_card(&mut self, ui: &mut Ui, card: &Card, rect: Rect, radius: f32, id: &str, acts: &Acts) {
         let resp = ui.interact(rect, egui::Id::new(("news", id)), Sense::click());
         let now = ui.input(|i| i.time);
+        let mut preview = None;
         match card.image.as_ref().and_then(|p| self.assets.image(p, 1400)) {
             Some(tex) => {
-                theme::cover_image(ui, rect, tex.at(now).id(), tex.size, radius, Color32::WHITE);
+                let id = tex.at(now).id();
+                theme::cover_image(ui, rect, id, tex.size, radius, Color32::WHITE);
+                preview = Some((id, tex.size));
                 if tex.animated() {
                     ui.ctx().request_repaint_after(Duration::from_millis(40));
                 }
@@ -641,6 +713,11 @@ impl App {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             ui.painter().add(Shape::rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(2.0, Color32::WHITE.gamma_multiply(0.7)), egui::StrokeKind::Inside));
         }
+        if let Some((tex, size)) = preview {
+            resp.clone().on_hover_ui(|ui| {
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(tex, size)).corner_radius(12.0));
+            });
+        }
         if resp.clicked() {
             if let Some(l) = &card.link {
                 acts.push(Act::Open(l.clone()));
@@ -650,7 +727,6 @@ impl App {
 
     fn play_panel(&mut self, ui: &mut Ui) {
         let lang = self.lang;
-        let rect = ui.max_rect();
         let active = self.store.active_index();
         let acts = Acts::default();
         let launching = self.launching.is_some();
@@ -664,29 +740,65 @@ impl App {
             }
             _ => Vec::new(),
         };
-        let logo_path = self.logo.clone();
         glass(ui, 22.0, 18.0, |ui| {
-            ui.set_min_height(rect.height() - 36.0);
-            ui.vertical_centered(|ui| {
-                let logo = logo_path.as_ref().and_then(|p| self.assets.image(p, 700));
-                match logo {
-                    Some(t) => {
-                        let h = 54.0;
-                        let (r, _) = ui.allocate_exact_size(vec2(h * t.size.x / t.size.y, h), Sense::hover());
-                        ui.painter().image(t.handle.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                    }
-                    None => {
-                        ui.label(RichText::new("Stellaris").size(32.0).family(bold()).color(LABEL));
-                    }
-                }
-            });
             theme::section(ui, tr(lang, "play.playset"));
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                for (i, p) in self.store.playsets.iter().enumerate() {
-                    if theme::choice_pill(ui, &p.name, i == active).clicked() {
-                        acts.push(Act::SetActive(i));
+            let popup_id = egui::Id::new("playset-popup");
+            let open = ui.memory(|m| m.is_popup_open(popup_id));
+            let trigger = theme::dropdown_field(ui, &self.store.playsets[active].name, open);
+            if trigger.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(popup_id));
+                self.focus_playset_filter = true;
+            }
+            // open towards the side with more room (this card sits at the bottom of the window, above the tab bar)
+            let screen = ui.ctx().screen_rect();
+            let room_below = screen.bottom() - 66.0 - trigger.rect.bottom();
+            let room_above = trigger.rect.top() - 42.0;
+            let (side, room) = if room_below >= room_above { (egui::AboveOrBelow::Below, room_below) } else { (egui::AboveOrBelow::Above, room_above) };
+            let list_h = (room - 90.0).clamp(120.0, 300.0);
+            egui::popup::popup_above_or_below_widget(ui, popup_id, &trigger, side, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                ui.set_min_width(trigger.rect.width() - 12.0);
+                if self.store.playsets.len() > 6 {
+                    let r = theme::search_field(ui, &mut self.playset_filter, tr(lang, "mods.search"), ui.available_width());
+                    if std::mem::take(&mut self.focus_playset_filter) {
+                        r.request_focus();
                     }
+                    ui.add_space(6.0);
+                }
+                let q = self.playset_filter.to_lowercase();
+                let mut shown = 0;
+                egui::ScrollArea::vertical().id_salt("playset-popup-scroll").max_height(list_h).auto_shrink([true, true]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let mut rows = Rows::new();
+                    for (i, p) in self.store.playsets.iter().enumerate() {
+                        if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
+                            continue;
+                        }
+                        shown += 1;
+                        if i == active {
+                            rows.highlight_next();
+                        }
+                        let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
+                        let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
+                        let r = rows.row(ui, 50.0, 24.0, true, |ui| {
+                            stack(ui, 50.0, 38.0, |ui| {
+                                ui.add(egui::Label::new(RichText::new(&p.name).size(15.0).family(bold())).truncate());
+                                ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(12.0).color(SECONDARY));
+                            });
+                        }, |ui| {
+                            if i == active {
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                                Icon::Check.draw(ui.painter(), r.center(), 18.0, BLUE, 2.2);
+                            }
+                        });
+                        if r.clicked() {
+                            acts.push(Act::SetActive(i));
+                            ui.memory_mut(|m| m.close_popup());
+                        }
+                    }
+                });
+                if shown == 0 {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("—").color(SECONDARY));
                 }
             });
             let p = &self.store.playsets[active];
@@ -698,13 +810,13 @@ impl App {
             egui::Frame::new().fill(Color32::from_black_alpha(55)).corner_radius(14).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let mut rows = Rows::new();
-                rows.row(ui, 46.0, 46.0, false, |ui| { ui.label(tr(lang, "play.continue")); }, |ui| { switch(ui, &mut self.continue_last); });
-                rows.row(ui, 46.0, 46.0, false, |ui| { ui.label(tr(lang, "play.plugins")); }, |ui| { switch(ui, &mut self.use_plugins); });
+                rows.row(ui, 42.0, 46.0, false, |ui| { ui.label(tr(lang, "play.continue")); }, |ui| { switch(ui, &mut self.continue_last); });
+                rows.row(ui, 42.0, 46.0, false, |ui| { ui.label(tr(lang, "play.plugins")); }, |ui| { switch(ui, &mut self.use_plugins); });
                 if !alt_labels.is_empty() {
                     let cur = self.alternative.map_or(0, |i| i + 1);
                     let mut pick = None;
                     for (i, l) in alt_labels.iter().enumerate() {
-                        let r = rows.row(ui, 44.0, 24.0, true, |ui| {
+                        let r = rows.row(ui, 40.0, 24.0, true, |ui| {
                             ui.add(egui::Label::new(RichText::new(l).color(if i == cur { LABEL } else { SECONDARY })).truncate());
                         }, |ui| {
                             if i == cur {
@@ -721,23 +833,25 @@ impl App {
                     }
                 }
             });
-            ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-                let (text, enabled) = if launching { (tr(lang, "play.starting"), false) } else if running { (tr(lang, "play.running"), false) } else { (tr(lang, "play.button"), game_ok) };
-                if theme::capsule_button(ui, text, vec2(ui.available_width(), 52.0), ButtonStyle::Filled(BLUE), enabled).clicked() {
-                    acts.push(Act::Start);
-                }
-                ui.add_space(6.0);
-                if running {
+            ui.add_space(14.0);
+            let (text, enabled) = if launching { (tr(lang, "play.starting"), false) } else if running { (tr(lang, "play.running"), false) } else { (tr(lang, "play.button"), game_ok) };
+            if theme::capsule_button(ui, text, vec2(ui.available_width(), 54.0), ButtonStyle::Filled(BLUE), enabled).clicked() {
+                acts.push(Act::Start);
+            }
+            if running {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    let pid = self.running[0].to_string();
+                    ui.label(RichText::new(format!("●  {}", tr_args(lang, "play.status_running", &[&pid]))).size(13.0).color(GREEN));
                     if pill_button(ui, tr(lang, "play.close"), ButtonStyle::Plain(RED), true).clicked() {
                         acts.push(Act::CloseGame);
                     }
-                    let pid = self.running[0].to_string();
-                    ui.label(RichText::new(format!("●  {}", tr_args(lang, "play.status_running", &[&pid]))).size(13.0).color(GREEN));
-                } else if let Some(last) = self.log.last() {
-                    let bad = last.contains("could not") || last.contains("failed");
-                    ui.add(egui::Label::new(RichText::new(last).size(12.0).color(if bad { RED } else { SECONDARY })).truncate());
-                }
-            });
+                });
+            } else if let Some(last) = self.log.last() {
+                ui.add_space(8.0);
+                let bad = last.contains("could not") || last.contains("failed");
+                ui.add(egui::Label::new(RichText::new(last).size(12.0).color(if bad { RED } else { SECONDARY })).truncate());
+            }
         });
         self.acts.extend(acts.take());
     }
@@ -758,11 +872,20 @@ impl App {
         let active = self.store.active_index();
 
         // the list of playsets, and the field for a new one under it
-        let list_rect = Rect::from_min_max(left_rect.min, pos2(left_rect.right(), left_rect.bottom() - 52.0));
+        let mut list_rect = Rect::from_min_max(left_rect.min, pos2(left_rect.right(), left_rect.bottom() - 52.0));
+        if self.store.playsets.len() > 8 {
+            let mut search = ui.new_child(UiBuilder::new().id_salt("ps-search").max_rect(Rect::from_min_size(list_rect.min, vec2(list_rect.width(), 36.0))).layout(Layout::left_to_right(Align::Center)));
+            theme::search_field(&mut search, &mut self.ps_filter, tr(lang, "mods.search"), list_rect.width());
+            list_rect.min.y += 46.0;
+        }
+        let q = self.ps_filter.to_lowercase();
         let mut left = ui.new_child(UiBuilder::new().max_rect(list_rect));
         glass_scroll(&mut left, "ps-list", |ui| {
             let mut rows = Rows::new();
             for (i, p) in self.store.playsets.iter().enumerate() {
+                if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
+                    continue;
+                }
                 if i == active {
                     rows.highlight_next();
                 }
@@ -1304,6 +1427,9 @@ impl eframe::App for App {
         if self.launching.is_some() || !self.running.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+        if std::mem::take(&mut self.dev_popup) {
+            ctx.memory_mut(|m| m.open_popup(egui::Id::new("playset-popup")));
+        }
         self.assets.set_background(self.background_path());
         self.paint_background(ctx);
 
@@ -1450,4 +1576,17 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App::new(&cc.egui_ctx)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_parts;
+
+    #[test]
+    fn splits_the_game_version() {
+        assert_eq!(version_parts("Cygnus v4.5.1 (358e)"), ("Cygnus".into(), "4.5.1".into(), "358e".into()));
+        assert_eq!(version_parts("v3.14.2"), ("".into(), "3.14.2".into(), "".into()));
+        assert_eq!(version_parts("Some Name"), ("".into(), "Some Name".into(), "".into()));
+        assert_eq!(version_parts(""), ("".into(), "".into(), "".into()));
+    }
 }

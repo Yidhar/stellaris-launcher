@@ -114,6 +114,7 @@ pub fn install_style(ctx: &egui::Context) {
     style.spacing.scroll.floating = true;
     style.spacing.scroll.floating_allocated_width = 0.0;
     style.interaction.selectable_labels = false;
+    style.spacing.menu_margin = egui::Margin::same(6);
 
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
@@ -121,6 +122,7 @@ pub fn install_style(ctx: &egui::Context) {
     v.window_fill = Color32::from_rgb(44, 44, 46);
     v.window_stroke = Stroke::new(1.0, white(30));
     v.window_corner_radius = cr(14.0);
+    v.menu_corner_radius = cr(14.0);
     v.extreme_bg_color = Color32::from_rgba_premultiplied(0, 0, 0, 90);
     v.faint_bg_color = white(10);
     v.hyperlink_color = BLUE;
@@ -329,15 +331,6 @@ pub fn large_title(ui: &mut Ui, title: &str, subtitle: Option<&str>, trailing: i
     ui.add_space(12.0);
 }
 
-/// A smaller heading (22 pt) with something at its right end.
-pub fn large_title_small(ui: &mut Ui, title: &str, trailing: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(22.0).family(bold()).color(LABEL));
-        ui.with_layout(Layout::right_to_left(Align::Center), trailing);
-    });
-    ui.add_space(8.0);
-}
-
 // ------------------------------------------------------------------ controls
 
 /// The iOS switch: a green capsule with a white knob.
@@ -417,18 +410,21 @@ pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -
     capsule_button(ui, text, vec2(galley.size().x + 28.0, 32.0), style, enabled)
 }
 
-/// A selectable capsule (a playset in the playset picker).
-pub fn choice_pill(ui: &mut Ui, text: &str, selected: bool) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.0, bold()), Color32::WHITE);
-    let (rect, response) = ui.allocate_exact_size(vec2((galley.size().x + 26.0).min(220.0), 32.0), Sense::click());
-    let fill = if selected { BLUE } else if response.hovered() { white(40) } else { white(26) };
-    ui.painter().rect_filled(rect, cr(16.0), fill);
-    let mut shown = text.to_string();
-    if galley.size().x + 26.0 > 220.0 {
-        shown = text.chars().take(14).collect::<String>() + "…";
+/// The closed state of a drop-down: the chosen text and a chevron on a rounded field. `open` shows it pressed in.
+pub fn dropdown_field(ui: &mut Ui, text: &str, open: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+    let fill = if open { white(44) } else if resp.hovered() { white(38) } else { white(26) };
+    ui.painter().rect_filled(rect, cr(12.0), fill);
+    if open {
+        ui.painter().rect_stroke(rect, cr(12.0), Stroke::new(1.5, BLUE), StrokeKind::Inside);
     }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, shown, FontId::new(14.0, if selected { bold() } else { FontFamily::Proportional }), if selected { Color32::WHITE } else { LABEL });
-    response
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(15.5, bold()), LABEL, (rect.width() - 56.0).max(20.0));
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
+    (if open { Icon::Up } else { Icon::Down }).draw(ui.painter(), pos2(rect.right() - 24.0, rect.center().y), 16.0, SECONDARY, 1.8);
+    resp
 }
 
 /// A small coloured capsule label.
@@ -437,6 +433,16 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 14.0, 20.0), Sense::hover());
     ui.painter().rect_filled(rect, cr(10.0), color.gamma_multiply(0.22));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
+    resp
+}
+
+/// A larger tag (the code name of a version): bold text on a tinted capsule.
+pub fn tag(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(16.0, bold()), color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 30.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(15.0), color.gamma_multiply(0.28));
+    ui.painter().rect_stroke(rect, cr(15.0), Stroke::new(1.0, color.gamma_multiply(0.7)), StrokeKind::Inside);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp
 }
