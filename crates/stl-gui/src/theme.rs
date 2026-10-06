@@ -600,6 +600,29 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp
 }
 
+/// A small delete button for a list row: a red bin, quiet until the pointer is on it (then a red tint, deeper while pressed); `sure`
+/// shows the second step, a solid red capsule with `label`.
+pub fn delete_button(ui: &mut Ui, sure: bool, label: &str) -> Response {
+    if sure {
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), FontId::new(13.0, FontFamily::Proportional), Color32::WHITE);
+        let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 22.0, 28.0), Sense::click());
+        let fill = if resp.is_pointer_button_down_on() { RED.gamma_multiply(0.75) } else if resp.hovered() { RED } else { RED.gamma_multiply(0.88) };
+        ui.painter().rect_filled(rect, cr(14.0), fill);
+        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        return resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let hot = resp.hovered();
+    let lit = ui.ctx().animate_bool_with_time(resp.id.with("lit"), hot, 0.12);
+    let a = if resp.is_pointer_button_down_on() { 0.36 } else { 0.22 * lit };
+    if a > 0.0 {
+        ui.painter().circle_filled(rect.center(), 14.0, RED.gamma_multiply(a));
+    }
+    let color = if hot { RED } else { RED.gamma_multiply(0.55) };
+    Icon::Trash.draw(ui.painter(), rect.center(), 16.0, color, 1.6);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A chip that can be clicked (a count that opens its list).
 pub fn chip_button(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = FontId::new(11.5, FontFamily::Proportional);
@@ -725,6 +748,7 @@ pub enum Icon {
     Upload,
     Download,
     Info,
+    Trash,
     ViewList,
     ViewCompact,
     Globe,
@@ -791,6 +815,14 @@ impl Icon {
                 }
                 closed(pts);
                 p.circle_stroke(c, 0.14 * s, st);
+            }
+            Icon::Trash => {
+                // the lid with its handle, the bin narrowing to the bottom, two ribs
+                line(vec![at(-0.36, -0.24), at(0.36, -0.24)]);
+                line(vec![at(-0.1, -0.24), at(-0.1, -0.36), at(0.1, -0.36), at(0.1, -0.24)]);
+                closed(vec![at(-0.27, -0.24), at(0.27, -0.24), at(0.21, 0.38), at(-0.21, 0.38)]);
+                line(vec![at(-0.07, -0.08), at(-0.06, 0.24)]);
+                line(vec![at(0.07, -0.08), at(0.06, 0.24)]);
             }
             Icon::Info => {
                 p.circle_stroke(c, 0.4 * s, st);

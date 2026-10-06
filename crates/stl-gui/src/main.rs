@@ -147,7 +147,8 @@ impl Page {
 enum Act {
     SetActive(usize),
     AddPlayset(String),
-    DeletePlayset,
+    DeletePlayset(usize),
+    AskDelete(usize),
     Import,
     ModFlag(usize, bool),
     ModRemove(usize),
@@ -344,7 +345,10 @@ struct App {
     seg: usize,
     filter: String,
     new_name: String,
-    confirm_delete: bool,
+    /// the playset whose delete button was clicked once (the second click deletes)
+    confirm_delete: Option<usize>,
+    /// the search over the mods of the playset on show
+    ps_mod_filter: String,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
     playset_filter: String,
     ps_filter: String,
@@ -457,7 +461,8 @@ impl App {
             seg: 0,
             filter: String::new(),
             new_name: String::new(),
-            confirm_delete: false,
+            confirm_delete: None,
+            ps_mod_filter: String::new(),
             playset_filter: String::new(),
             ps_filter: String::new(),
             focus_playset_filter: false,
@@ -528,6 +533,10 @@ impl App {
                 if let Some(i) = app.store.find(v) {
                     app.store.active = Some(app.store.playsets[i].id.clone());
                 }
+            } else if let Some(v) = a.strip_prefix("--ask-delete=") {
+                app.confirm_delete = v.parse().ok();
+            } else if let Some(v) = a.strip_prefix("--ps-search=") {
+                app.ps_mod_filter = v.to_string();
             } else if a == "--check" {
                 app.dev_check = Some(String::new());
             } else if let Some(v) = a.strip_prefix("--check-sheet=") {
@@ -1117,7 +1126,8 @@ impl App {
             Act::SetActive(i) => {
                 if i < self.store.playsets.len() {
                     self.store.set_active(i);
-                    self.confirm_delete = false;
+                    self.confirm_delete = None;
+                    self.ps_mod_filter.clear();
                     self.save();
                 }
             }
@@ -1129,13 +1139,16 @@ impl App {
                 }
                 Err(e) => self.say(format!("{e:#}")),
             },
-            Act::DeletePlayset => {
-                let n = self.store.playsets[active].name.clone();
-                if self.store.remove_playset(active).is_ok() {
-                    self.save();
-                    self.say(format!("deleted the playset {n}"));
+            Act::AskDelete(i) => self.confirm_delete = Some(i),
+            Act::DeletePlayset(i) => {
+                if i < self.store.playsets.len() {
+                    let n = self.store.playsets[i].name.clone();
+                    if self.store.remove_playset(i).is_ok() {
+                        self.save();
+                        self.say(format!("deleted the playset {n}"));
+                    }
                 }
-                self.confirm_delete = false;
+                self.confirm_delete = None;
             }
             Act::Import => {
                 self.import_official();
@@ -1761,6 +1774,11 @@ impl App {
             // the playsets; the import from the official launcher at the foot
             let q = self.ps_filter.to_lowercase();
             let list_h = (ui.available_height() - 44.0).max(60.0);
+            let can_delete = self.store.playsets.len() > 1;
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.confirm_delete = None;
+            }
+            let confirming = self.confirm_delete;
             egui::ScrollArea::vertical().id_salt("ps-list").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let mut rows = Rows::new();
@@ -1773,12 +1791,23 @@ impl App {
                     }
                     let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
                     let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
-                    let r = rows.row(ui, 58.0, 0.0, true, |ui| {
+                    let sure = confirming == Some(i);
+                    let r = rows.row(ui, 58.0, if can_delete { if sure { 64.0 } else { 30.0 } } else { 0.0 }, true, |ui| {
                         stack(ui, 58.0, 38.0, |ui| {
                             ui.add(egui::Label::new(RichText::new(&p.name).size(15.5).family(bold())).truncate());
                             ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(12.0).color(SECONDARY));
                         });
-                    }, |_| {});
+                    }, |ui| {
+                        // quiet until the pointer is on it; the first click asks, the second deletes
+                        let hint = if sure { tr(lang, "ps.delete_sure_hint") } else { tr(lang, "ps.delete") };
+                        if theme::delete_button(ui, sure, tr(lang, "ps.delete_short")).on_hover_text(hint).clicked() {
+                            if sure {
+                                acts.push(Act::DeletePlayset(i));
+                            } else {
+                                acts.push(Act::AskDelete(i));
+                            }
+                        }
+                    });
                     if r.clicked() {
                         acts.push(Act::SetActive(i));
                     }
@@ -1806,7 +1835,6 @@ impl App {
         let plugins_n = p.plugins.iter().filter(|x| x.enabled).count();
         let dlc_off = p.disabled_dlcs_or(&self.dlc_current).iter().filter(|id| self.dlcs.iter().any(|d| &d.id == *id)).count();
         let dlc_n = self.dlcs.len().saturating_sub(dlc_off);
-        let can_delete = self.store.playsets.len() > 1;
         let labels = [
             format!("{}  {mods_n}", tr(lang, "seg.mods")),
             format!("{}  {dlc_n}", tr(lang, "seg.dlc")),
@@ -1817,20 +1845,13 @@ impl App {
             if let Some(i) = segmented(ui, &labels, self.seg, width.min(420.0)) {
                 self.seg = i;
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if can_delete {
-                    if self.confirm_delete {
-                        if pill_button(ui, tr(lang, "ps.delete_sure"), ButtonStyle::Filled(RED), true).clicked() {
-                            acts.push(Act::DeletePlayset);
-                        }
-                        if pill_button(ui, tr(lang, "ps.keep"), ButtonStyle::Plain(SECONDARY), true).clicked() {
-                            self.confirm_delete = false;
-                        }
-                    } else if pill_button(ui, tr(lang, "ps.delete"), ButtonStyle::Plain(RED), true).clicked() {
-                        self.confirm_delete = true;
-                    }
-                }
-            });
+            // the search over this playset's mods (on the Mods segment)
+            if self.seg == 0 {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let w = ui.available_width().clamp(140.0, 260.0);
+                    theme::search_field(ui, &mut self.ps_mod_filter, tr(lang, "ps.search_mods"), w);
+                });
+            }
         });
         theme::divider(ui);
         let now = ui.input(|i| i.time);
@@ -1934,9 +1955,27 @@ impl App {
         });
         ui.add_space(6.0);
         let position: std::collections::HashMap<String, usize> = current.as_ref().map(|r| r.ids.iter().enumerate().map(|(i, id)| (id.clone(), i)).collect()).unwrap_or_default();
-        plain_rows(ui, "ps-mods", 58.0, total, |ui, range| {
+        let q = self.ps_mod_filter.trim().to_lowercase();
+        let shown: Vec<usize> = (0..total)
+            .filter(|&i| {
+                if q.is_empty() {
+                    return true;
+                }
+                let m = &self.store.playsets[active].mods[i];
+                let name = self.mods.iter().find(|x| x.id == m.id).map(|x| x.name.to_lowercase()).unwrap_or_default();
+                name.contains(&q) || m.id.to_lowercase().contains(&q)
+            })
+            .collect();
+        if shown.is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(tr(lang, "ps.search_none")).size(14.0).color(SECONDARY));
+            });
+            return;
+        }
+        plain_rows(ui, "ps-mods", 58.0, shown.len(), |ui, range| {
             let mut rows = Rows::starting_at(range.start);
-            for i in range {
+            for i in range.map(|k| shown[k]) {
                 let m = &self.store.playsets[active].mods[i];
                 let info = self.mods.iter().find(|x| x.id == m.id);
                 let name = info.map(|x| x.name.clone()).unwrap_or_else(|| m.id.clone());
