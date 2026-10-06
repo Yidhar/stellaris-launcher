@@ -456,6 +456,21 @@ pub fn circle_button(ui: &mut Ui, icon: Icon, fill: Color32, fg: Color32, enable
     response
 }
 
+/// A button of the window's title bar: a small round glass button; the close one turns red.
+pub fn window_button(ui: &mut Ui, icon: Icon, danger: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let fill = if resp.is_pointer_button_down_on() {
+        if danger { RED.gamma_multiply(0.7) } else { white(52) }
+    } else if resp.hovered() {
+        if danger { RED } else { white(40) }
+    } else {
+        white(18)
+    };
+    ui.painter().circle_filled(rect.center(), 13.0, fill);
+    icon.draw(ui.painter(), rect.center(), 14.0, LABEL, 1.6);
+    resp
+}
+
 /// The search field: a rounded gray capsule with a magnifier.
 pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
@@ -519,6 +534,9 @@ pub enum Icon {
     Up,
     Down,
     Refresh,
+    Minimize,
+    Maximize,
+    Restore,
 }
 
 impl Icon {
@@ -587,6 +605,12 @@ impl Icon {
             }
             Icon::Up => line(vec![at(-0.3, 0.14), at(0.0, -0.16), at(0.3, 0.14)]),
             Icon::Down => line(vec![at(-0.3, -0.14), at(0.0, 0.16), at(0.3, -0.14)]),
+            Icon::Minimize => line(vec![at(-0.34, 0.0), at(0.34, 0.0)]),
+            Icon::Maximize => closed(vec![at(-0.32, -0.32), at(0.32, -0.32), at(0.32, 0.32), at(-0.32, 0.32)]),
+            Icon::Restore => {
+                closed(vec![at(-0.36, -0.12), at(0.12, -0.12), at(0.12, 0.36), at(-0.36, 0.36)]);
+                line(vec![at(-0.12, -0.12), at(-0.12, -0.36), at(0.36, -0.36), at(0.36, 0.12), at(0.12, 0.12)]);
+            }
             Icon::Refresh => {
                 let pts: Vec<Pos2> = (0..=18).map(|k| {
                     let a = (40.0 + 270.0 * k as f32 / 18.0).to_radians();

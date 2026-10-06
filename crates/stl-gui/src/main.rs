@@ -1288,6 +1288,15 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // a minimised window is 0 x 0: egui asserts on a layout with no height, so there is nothing to build until it is back
+        let screen = ctx.screen_rect();
+        if screen.width() < 64.0 || screen.height() < 64.0 {
+            self.assets.poll();
+            self.poll_process();
+            self.drain_launch();
+            self.drain_news();
+            return;
+        }
         self.assets.poll();
         self.poll_process();
         self.drain_launch();
@@ -1298,14 +1307,15 @@ impl eframe::App for App {
         self.assets.set_background(self.background_path());
         self.paint_background(ctx);
 
-        egui::TopBottomPanel::bottom("tabs").exact_height(66.0).frame(egui::Frame::NONE).show(ctx, |ui| {
+        egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
+        egui::TopBottomPanel::bottom("tabs").exact_height(66.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
             let items: Vec<(Icon, String)> = Page::ALL.iter().map(|p| (p.icon(), tr(self.lang, p.key()).to_string())).collect();
             let current = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
             if let Some(i) = theme::tab_bar(ui, &items, current) {
                 self.page = Page::ALL[i];
             }
         });
-        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 34, right: 34, top: 14, bottom: 14 })).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 34, right: 34, top: 2, bottom: 14 })).show(ctx, |ui| {
             if self.game.is_err() && self.page != Page::Settings {
                 self.page_missing(ui);
                 return;
@@ -1318,6 +1328,7 @@ impl eframe::App for App {
                 Page::Settings => self.page_settings(ui),
             }
         });
+        self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
             self.apply(ctx, act);
         }
@@ -1325,6 +1336,74 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// The window has no system frame: a hairline round it, and the edges and corners resize it (the system does the dragging).
+    fn window_frame(&self, ctx: &egui::Context) {
+        use egui::{CursorIcon, ResizeDirection, ViewportCommand};
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if maximized {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window-outline"))).rect_stroke(screen, 0.0, egui::Stroke::new(1.0, theme::white(40)), egui::StrokeKind::Inside);
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        let m = 6.0;
+        let (l, r, t, b) = (pos.x - screen.left() < m, screen.right() - pos.x < m, pos.y - screen.top() < m, screen.bottom() - pos.y < m);
+        let (dir, cursor) = match (l, r, t, b) {
+            (true, _, true, _) => (ResizeDirection::NorthWest, CursorIcon::ResizeNwSe),
+            (_, true, _, true) => (ResizeDirection::SouthEast, CursorIcon::ResizeNwSe),
+            (_, true, true, _) => (ResizeDirection::NorthEast, CursorIcon::ResizeNeSw),
+            (true, _, _, true) => (ResizeDirection::SouthWest, CursorIcon::ResizeNeSw),
+            (true, ..) => (ResizeDirection::West, CursorIcon::ResizeHorizontal),
+            (_, true, ..) => (ResizeDirection::East, CursorIcon::ResizeHorizontal),
+            (_, _, true, _) => (ResizeDirection::North, CursorIcon::ResizeVertical),
+            (_, _, _, true) => (ResizeDirection::South, CursorIcon::ResizeVertical),
+            _ => return,
+        };
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        }
+    }
+
+    /// The strip at the top, in place of the system's title bar (the window has no frame): the name at the left, minimise / maximise / close at
+    /// the right, and the rest of it drags the window (a double click maximises).
+    fn title_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        use egui::ViewportCommand;
+        let rect = ui.max_rect();
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let drag = ui.interact(rect, egui::Id::new("titlebar-drag"), Sense::click_and_drag());
+        if drag.drag_started() {
+            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        }
+        // the mark: a blue rounded square with the star, as in the window icon
+        let mark = Rect::from_center_size(pos2(rect.left() + 34.0 + 10.0, rect.center().y), Vec2::splat(20.0));
+        ui.painter().rect_filled(mark, egui::CornerRadius::same(6), BLUE);
+        let star: Vec<egui::Pos2> = (0..16)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::TAU / 16.0;
+                let r = if k % 4 == 0 { 7.0 } else { 2.6 };
+                mark.center() + vec2(a.cos() * r, a.sin() * r)
+            })
+            .collect();
+        ui.painter().add(Shape::convex_polygon(star, Color32::WHITE, egui::Stroke::NONE));
+        ui.painter().text(pos2(mark.right() + 9.0, rect.center().y), egui::Align2::LEFT_CENTER, "Stellaris Launcher", egui::FontId::new(13.5, bold()), theme::white(200));
+        // the buttons
+        let mut buttons = ui.new_child(UiBuilder::new().id_salt("window-buttons").max_rect(rect.shrink2(vec2(18.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
+        buttons.spacing_mut().item_spacing.x = 8.0;
+        if theme::window_button(&mut buttons, Icon::Close, true).clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+        if theme::window_button(&mut buttons, if maximized { Icon::Restore } else { Icon::Maximize }, false).clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        }
+        if theme::window_button(&mut buttons, Icon::Minimize, false).clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+    }
+
     /// The picture behind everything (dimmed), or a plain gradient while there is none; tells the glass cards which picture to blur.
     fn paint_background(&mut self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
@@ -1354,7 +1433,13 @@ impl App {
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 780.0]).with_min_inner_size([980.0, 640.0]).with_title("Stellaris Launcher").with_icon(theme::icon()),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1180.0, 780.0])
+            .with_min_inner_size([980.0, 640.0])
+            .with_title("Stellaris Launcher")
+            .with_icon(theme::icon())
+            .with_decorations(false)
+            .with_maximized(std::env::args().any(|a| a == "--maximized")),
         ..Default::default()
     };
     eframe::run_native(
