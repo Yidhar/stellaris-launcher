@@ -203,7 +203,6 @@ struct News {
     cards: Vec<Card>,
     rx: Option<Receiver<Result<Vec<Card>, String>>>,
     hero: usize,
-    switched: f64,
     error: Option<String>,
     /// the page of the strip shown, and when the wheel last turned it
     page: usize,
@@ -368,7 +367,7 @@ impl App {
             dev_then: None,
             game_dir_text: String::new(),
             assets: Assets::new(ctx),
-            news: News { cards: Vec::new(), rx: None, hero: 0, switched: 0.0, error: None, page: 0, wheel: 0.0 },
+            news: News { cards: Vec::new(), rx: None, hero: 0, error: None, page: 0, wheel: 0.0 },
             acts: Vec::new(),
             logo: None,
             backgrounds: Vec::new(),
@@ -1127,20 +1126,28 @@ impl App {
         let gap = 16.0;
         let width = ui.available_width();
 
-        // the cards in the order shown (the card of the main slot first), each at the row's height
-        let mut order: Vec<usize> = Vec::new();
-        let mut main_len = 0;
-        if !cards.is_empty() {
-            let main: Vec<usize> = cards.iter().enumerate().filter(|(_, c)| c.slot == "main").map(|(i, _)| i).collect();
-            let main = if main.is_empty() { vec![0] } else { main };
-            main_len = main.len();
-            if main.len() > 1 && now - self.news.switched > 8.0 {
-                self.news.hero = (self.news.hero + 1) % main.len();
-                self.news.switched = now;
+        // one card per slot (main, secondary-1, secondary-2), each showing its items in turn for their delay, as the official launcher does
+        let mut slots: Vec<Vec<usize>> = Vec::new();
+        for (i, c) in cards.iter().enumerate() {
+            match slots.last_mut() {
+                Some(last) if cards[last[0]].slot == c.slot => last.push(i),
+                _ => slots.push(vec![i]),
             }
-            let hero_i = main[self.news.hero.min(main.len() - 1)];
-            order.push(hero_i);
-            order.extend((0..cards.len()).filter(|i| !main.contains(i)));
+        }
+        let current = |items: &Vec<usize>| -> (usize, usize) {
+            let total: u64 = items.iter().map(|&i| cards[i].delay_ms).sum::<u64>().max(1);
+            let mut t = ((now * 1000.0) as u64) % total;
+            for (k, &i) in items.iter().enumerate() {
+                if t < cards[i].delay_ms {
+                    return (k, i);
+                }
+                t -= cards[i].delay_ms;
+            }
+            (0, items[0])
+        };
+        let order: Vec<usize> = slots.iter().map(|items| current(items).1).collect();
+        if slots.iter().any(|s| s.len() > 1) {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
         let sizes: Vec<Vec2> = order
             .iter()
@@ -1208,17 +1215,15 @@ impl App {
                 let r = Rect::from_min_size(area.min + vec2(x, 0.0), sizes[k]);
                 x += sizes[k].x + gap;
                 self.draw_card(ui, &cards[order[k]], r, theme::RADIUS, &format!("card{k}"), &acts);
-                if k == 0 && main_len > 1 {
-                    let dots = main_len as f32 * 11.0;
-                    for d in 0..main_len {
-                        let c = pos2(r.center().x - dots / 2.0 + 5.5 + d as f32 * 11.0, r.bottom() - 9.0);
-                        if ui.interact(Rect::from_center_size(c, Vec2::splat(11.0)), egui::Id::new(("dot", d)), Sense::click()).clicked() {
-                            self.news.hero = d;
-                            self.news.switched = now;
-                        }
-                        ui.painter().circle_filled(c, 2.6, if d == self.news.hero { Color32::WHITE } else { theme::white(110) });
+                let items = &slots[k];
+                if items.len() > 1 {
+                    let at = current(items).0;
+                    let n = items.len().min(8);
+                    let w = n as f32 * 9.0;
+                    for d in 0..n {
+                        let c = pos2(r.center().x - w / 2.0 + 4.5 + d as f32 * 9.0, r.bottom() - 8.0);
+                        ui.painter().circle_filled(c, 2.4, if d == at % n { Color32::WHITE } else { theme::white(110) });
                     }
-                    ui.ctx().request_repaint_after(Duration::from_secs(1));
                 }
             }
         }

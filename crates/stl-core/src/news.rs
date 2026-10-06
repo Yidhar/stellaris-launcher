@@ -20,14 +20,82 @@ pub struct Card {
     /// the picture on disk, when it has been fetched
     pub image: Option<PathBuf>,
     pub link: Option<String>,
+    /// how long the card shows before the next one of its slot, in milliseconds
+    pub delay_ms: u64,
 }
 
 fn slot_rank(slot: &str) -> (u8, String) {
     (if slot == "main" { 0 } else { 1 }, slot.to_string())
 }
 
-/// The cards of a feed document, the main slot first. `language` picks the text (falls back to English, then to whatever there is).
+/// The cards of a feed document, the way the Paradox Launcher picks them: for each slot (`main`, `secondary-1`, `secondary-2`, in that order),
+/// the content groups that are visible now (`settings.visible.from/until`) and whose `settings.filter` (`owns` / `or` / `and`) holds for the
+/// installed DLC are kept, one of them is drawn by `settings.weight`, and its items are that slot's cards, shown in turn for their `delay`.
+/// Items repeat on purpose (a card listed four times shows four times as often). `language` picks the text (English, then anything).
 pub fn parse_feed(json: &str, language: &str) -> Vec<Card> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let mut seed = (now as u64) ^ 0x9E37_79B9_7F4A_7C15;
+    parse_feed_with(json, language, now, &[], &mut || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    })
+}
+
+fn parse_time_ms(s: &str) -> Option<i64> {
+    // `2024-01-01T00:00:00Z` (or with a fraction); the date and time are enough
+    let s = s.trim();
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let time = time.trim_end_matches('Z');
+    let time = time.split(['+', '.']).next()?;
+    let mut t = time.split(':').map(|x| x.parse::<i64>().ok());
+    let (hh, mm, ss) = (t.next()??, t.next()??, t.next().flatten().unwrap_or(0));
+    // days from the civil date (Howard Hinnant's algorithm)
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+    let yoe = y2 - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(((days * 86400) + hh * 3600 + mm * 60 + ss) * 1000)
+}
+
+fn visible(settings: &Value, now_ms: i64) -> bool {
+    let v = &settings["visible"];
+    if v.is_null() {
+        return true;
+    }
+    let from = v["from"].as_str().and_then(parse_time_ms);
+    let until = v["until"].as_str().and_then(parse_time_ms);
+    from.map_or(true, |f| now_ms >= f) && until.map_or(true, |u| now_ms <= u)
+}
+
+fn filter_holds(filter: &Value, owned: &[String]) -> bool {
+    if filter.is_null() {
+        return true;
+    }
+    fn holds(f: &Value, owned: &[String]) -> bool {
+        if let Some(o) = f.get("owns") {
+            let o = o.as_str().map(str::to_string).unwrap_or_else(|| o.to_string()).to_lowercase();
+            return owned.iter().any(|x| x.to_lowercase() == o);
+        }
+        if let Some(a) = f.get("or").and_then(|x| x.as_array()) {
+            return a.iter().any(|x| holds(x, owned));
+        }
+        if let Some(a) = f.get("and").and_then(|x| x.as_array()) {
+            return a.iter().all(|x| holds(x, owned));
+        }
+        false
+    }
+    holds(filter, owned)
+}
+
+/// `parse_feed` with the clock, the owned DLC (their ids as the feed names them) and the random draw given.
+pub fn parse_feed_with(json: &str, language: &str, now_ms: i64, owned: &[String], random: &mut dyn FnMut() -> f64) -> Vec<Card> {
     let Ok(doc) = serde_json::from_str::<Value>(json.trim_start_matches('\u{feff}')) else { return Vec::new() };
     let Some(slots) = doc.as_object() else { return Vec::new() };
     let mut names: Vec<&String> = slots.keys().collect();
@@ -38,29 +106,45 @@ pub fn parse_feed(json: &str, language: &str) -> Vec<Card> {
     let mut out = Vec::new();
     for name in names {
         let Some(groups) = slots[name].get("contentGroups").and_then(|g| g.as_array()) else { continue };
-        for g in groups {
-            let Some(items) = g.get("contentItems").and_then(|i| i.as_array()) else { continue };
-            for item in items {
-                let c = &item["content"];
-                let image_url = c["image"]["src"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-                if image_url.is_none() && c["link"]["href"].as_str().is_none() {
-                    continue;
-                }
-                out.push(Card {
-                    slot: name.clone(),
-                    id: item["id"].as_str().unwrap_or("").to_string(),
-                    title: pick(&c["title"]),
-                    text: pick(&c["text"]),
-                    image_url,
-                    image: None,
-                    link: c["link"]["href"].as_str().filter(|s| s.starts_with("http")).map(str::to_string),
-                });
+        let live: Vec<&Value> = groups.iter().filter(|g| visible(&g["settings"], now_ms) && filter_holds(&g["settings"]["filter"], owned)).collect();
+        if live.is_empty() {
+            continue;
+        }
+        // one group, drawn by weight (the first when no group has a weight)
+        let total: f64 = live.iter().map(|g| g["settings"]["weight"].as_f64().unwrap_or(0.0)).sum();
+        let mut r = random() * total;
+        let chosen = live.iter().find(|g| {
+            let w = g["settings"]["weight"].as_f64().unwrap_or(0.0);
+            if r < w {
+                true
+            } else {
+                r -= w;
+                false
             }
+        }).copied().unwrap_or(live[0]);
+        let items: Vec<&Value> = match &chosen["contentItems"] {
+            Value::Array(a) => a.iter().collect(),
+            Value::Object(o) => o.values().collect(),
+            _ => Vec::new(),
+        };
+        for item in items {
+            let c = &item["content"];
+            let image_url = c["image"]["src"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+            if image_url.is_none() && c["link"]["href"].as_str().is_none() {
+                continue;
+            }
+            out.push(Card {
+                slot: name.clone(),
+                id: item["id"].as_str().unwrap_or("").to_string(),
+                title: pick(&c["title"]),
+                text: pick(&c["text"]),
+                image_url,
+                image: None,
+                link: c["link"]["href"].as_str().filter(|s| s.starts_with("http")).map(str::to_string),
+                delay_ms: item["delay"].as_u64().or_else(|| c["delay"].as_u64()).unwrap_or(5000).max(1000),
+            });
         }
     }
-    // the same card can sit in two slots with one picture: keep the first
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|c| seen.insert((c.image_url.clone(), c.link.clone())));
     out
 }
 
@@ -170,14 +254,41 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_slots_in_order_without_duplicates() {
-        let c = parse_feed(FEED, "en");
-        assert_eq!(c.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"], "main first, duplicate and empty dropped");
-        assert_eq!(c[1].title, "Patch notes");
-        assert_eq!(c[0].link.as_deref(), Some("https://shop/y"));
-        assert_eq!(parse_feed(FEED, "de")[1].title, "Patchnotizen");
-        assert_eq!(parse_feed(FEED, "fr")[1].title, "Patch notes", "falls back to English");
+    fn picks_one_visible_group_per_slot_like_the_official_launcher() {
+        let feed = r#"{
+          "secondary-2": { "contentGroups": [
+            { "settings": {"weight": 1}, "contentItems": [
+              { "id": "tf", "delay": 4000, "content": { "image": {"src": "https://img/tf.png"}, "link": {"href": "https://x/tf"} } },
+              { "id": "tf", "content": { "image": {"src": "https://img/tf.png"}, "link": {"href": "https://x/tf"} } } ] } ] },
+          "main": { "contentGroups": [
+            { "settings": {"weight": 1, "visible": {"from": "2020-01-01T00:00:00Z", "until": "2021-01-01T00:00:00Z"}}, "contentItems": [
+              { "id": "old", "content": { "image": {"src": "https://img/old.png"}, "link": {"href": "https://x/old"} } } ] },
+            { "settings": {"weight": 1, "filter": {"owns": "dlc_nomads"}}, "contentItems": [
+              { "id": "owners", "content": { "image": {"src": "https://img/o.png"}, "link": {"href": "https://x/o"} } } ] },
+            { "settings": {"weight": 3}, "contentItems": [
+              { "id": "a", "content": { "title": {"en": "A", "de": "Ä"}, "image": {"src": "https://img/a.png"}, "link": {"href": "https://x/a"} } } ] } ] }
+        }"#;
+        let now = parse_time_ms("2026-10-06T12:00:00Z").unwrap();
+        let ids = |owned: &[String], r: f64| parse_feed_with(feed, "en", now, owned, &mut || r).into_iter().map(|c| c.id).collect::<Vec<_>>();
+        // the expired group never shows; without the DLC the filtered one does not either
+        assert_eq!(ids(&[], 0.0), vec!["a", "tf", "tf"], "main first; repeated items stay");
+        assert_eq!(ids(&[], 0.99), vec!["a", "tf", "tf"]);
+        // owning it, the draw by weight (1 : 3) picks it for small numbers
+        let owned = vec!["DLC_NOMADS".to_string()];
+        assert_eq!(ids(&owned, 0.1)[0], "owners");
+        assert_eq!(ids(&owned, 0.9)[0], "a");
+        let c = parse_feed_with(feed, "de", now, &[], &mut || 0.0);
+        assert_eq!(c[0].title, "Ä");
+        assert_eq!(c[1].delay_ms, 4000);
+        assert_eq!(c[2].delay_ms, 5000, "5 s when the item says nothing");
         assert!(parse_feed("not json", "en").is_empty());
+    }
+
+    #[test]
+    fn reads_iso_times() {
+        assert_eq!(parse_time_ms("1970-01-02T00:00:00Z"), Some(86_400_000));
+        assert_eq!(parse_time_ms("2024-01-01T00:00:00.000Z"), Some(1_704_067_200_000));
+        assert_eq!(parse_time_ms("nonsense"), None);
     }
 
     #[test]
