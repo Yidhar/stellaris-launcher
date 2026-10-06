@@ -151,6 +151,9 @@ struct App {
     seg_shown: usize,
     seg_t0: f64,
     seg_dir: f32,
+    /// what was on show before the change, drawn fading out while the new one comes in
+    prev_page: Option<Page>,
+    prev_seg: Option<usize>,
     /// development: slow the transitions down, and switch to a page two seconds after the start
     dev_slow: f64,
     dev_then: Option<Page>,
@@ -231,6 +234,8 @@ impl App {
             seg_shown: 0,
             seg_t0: -10.0,
             seg_dir: 1.0,
+            prev_page: None,
+            prev_seg: None,
             dev_slow: 1.0,
             dev_then: None,
             game_dir_text: String::new(),
@@ -611,7 +616,7 @@ impl App {
         let screen = ui.ctx().screen_rect();
         let scrim_top = avail.bottom() - 360.0;
         let mut mesh = egui::Mesh::default();
-        let (clear, dark) = (Color32::from_black_alpha(0), Color32::from_black_alpha(150));
+        let (clear, dark) = (Color32::from_black_alpha(0), Color32::from_black_alpha((150.0 * ui.opacity()) as u8));
         mesh.colored_vertex(pos2(screen.left(), scrim_top), clear);
         mesh.colored_vertex(pos2(screen.right(), scrim_top), clear);
         mesh.colored_vertex(screen.right_bottom(), dark);
@@ -668,13 +673,17 @@ impl App {
         if number.is_empty() {
             return;
         }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            ui.label(RichText::new(format!("v{number}")).size(48.0).family(bold()).color(LABEL));
-            if !codename.is_empty() {
-                ui.label(RichText::new(&codename).size(22.0).color(SECONDARY));
-            }
-        });
+        // the code name stands on the baseline of the number: both are painted, the smaller one moved so that the baselines meet
+        let baseline = |g: &egui::Galley| g.rows.first().and_then(|r| r.glyphs.first()).map_or(g.size().y, |gl| gl.pos.y);
+        let big = ui.painter().layout_no_wrap(format!("v{number}"), egui::FontId::new(48.0, bold()), LABEL);
+        let small = ui.painter().layout_no_wrap(codename.clone(), egui::FontId::new(16.0, egui::FontFamily::Proportional), SECONDARY);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), big.size().y), Sense::hover());
+        let line = row.top() + baseline(&big);
+        let small_at = pos2(row.left() + big.size().x + 10.0, line - baseline(&small));
+        ui.painter().galley(row.min, big, LABEL);
+        if !codename.is_empty() {
+            ui.painter().galley(small_at, small, SECONDARY);
+        }
         let mut detail = Vec::new();
         if !build.is_empty() {
             detail.push(format!("build {build}"));
@@ -1044,6 +1053,7 @@ impl App {
         let now = ui.input(|i| i.time);
         if self.seg != self.seg_shown {
             self.seg_dir = if self.seg >= self.seg_shown { 1.0 } else { -1.0 };
+            self.prev_seg = Some(self.seg_shown);
             self.seg_shown = self.seg;
             self.seg_t0 = now;
         }
@@ -1051,9 +1061,21 @@ impl App {
         let ease = theme::ease_out(t);
         if t < 1.0 {
             ui.ctx().request_repaint();
+        } else {
+            self.prev_seg = None;
         }
-        let rect = ui.available_rect_before_wrap().translate(vec2(self.seg_dir * 28.0 * (1.0 - ease), 0.0));
-        let mut body = ui.new_child(UiBuilder::new().id_salt("playset-body").max_rect(rect));
+        let area = ui.available_rect_before_wrap();
+        if let Some(old) = self.prev_seg {
+            let mut out = ui.new_child(UiBuilder::new().id_salt(("playset-body", old)).max_rect(area.translate(vec2(-self.seg_dir * 28.0 * ease, 0.0))));
+            out.set_opacity(1.0 - ease);
+            let dropped = Acts::default();
+            match old {
+                0 => self.playset_mods(&mut out, &dropped),
+                1 => self.playset_dlc(&mut out, &dropped),
+                _ => self.playset_plugins(&mut out, &dropped),
+            }
+        }
+        let mut body = ui.new_child(UiBuilder::new().id_salt(("playset-body", self.seg)).max_rect(area.translate(vec2(self.seg_dir * 28.0 * (1.0 - ease), 0.0))));
         body.set_opacity(ease);
         match self.seg {
             0 => self.playset_mods(&mut body, acts),
@@ -1574,17 +1596,6 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
         }
-        if self.page != self.shown_page {
-            let index = |p: Page| Page::ALL.iter().position(|x| *x == p).unwrap_or(0);
-            self.page_dir = if index(self.page) >= index(self.shown_page) { 1.0 } else { -1.0 };
-            self.shown_page = self.page;
-            self.page_t0 = now;
-        }
-        let t = ((now - self.page_t0) / (0.32 * self.dev_slow)).clamp(0.0, 1.0) as f32;
-        let ease = theme::ease_out(t);
-        if t < 1.0 {
-            ctx.request_repaint();
-        }
 
         egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
         egui::TopBottomPanel::bottom("tabs").exact_height(76.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
@@ -1594,22 +1605,34 @@ impl eframe::App for App {
                 self.page = Page::ALL[i];
             }
         });
+        if self.page != self.shown_page {
+            let index = |p: Page| Page::ALL.iter().position(|x| *x == p).unwrap_or(0);
+            self.page_dir = if index(self.page) >= index(self.shown_page) { 1.0 } else { -1.0 };
+            self.prev_page = Some(self.shown_page);
+            self.shown_page = self.page;
+            self.page_t0 = now;
+        }
+        let t = ((now - self.page_t0) / (0.32 * self.dev_slow)).clamp(0.0, 1.0) as f32;
+        let ease = theme::ease_out(t);
+        if t < 1.0 {
+            ctx.request_repaint();
+        } else {
+            self.prev_page = None;
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 16 })).show(ctx, |ui| {
+            // a cross-fade: the old page slides out the other way while the new one slides in; what the old one asks for is dropped
+            if let Some(old) = self.prev_page {
+                let rect = ui.max_rect().translate(vec2(-self.page_dir * 44.0 * ease, 0.0));
+                let mut out = ui.new_child(UiBuilder::new().id_salt(("page", old as usize)).max_rect(rect));
+                out.set_opacity(1.0 - ease);
+                let kept = std::mem::take(&mut self.acts);
+                self.render_page(&mut out, old);
+                self.acts = kept;
+            }
             let rect = ui.max_rect().translate(vec2(self.page_dir * 44.0 * (1.0 - ease), 0.0));
-            let mut page = ui.new_child(UiBuilder::new().id_salt("page").max_rect(rect));
+            let mut page = ui.new_child(UiBuilder::new().id_salt(("page", self.page as usize)).max_rect(rect));
             page.set_opacity(ease);
-            let ui = &mut page;
-            if self.game.is_err() && self.page != Page::Settings {
-                self.page_missing(ui);
-                return;
-            }
-            match self.page {
-                Page::Play => self.page_play(ui),
-                Page::Playsets => self.page_playsets(ui),
-                Page::Mods => self.page_mods(ui),
-                Page::Plugins => self.page_plugins(ui),
-                Page::Settings => self.page_settings(ui),
-            }
+            self.render_page(&mut page, self.page);
         });
         self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
@@ -1619,6 +1642,20 @@ impl eframe::App for App {
 }
 
 impl App {
+    fn render_page(&mut self, ui: &mut Ui, page: Page) {
+        if self.game.is_err() && page != Page::Settings {
+            self.page_missing(ui);
+            return;
+        }
+        match page {
+            Page::Play => self.page_play(ui),
+            Page::Playsets => self.page_playsets(ui),
+            Page::Mods => self.page_mods(ui),
+            Page::Plugins => self.page_plugins(ui),
+            Page::Settings => self.page_settings(ui),
+        }
+    }
+
     /// The window has no system frame: a hairline round it, and the edges and corners resize it (the system does the dragging).
     fn window_frame(&self, ctx: &egui::Context) {
         use egui::{CursorIcon, ResizeDirection, ViewportCommand};
