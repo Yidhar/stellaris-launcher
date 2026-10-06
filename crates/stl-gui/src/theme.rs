@@ -466,14 +466,13 @@ pub fn hero_button(ui: &mut Ui, size: Vec2, label: &str, sub: Option<&str>, icon
     let radius = r.height() / 2.0;
     let painter = ui.painter();
     let (fg, sub_color) = if primary && enabled {
-        painter.add(Shadow { offset: [0, (7.0 + 4.0 * hot - 4.0 * down) as i8], blur: (20.0 + 10.0 * hot) as u8, spread: 0, color: BLUE.gamma_multiply(0.45 + 0.25 * hot) }.as_shape(r, cr(radius)));
-        painter.rect_filled(r, cr(radius), Color32::from_rgb(16, 104, 236));
-        let top = mix(Color32::from_rgb(84, 172, 255), Color32::from_rgb(112, 190, 255), hot);
-        let bottom = mix(Color32::from_rgb(8, 96, 228), Color32::from_rgb(24, 116, 246), hot);
+        // a quiet lift under the button, not a halo; a gentle gradient; a hairline rim. No gloss.
+        painter.add(Shadow { offset: [0, (4.0 + 2.0 * hot - 2.0 * down) as i8], blur: (14.0 + 6.0 * hot) as u8, spread: 0, color: Color32::from_rgba_unmultiplied(0, 60, 160, (70.0 + 30.0 * hot) as u8) }.as_shape(r, cr(radius)));
+        painter.rect_filled(r, cr(radius), Color32::from_rgb(20, 118, 245));
+        let top = mix(Color32::from_rgb(54, 150, 255), Color32::from_rgb(72, 164, 255), hot);
+        let bottom = mix(Color32::from_rgb(14, 108, 240), Color32::from_rgb(26, 122, 248), hot);
         gradient_capsule(painter, r.shrink(0.8), top, bottom);
-        let gloss = Rect::from_min_max(pos2(r.left() + radius * 0.55, r.top() + 3.0), pos2(r.right() - radius * 0.55, r.top() + r.height() * 0.46));
-        painter.rect_filled(gloss, cr(gloss.height() / 2.0), white(30));
-        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white(80)), StrokeKind::Inside);
+        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white(34)), StrokeKind::Inside);
         (Color32::WHITE, white(205))
     } else if enabled {
         painter.add(Shadow { offset: [0, (5.0 + 3.0 * hot) as i8], blur: 16, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(r, cr(radius)));
