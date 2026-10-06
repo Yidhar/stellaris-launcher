@@ -316,41 +316,19 @@ fn run() -> Result<()> {
             let db = official::find_database(&game.data_dir).context("no launcher-v2*.sqlite in the game data folder: the official launcher has not been used here")?;
             let sets = official::read_playsets(&db)?;
             let known = mods::scan(&game.data_dir);
-            let mut imported = 0;
-            let mut made_now: Vec<String> = Vec::new();
-            for s in sets.iter().filter(|s| name.as_ref().map_or(true, |n| s.name.eq_ignore_ascii_case(n))) {
-                // the official launcher allows two playsets with one name (this machine has two "Initial playset"): the later ones get a number
-                let mut our_name = s.name.clone();
-                let mut n = 2;
-                while made_now.iter().any(|m| m.eq_ignore_ascii_case(&our_name)) {
-                    our_name = format!("{} ({n})", s.name);
-                    n += 1;
+            for o in stl_core::import::import_official(&mut store, &known, &sets, name.as_deref(), *replace)? {
+                if o.skipped {
+                    println!("skipped {} (we have one with that name; --replace)", o.name);
+                } else {
+                    println!(
+                        "imported {} ({} mods, {} enabled, {} without a descriptor in the mod folder){}",
+                        o.name,
+                        o.mods,
+                        o.enabled,
+                        o.missing,
+                        if o.was_active { "  [was active in the official launcher]" } else { "" }
+                    );
                 }
-                let existing = store.find(&our_name);
-                if existing.is_some() && !*replace {
-                    println!("skipped {our_name} (we have one with that name; --replace)");
-                    continue;
-                }
-                let i = match existing {
-                    Some(i) => {
-                        store.playsets[i].mods.clear();
-                        i
-                    }
-                    None => store.add_playset(&our_name)?,
-                };
-                made_now.push(our_name.clone());
-                let mut missing = 0;
-                for m in &s.mods {
-                    if !known.iter().any(|k| k.id == m.registry_id) {
-                        missing += 1;
-                    }
-                    store.playsets[i].set_mod(&m.registry_id, m.enabled);
-                }
-                println!("imported {} ({} mods, {} enabled, {} without a descriptor in the mod folder){}", our_name, s.mods.len(), s.mods.iter().filter(|m| m.enabled).count(), missing, if s.is_active { "  [was active in the official launcher]" } else { "" });
-                imported += 1;
-            }
-            if imported == 0 && name.is_some() {
-                bail!("no playset called {} in the official launcher (stl import-official lists them by importing; try without --name)", name.as_ref().unwrap());
             }
             store.save()?;
         }

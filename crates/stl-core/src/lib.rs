@@ -3,6 +3,7 @@
 
 pub mod dlcload;
 pub mod game;
+pub mod import;
 pub mod launch;
 pub mod mods;
 pub mod official;

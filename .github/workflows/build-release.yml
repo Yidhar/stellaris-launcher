@@ -1,0 +1,45 @@
+name: Build and release
+
+# Every push to main and every pull request builds stl.exe and stellaris-launcher.exe, runs the tests and keeps the packaged zip as a workflow
+# artifact. Pushing a tag v* (for example v0.1.0) also publishes a GitHub Release with the zip and its SHA-256 file.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # creating the release
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          ./scripts/package_release.ps1 -Version $ver
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stellaris-launcher-${{ steps.package.outputs.version }}
+          path: package/*.zip*
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: package/*.zip*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            A launcher for Stellaris that starts the game itself and manages playsets, mods and DLL plugins. Windows x64, Stellaris 4.5.
+            Unpack and run `stellaris-launcher.exe` (the window) or `stl.exe` (the command line; `stl --help`). `stl import-official` copies your
+            playsets from the Paradox Launcher (its database is only read). Nothing is installed; your data is in `%APPDATA%\stellaris-launcher`.
+            See docs/DESIGN.md and docs/PLUGINS.md.
