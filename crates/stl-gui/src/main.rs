@@ -3580,17 +3580,16 @@ impl App {
         if drag.double_clicked() {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
-        // the mark: a blue rounded square with the star, as in the window icon
+        // the mark: the star alone, in white like the title (no coloured tile, which stood out against the artwork)
         let mark = Rect::from_center_size(pos2(rect.left() + 34.0 + 10.0, rect.center().y), Vec2::splat(20.0));
-        ui.painter().rect_filled(mark, egui::CornerRadius::same(6), BLUE);
         let star: Vec<egui::Pos2> = (0..16)
             .map(|k| {
                 let a = k as f32 * std::f32::consts::TAU / 16.0;
-                let r = if k % 4 == 0 { 7.0 } else { 2.6 };
+                let r = if k % 4 == 0 { 9.0 } else { 3.2 };
                 mark.center() + vec2(a.cos() * r, a.sin() * r)
             })
             .collect();
-        ui.painter().add(Shape::convex_polygon(star, Color32::WHITE, egui::Stroke::NONE));
+        ui.painter().add(Shape::convex_polygon(star, theme::white(225), egui::Stroke::NONE));
         ui.painter().text(pos2(mark.right() + 9.0, rect.center().y), egui::Align2::LEFT_CENTER, "Stellaris Launcher", egui::FontId::new(13.5, bold()), theme::white(200));
         // the buttons
         let mut buttons = ui.new_child(UiBuilder::new().id_salt("window-buttons").max_rect(rect.shrink2(vec2(18.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
