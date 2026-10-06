@@ -1134,7 +1134,9 @@ impl App {
         let cards = self.news.cards.clone();
         let height = news_card_height(ui);
         let gap = 16.0;
-        let width = ui.available_width();
+        // the fold handle stands at the end of the row
+        let handle_w = 26.0;
+        let width = ui.available_width() - handle_w - gap;
 
         // every card once (a slot lists some several times to show them more often), the main slot first; a page at a time
         let mut seen = std::collections::HashSet::new();
@@ -1168,14 +1170,13 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new(tr(lang, "play.news").to_uppercase()).size(12.0).color(SECONDARY));
-            // fold the strip away to the side, or bring it back
-            let fold_icon = if folded { Icon::Right } else { Icon::Left };
-            let hint = if folded { tr(lang, "play.news_show") } else { tr(lang, "play.news_hide") };
-            if circle_button(ui, fold_icon, theme::white(22), SECONDARY, true).on_hover_text(hint).clicked() {
-                acts.push(Act::FoldNews(!folded));
+            // folded, the title row keeps its place (unseen), so that the cards do not jump
+            if folded && open_t < 0.01 {
+                ui.set_invisible();
             }
-            if !folded {
+            ui.set_opacity(open_t);
+            ui.label(RichText::new(tr(lang, "play.news").to_uppercase()).size(12.0).color(SECONDARY));
+            {
                 ui.add_enabled_ui(open_t > 0.5, |ui| {
                     if circle_button(ui, Icon::Refresh, theme::white(22), SECONDARY, !loading).clicked() {
                         acts.push(Act::RefreshNews);
@@ -1195,14 +1196,12 @@ impl App {
             }
         });
         ui.add_space(8.0);
-        if open_t <= 0.001 {
-            // folded: only the title row stays
-        } else if order.is_empty() {
+        if order.is_empty() {
             let text = if loading { "…".to_string() } else { self.news.error.clone().unwrap_or_else(|| tr(lang, "play.news_empty").to_string()) };
-            ui.label(RichText::new(text).size(12.5).color(SECONDARY.gamma_multiply(open_t)));
+            ui.label(RichText::new(text).size(12.5).color(SECONDARY));
         } else {
             let (from, to) = pages[self.news.page];
-            let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+            let (area, _) = ui.allocate_exact_size(vec2(width + gap + handle_w, height), Sense::hover());
             if page_count > 1 && open_t > 0.99 && ui.rect_contains_pointer(area) {
                 let d = ui.input(|i| i.raw_scroll_delta);
                 let amount = if d.x.abs() > d.y.abs() { d.x } else { d.y };
@@ -1215,17 +1214,39 @@ impl App {
                     self.news.wheel = now;
                 }
             }
-            // sliding in from the left edge: the row moves by its own width and fades
-            let ease = 1.0 - (1.0 - open_t).powi(3);
-            let shift = -(1.0 - ease) * (width * 0.6 + 40.0);
+            // folding slides the row behind the window's left edge, leaving the end of its last card in view (a hint that there is more)
+            let row_w: f32 = sizes[from..to].iter().map(|s| s.x).sum::<f32>() + gap * (to - from).saturating_sub(1) as f32;
+            let peek = 30.0;
+            let ease = { let t = open_t; if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 } };
+            let shift = (1.0 - ease) * (peek - row_w);
+            let screen = ui.ctx().screen_rect();
             let mut row = ui.new_child(UiBuilder::new().id_salt("news-row").max_rect(area));
-            row.set_clip_rect(Rect::from_min_max(pos2(area.left() - 4.0, area.top() - 4.0), pos2(area.right() + 4.0, area.bottom() + 4.0)));
-            row.set_opacity(ease);
+            row.set_clip_rect(Rect::from_min_max(pos2(screen.left(), area.top() - 4.0), pos2(area.right() + 4.0, area.bottom() + 4.0)));
+            row.set_opacity(0.55 + 0.45 * ease);
             let mut x = 0.0;
             for k in from..to {
                 let r = Rect::from_min_size(area.min + vec2(x + shift, 0.0), sizes[k]);
                 x += sizes[k].x + gap;
                 self.draw_card(&mut row, &cards[order[k]], r, theme::RADIUS, &format!("card{k}"), &acts);
+            }
+            // the handle: a tall glass capsule right after the cards, its chevron pointing where the row will go
+            let hx = area.left() + row_w + shift + gap * (0.5 + 0.5 * ease);
+            let hh = (height * 0.62).max(64.0);
+            let handle = Rect::from_min_size(pos2(hx, area.center().y - hh / 2.0), vec2(handle_w, hh));
+            let resp = ui.interact(handle, egui::Id::new("news-fold"), Sense::click());
+            // folded, the peeking card also opens the row again
+            let peek_rect = Rect::from_min_max(pos2(screen.left(), area.top()), pos2(handle.left(), area.bottom()));
+            let peek_resp = if folded { Some(ui.interact(peek_rect, egui::Id::new("news-peek"), Sense::click())) } else { None };
+            let hot = resp.hovered() || peek_resp.as_ref().is_some_and(|r| r.hovered());
+            let lit = ui.ctx().animate_bool_with_time(resp.id.with("lit"), hot, 0.15);
+            ui.painter().add(theme::glass_shapes(ui.ctx(), handle, handle_w / 2.0));
+            ui.painter().rect_filled(handle, egui::CornerRadius::same((handle_w / 2.0) as u8), theme::white((18.0 * lit) as u8));
+            let icon = if folded { Icon::Right } else { Icon::Left };
+            icon.draw(ui.painter(), handle.center(), 18.0, if hot { LABEL } else { SECONDARY }, 2.0);
+            let hint = if folded { tr(lang, "play.news_show") } else { tr(lang, "play.news_hide") };
+            let clicked = resp.on_hover_text(hint).clicked() || peek_resp.is_some_and(|r| r.on_hover_cursor(CursorIcon::PointingHand).clicked());
+            if clicked {
+                acts.push(Act::FoldNews(!folded));
             }
         }
         if self.news.rx.is_some() || self.assets.busy() {
@@ -1291,10 +1312,9 @@ impl App {
             let screen = ui.ctx().screen_rect();
             let room_below = screen.bottom() - 66.0 - trigger.rect.bottom();
             let room_above = trigger.rect.top() - 42.0;
-            let (side, room) = if room_below >= room_above { (egui::AboveOrBelow::Below, room_below) } else { (egui::AboveOrBelow::Above, room_above) };
+            let (above, room) = if room_below >= room_above { (false, room_below) } else { (true, room_above) };
             let list_h = (room - 90.0).clamp(120.0, 300.0);
-            egui::popup::popup_above_or_below_widget(ui, popup_id, &trigger, side, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui| {
-                ui.set_min_width(trigger.rect.width() - 12.0);
+            theme::menu_on(ui, popup_id, &trigger, trigger.rect.width(), above, |ui| {
                 if self.store.playsets.len() > 6 {
                     let r = theme::search_field(ui, &mut self.playset_filter, tr(lang, "mods.search"), ui.available_width());
                     if std::mem::take(&mut self.focus_playset_filter) {

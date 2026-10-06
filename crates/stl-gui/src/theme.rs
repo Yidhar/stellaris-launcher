@@ -505,12 +505,19 @@ pub fn divider(ui: &mut Ui) {
 /// The menu of a drop-down: a floating glass card under `anchor`, its left edge on the anchor's, at least `width` wide. Open while the
 /// popup `id` is open; a click outside it (or Esc) closes it. `add` lays out `menu_item`s.
 pub fn menu<R>(ui: &mut Ui, id: egui::Id, anchor: &Response, width: f32, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    menu_on(ui, id, anchor, width, false, add)
+}
+
+/// `menu`, opening above the anchor when `above` (its bottom edge just over the anchor's top).
+pub fn menu_on<R>(ui: &mut Ui, id: egui::Id, anchor: &Response, width: f32, above: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     if !ui.memory(|m| m.is_popup_open(id)) {
         return None;
     }
+    let (pivot, at) = if above { (egui::Align2::LEFT_BOTTOM, anchor.rect.left_top() - vec2(0.0, 6.0)) } else { (egui::Align2::LEFT_TOP, anchor.rect.left_bottom() + vec2(0.0, 6.0)) };
     let shown = egui::Area::new(id.with("menu"))
         .order(egui::Order::Foreground)
-        .fixed_pos(anchor.rect.left_bottom() + vec2(0.0, 6.0))
+        .pivot(pivot)
+        .fixed_pos(at)
         .show(ui.ctx(), |ui| {
             let w = width.max(anchor.rect.width());
             ui.set_min_width(w);
