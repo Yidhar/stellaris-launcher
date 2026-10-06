@@ -568,6 +568,17 @@ fn run() -> Result<()> {
                 let win = k.winner.map(|w| name(k.defs[w].source)).unwrap_or_else(|| "all kept".into());
                 println!("  [{:?}] {}: {} [{:?}]  →  {}  of {}", k.severity, k.folder, k.key, k.rule, win, who.join(", "));
             }
+            if let Some(m) = focus {
+                let ine = &r.per_mod[m].ineffective;
+                let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                for (folder, _, mine, game) in ine {
+                    *by.entry(format!("{folder}  [{}  vs game {}]", mine.rsplit('/').next().unwrap_or(""), game.rsplit('/').next().unwrap_or(""))).or_default() += 1;
+                }
+                println!("\nits definitions the game's own beat ({}), by folder and files:", ine.len());
+                for (k, n) in by {
+                    println!("  {n:>4}  {k}");
+                }
+            }
             println!("\nper mod (overrides others / overridden / game files replaced / game definitions overridden):");
             for (i, m) in list.iter().enumerate() {
                 let s = &r.per_mod[i];

@@ -19,6 +19,11 @@ to something that does not exist) that the game reports in `error.log` with its 
 | `events` | `an event with id [stltest.1] already exists! … zzz_stltest.txt`: the first read wins (FIOS). |
 | `common/section_templates` | `duplicate section template found … [STLTEST_SECTION] … zzz_stltest.txt`: the first read wins (FIOS). Entries are known by their inner `key`, not by `ship_section_template`. |
 | `common/traits` | Both `opposites` were resolved after loading: **both copies are kept**. A trait defined twice is broken. |
+| `common/scripted_triggers`, `common/scripted_effects` | `Object with key … using the one at … zzz_stltest.txt`: the last read wins (LIOS). |
+| `common/agreement_term_values` | The same message: **LIOS**. The CWTools config says FIOS. |
+| `common/component_templates` | Only the `aaa_` copy's prerequisite was resolved after loading (and the game logs `Component template key used multiple times`): FIOS. |
+| `common/static_modifiers`, `common/scripted_loc` | Nothing tells which copy is used (both modifier icons are looked up; defined texts are checked only when shown). Static modifiers keep the CWTools rule (LIOS); scripted_loc, where the CWTools config and Irony disagree, is "unknown". |
+| **The order of file names** | `Bcase_stltest.txt` was read before `acase_stltest.txt`: byte by byte, **upper case before lower case** (`FOXCrisis.txt` comes before `crisis_events_1.txt`). |
 | A UTF-8 byte-order mark | The game takes it as part of the **first name** in the file (`﻿stltest_tech_lios`), so that first definition gets another name and overrides nothing. A comment after the mark is harmless (84 vanilla files start that way). |
 
 So **the load order matters only for whole files.** Which of two definitions of the same name wins depends on the file names and the
@@ -40,8 +45,9 @@ Irony Mod Manager ([github.com/bcssov/IronyModManager](https://github.com/bcssov
 - the same mod on twice (same name, or the same Workshop id local and subscribed);
 - made for another *minor* version and **replacing game files whole**: the game's copies of those files may have changed since;
 - files whose first definition a byte-order mark renames;
-- definitions the game's own beat (a FIOS folder where the game's file is read first; a LIOS folder where the mod's file name sorts
-  before the game's): the override does nothing;
+- definitions that do nothing: in a FIOS folder the game's file is read first. (In a LIOS folder a mod file that sorts *before* the
+  game's — `!!!ph_…`, `000_…_dummy` — is a fallback on purpose, a placeholder for DLC content the player may not own; it is counted
+  in the mod's details, not reported as a problem);
 - definitions kept twice in a folder that keeps both;
 - a patch loaded before the mod it patches (so its files lose).
 

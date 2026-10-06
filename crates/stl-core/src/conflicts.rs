@@ -30,7 +30,8 @@ pub enum Rule {
     Unknown,
 }
 
-/// (folder, rule). Longest matching folder wins. Measured on 4.5.2: technology, strategic_resources (LIOS, the CWT config says DUPL),
+/// (folder, rule). Longest matching folder wins. Measured on 4.5.2: technology, scripted_triggers, scripted_effects, agreement_term_values
+/// (LIOS; the CWT config says FIOS for the last), strategic_resources (LIOS, the CWT config says DUPL), component_templates (FIOS),
 /// traits (both kept, the CWT config says "cannot override"), events, scripted_variables and section_templates (FIOS; the game logs the
 /// later copy as a duplicate). The rest is the CWT config's.
 const RULES: &[(&str, Rule)] = &[
@@ -54,23 +55,24 @@ const RULES: &[(&str, Rule)] = &[
     ("common/starbase_buildings", Rule::Lios), ("common/starbase_levels", Rule::Lios), ("common/starbase_modules", Rule::Lios),
     ("common/starbase_types", Rule::Lios), ("common/static_modifiers", Rule::Lios), ("common/subjects", Rule::Lios), ("common/system_types", Rule::Lios),
     ("common/technology", Rule::Lios), ("common/trade_conversions", Rule::Lios), ("common/tradition_categories", Rule::Lios),
-    ("common/traditions", Rule::Lios), ("common/war_goals", Rule::Lios), ("common/agreement_presets", Rule::Lios), ("common/agreement_resources", Rule::Lios),
+    ("common/traditions", Rule::Lios), ("common/war_goals", Rule::Lios), ("common/agreement_presets", Rule::Lios), ("common/agreement_term_values", Rule::Lios), ("common/agreement_resources", Rule::Lios),
     ("common/agreement_terms", Rule::Lios), ("common/ai_budget", Rule::Lios), ("common/ai_espionage", Rule::Lios), ("common/colony_automation", Rule::Lios),
     ("common/colony_automation_exceptions", Rule::Lios), ("common/country_container", Rule::Lios), ("common/country_customization", Rule::Lios),
     ("common/observation_station_missions", Rule::Lios), ("common/opinion_modifiers", Rule::Lios), ("common/planet_classes", Rule::Lios),
     ("common/ship_categories", Rule::Lios), ("common/ship_sets", Rule::Lios), ("common/storm_types", Rule::Lios), ("common/zone_slots", Rule::Lios),
     ("common/zones", Rule::Lios), ("common/economic_plans", Rule::Lios), ("common/strategic_resources", Rule::Lios),
-    ("common/agreement_term_values", Rule::Fios), ("common/component_sets", Rule::Fios), ("common/component_templates", Rule::Fios),
+    ("common/component_sets", Rule::Fios), ("common/component_templates", Rule::Fios),
     ("common/event_chains", Rule::Fios), ("common/global_ship_designs", Rule::Fios), ("common/governments/authorities", Rule::Fios),
-    ("common/scripted_loc", Rule::Fios), ("common/scripted_variables", Rule::Fios), ("common/ship_behaviors", Rule::Fios),
+    ("common/scripted_variables", Rule::Fios), ("common/ship_behaviors", Rule::Fios),
     ("common/solar_system_initializers", Rule::Fios), ("common/special_projects", Rule::Fios), ("common/start_screen_messages", Rule::Fios),
     ("events", Rule::Fios),
     ("common/name_lists", Rule::Duplicates), ("common/terraform", Rule::Duplicates), ("common/traits", Rule::Duplicates),
     ("common/achievements", Rule::Duplicates), ("common/section_templates", Rule::Fios),
     ("common/on_actions", Rule::Merge), ("common/country_limits/ownership_limits", Rule::Merge), ("common/job_tags", Rule::Merge),
     ("common/component_tags", Rule::Merge), ("common/trait_tags", Rule::Merge), ("common/defines", Rule::Merge),
-    // not measured (the game logs nothing about it): which duplicate text is shown is not known, so only shown as possible
-    ("localisation", Rule::Unknown),
+    // not measured (the game logs nothing about it): which duplicate is used is not known, so only shown as possible. scripted_loc:
+    // the CWTools config says FIOS, Irony does not list it
+    ("localisation", Rule::Unknown), ("common/scripted_loc", Rule::Unknown),
 ];
 
 /// The rule of a folder (`common/technology/category` falls back to `common/technology` when it has none of its own).
@@ -467,6 +469,11 @@ pub struct ModSummary {
     pub loses: usize,
     pub replaces_vanilla_files: usize,
     pub overrides_vanilla_keys: usize,
+    /// its definitions the game's own beat: (folder, key, its file, the game's file)
+    pub ineffective: Vec<(String, String, String, String)>,
+    /// its definitions read before the game's in a folder where the last one wins: fallbacks the game's own replace (placeholders for
+    /// content of DLC the player may not own, `!!!ph_…`, `000_…_dummy`), counted, not a problem
+    pub fallbacks: usize,
     /// the mods it patches (positions in the load order)
     pub patches: Vec<usize>,
 }
@@ -745,10 +752,16 @@ pub fn analyze(input: &Input, progress: &(dyn Fn(f32) + Sync)) -> Report {
     for folder in folders {
         let mut files = per_folder[folder].clone();
         // the game reads a folder's files in name order; localisation/replace after the rest, so it wins
+        // the game reads a folder's files in file-name order, byte by byte (upper case before lower case: measured); localisation/replace
+        // after the rest, so it wins
+        let disk_name = |path: &str, src: usize| -> String {
+            let orig = original.get(&(src, path)).copied().unwrap_or(path);
+            orig.rsplit('/').next().unwrap_or(orig).to_string()
+        };
         files.sort_by(|a, b| {
             let ra = a.0.contains("/replace/");
             let rb = b.0.contains("/replace/");
-            ra.cmp(&rb).then_with(|| a.0.rsplit('/').next().cmp(&b.0.rsplit('/').next()))
+            ra.cmp(&rb).then_with(|| disk_name(&a.0, a.1).as_bytes().cmp(disk_name(&b.0, b.1).as_bytes()))
         });
         let rule = rule_for(folder);
         let mut defs: HashMap<&str, Vec<Def>> = HashMap::new();
@@ -783,8 +796,12 @@ pub fn analyze(input: &Input, progress: &(dyn Fn(f32) + Sync)) -> Report {
             if let Some(w) = winner {
                 if d[w].source == 0 {
                     for x in d.iter().filter(|x| x.source > 0) {
-                        let why = if rule == Rule::Fios { "first" } else { "last" };
-                        ineffective[x.source - 1].push(format!("{folder}: {key} ({why})"));
+                        if rule == Rule::Lios {
+                            report.per_mod[x.source - 1].fallbacks += 1;
+                            continue;
+                        }
+                        ineffective[x.source - 1].push(format!("{folder}: {key}"));
+                        report.per_mod[x.source - 1].ineffective.push((folder.clone(), key.to_string(), x.file.clone(), d[w].file.clone()));
                     }
                 } else if with_game {
                     report.per_mod[d[w].source - 1].overrides_vanilla_keys += 1;
@@ -980,7 +997,7 @@ pub fn describe(issue: &Issue) -> String {
         IssueKind::Duplicate => format!("is on twice (also as \"{}\")", a(0)),
         IssueKind::OutdatedReplacesVanilla => format!("made for {} and replaces {} game files whole: they may be out of date", a(0), a(1)),
         IssueKind::BomFirstKey => format!("{} file(s) start with a byte-order mark that renames their first definition, e.g. {}", a(0), a(1)),
-        IssueKind::IneffectiveOverride => format!("{} definition(s) are overridden back by the game's own, e.g. {}", a(0), a(1)),
+        IssueKind::IneffectiveOverride => format!("{} definition(s) do nothing: the game's own file is read first in a folder where the first one wins, e.g. {}", a(0), a(1)),
         IssueKind::DuplicateDefinitions => format!("{} definition(s) exist twice in a folder that keeps both, e.g. {}", a(0), a(1)),
         IssueKind::PatchBeforeTarget => format!("patches \"{}\" but is loaded before it, so its files lose", a(0)),
     }
@@ -1010,6 +1027,9 @@ mod tests {
         assert_eq!(rule_for("common/strategic_resources"), Rule::Lios);
         assert_eq!(rule_for("common/something_new"), Rule::Unknown);
         assert_eq!(rule_for("localisation/english"), Rule::Unknown);
+        assert_eq!(rule_for("common/agreement_term_values"), Rule::Lios);
+        assert_eq!(rule_for("common/component_templates"), Rule::Fios);
+        assert_eq!(rule_for("common/scripted_loc"), Rule::Unknown);
         assert!(same_minor("v4.5.1", "4.5.2"));
         assert!(!same_minor("v4.4.*", "4.5.2"));
     }
@@ -1053,6 +1073,8 @@ mod tests {
         write(&game, "common/technology/00_tech.txt", "tech_a = { }\ntech_b = { }\n");
         write(&game, "events/00_events.txt", "namespace = v\ncountry_event = { id = v.1 }\n");
         write(&game, "common/traits/00_traits.txt", "trait_x = { }\n");
+        write(&game, "events/crisis_events.txt", "namespace = c\ncountry_event = { id = c.1 }\n");
+        write(&game, "common/scripted_triggers/02_triggers.txt", "dlc_trigger = { always = yes }\n");
         write(&game, "interface/main.gui", "x");
         let a = a_mod(&base, "A", "");
         write(a.path.as_ref().unwrap(), "common/technology/zzz_a.txt", "tech_a = { }\nmy_tech = { }\n");
@@ -1060,6 +1082,10 @@ mod tests {
         write(a.path.as_ref().unwrap(), "interface/main.gui", "a");
         write(a.path.as_ref().unwrap(), "events/zz_a.txt", "namespace = v\ncountry_event = { id = v.1 }\n");
         write(a.path.as_ref().unwrap(), "common/traits/a_traits.txt", "trait_x = { }\n");
+        // FOX… sorts before crisis… byte by byte (upper case first): A's event is read first and wins
+        write(a.path.as_ref().unwrap(), "events/FOXCrisis.txt", "namespace = c\ncountry_event = { id = c.1 }\n");
+        // a placeholder read before the game's own trigger: a fallback, not a problem
+        write(a.path.as_ref().unwrap(), "common/scripted_triggers/!!!ph_triggers.txt", "dlc_trigger = { always = no }\n");
         let b = a_mod(&base, "B", "dependencies = { \"A\" \"Not Here\" }\n");
         write(b.path.as_ref().unwrap(), "common/technology/aaa_b.txt", "my_tech = { }\n");
         write(b.path.as_ref().unwrap(), "common/technology/a_own.txt", "a_only = { }\n");
@@ -1078,6 +1104,9 @@ mod tests {
         assert_eq!(k.defs[k.winner.unwrap()].source, 2);
         // the event A redefines: FIOS, the game's file is read first, so A's does nothing
         assert!(r.issues.iter().any(|i| i.mod_index == Some(1) && i.kind == IssueKind::IneffectiveOverride));
+        assert!(!r.per_mod[1].ineffective.iter().any(|x| x.0 == "events" && x.1 == "c.1"), "FOXCrisis.txt is read before crisis_events.txt");
+        assert!(!r.per_mod[1].ineffective.iter().any(|x| x.1 == "dlc_trigger"));
+        assert_eq!(r.per_mod[1].fallbacks, 1);
         // a trait of the game's name: both kept
         assert!(r.issues.iter().any(|i| i.mod_index == Some(1) && i.kind == IssueKind::DuplicateDefinitions));
         let kinds = |m: usize| r.issues.iter().filter(|i| i.mod_index == Some(m)).map(|i| i.kind.clone()).collect::<Vec<_>>();

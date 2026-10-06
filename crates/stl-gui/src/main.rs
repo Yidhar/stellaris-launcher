@@ -1947,7 +1947,7 @@ impl App {
                 // what the check found about this mod: its worst problem and how much it overrides / is overridden
                 let found = current.as_ref().zip(position.get(&m.id)).map(|(r, &pos)| {
                     use stl_core::conflicts::Severity;
-                    let mine: Vec<&stl_core::conflicts::Issue> = r.report.issues.iter().filter(|x| x.mod_index == Some(pos)).collect();
+                    let mine: Vec<&stl_core::conflicts::Issue> = r.report.issues.iter().filter(|x| x.mod_index == Some(pos) && x.severity > Severity::Info).collect();
                     let worst = mine.iter().map(|x| x.severity).max();
                     let s = &r.report.per_mod[pos];
                     (pos, mine.len(), worst == Some(Severity::Error), s.wins, s.loses)
@@ -3032,6 +3032,9 @@ impl App {
                     let s = &r.report.per_mod[*m];
                     ui.label(RichText::new(name(m + 1)).size(22.0).family(bold()));
                     ui.label(RichText::new(tr_args(lang, "chk.mod_sub", &[&s.wins.to_string(), &s.loses.to_string(), &s.replaces_vanilla_files.to_string(), &s.overrides_vanilla_keys.to_string()])).size(12.5).color(SECONDARY));
+                    if s.fallbacks > 0 {
+                        ui.label(RichText::new(tr_args(lang, "chk.fallbacks", &[&s.fallbacks.to_string()])).size(12.5).color(SECONDARY));
+                    }
                     if !s.patches.is_empty() {
                         let names: Vec<String> = s.patches.iter().map(|&t| name(t + 1)).collect();
                         ui.label(RichText::new(tr_args(lang, "chk.patches", &[&names.join(", ")])).size(12.5).color(theme::TEAL_TEXT));
