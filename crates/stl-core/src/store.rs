@@ -51,6 +51,9 @@ pub struct Store {
     /// fetch the public news feed; None = yes
     #[serde(default)]
     pub news_online: Option<bool>,
+    /// the Play page's news strip is folded away to the side
+    #[serde(default)]
+    pub news_folded: Option<bool>,
     /// the Mods page: `name`, `updated` or `source`; and `list` or `compact`
     #[serde(default)]
     pub mods_sort: Option<String>,

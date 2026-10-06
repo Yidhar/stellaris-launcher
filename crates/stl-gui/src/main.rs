@@ -168,6 +168,7 @@ enum Act {
     SetLang(Option<Lang>),
     SetBackground(&'static str),
     SetNewsOnline(bool),
+    FoldNews(bool),
     ChangeGameDir,
     UseGameDir(String),
     Open(String),
@@ -199,9 +200,9 @@ impl Acts {
     }
 }
 
-/// The news cards' height: about a fifth of the window, between 128 and 200 points.
-fn news_card_height(ui: &Ui) -> f32 {
-    (ui.ctx().screen_rect().height() * 0.22).clamp(128.0, 200.0)
+/// The news cards' height.
+fn news_card_height(_ui: &Ui) -> f32 {
+    128.0
 }
 
 struct News {
@@ -918,6 +919,10 @@ impl App {
                 self.store.background = Some(b.to_string());
                 self.save();
             }
+            Act::FoldNews(f) => {
+                self.store.news_folded = Some(f);
+                self.save();
+            }
             Act::SetNewsOnline(on) => {
                 self.store.news_online = Some(on);
                 self.save();
@@ -1129,29 +1134,12 @@ impl App {
         let gap = 16.0;
         let width = ui.available_width();
 
-        // one card per slot (main, secondary-1, secondary-2), each showing its items in turn for their delay, as the official launcher does
-        let mut slots: Vec<Vec<usize>> = Vec::new();
-        for (i, c) in cards.iter().enumerate() {
-            match slots.last_mut() {
-                Some(last) if cards[last[0]].slot == c.slot => last.push(i),
-                _ => slots.push(vec![i]),
-            }
-        }
-        let current = |items: &Vec<usize>| -> (usize, usize) {
-            let total: u64 = items.iter().map(|&i| cards[i].delay_ms).sum::<u64>().max(1);
-            let mut t = ((now * 1000.0) as u64) % total;
-            for (k, &i) in items.iter().enumerate() {
-                if t < cards[i].delay_ms {
-                    return (k, i);
-                }
-                t -= cards[i].delay_ms;
-            }
-            (0, items[0])
-        };
-        let order: Vec<usize> = slots.iter().map(|items| current(items).1).collect();
-        if slots.iter().any(|s| s.len() > 1) {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
-        }
+        // every card once (a slot lists some several times to show them more often), the main slot first; a page at a time
+        let mut seen = std::collections::HashSet::new();
+        let order: Vec<usize> = (0..cards.len()).filter(|&i| seen.insert((cards[i].image_url.clone(), cards[i].link.clone()))).collect();
+        let folded = self.store.news_folded == Some(true);
+        // 1 = open, 0 = folded away to the left
+        let open_t = ui.ctx().animate_bool_with_time(egui::Id::new("news-open"), !folded, 0.32);
         let sizes: Vec<Vec2> = order
             .iter()
             .map(|&i| {
@@ -1179,10 +1167,20 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(RichText::new(tr(lang, "play.news").to_uppercase()).size(12.0).color(SECONDARY));
-            if circle_button(ui, Icon::Refresh, theme::white(22), SECONDARY, !loading).clicked() {
-                acts.push(Act::RefreshNews);
+            // fold the strip away to the side, or bring it back
+            let fold_icon = if folded { Icon::Right } else { Icon::Left };
+            let hint = if folded { tr(lang, "play.news_show") } else { tr(lang, "play.news_hide") };
+            if circle_button(ui, fold_icon, theme::white(22), SECONDARY, true).on_hover_text(hint).clicked() {
+                acts.push(Act::FoldNews(!folded));
             }
-            if page_count > 1 {
+            if !folded {
+                ui.add_enabled_ui(open_t > 0.5, |ui| {
+                    if circle_button(ui, Icon::Refresh, theme::white(22), SECONDARY, !loading).clicked() {
+                        acts.push(Act::RefreshNews);
+                    }
+                });
+            }
+            if page_count > 1 && !folded {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if circle_button(ui, Icon::Right, theme::white(22), LABEL, self.news.page + 1 < page_count).clicked() {
                         self.news.page += 1;
@@ -1195,13 +1193,15 @@ impl App {
             }
         });
         ui.add_space(8.0);
-        if order.is_empty() {
+        if open_t <= 0.001 {
+            // folded: only the title row stays
+        } else if order.is_empty() {
             let text = if loading { "…".to_string() } else { self.news.error.clone().unwrap_or_else(|| tr(lang, "play.news_empty").to_string()) };
-            ui.label(RichText::new(text).size(12.5).color(SECONDARY));
+            ui.label(RichText::new(text).size(12.5).color(SECONDARY.gamma_multiply(open_t)));
         } else {
             let (from, to) = pages[self.news.page];
             let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-            if page_count > 1 && ui.rect_contains_pointer(area) {
+            if page_count > 1 && open_t > 0.99 && ui.rect_contains_pointer(area) {
                 let d = ui.input(|i| i.raw_scroll_delta);
                 let amount = if d.x.abs() > d.y.abs() { d.x } else { d.y };
                 if amount.abs() > 1.0 && now - self.news.wheel > 0.3 {
@@ -1213,21 +1213,17 @@ impl App {
                     self.news.wheel = now;
                 }
             }
+            // sliding in from the left edge: the row moves by its own width and fades
+            let ease = 1.0 - (1.0 - open_t).powi(3);
+            let shift = -(1.0 - ease) * (width * 0.6 + 40.0);
+            let mut row = ui.new_child(UiBuilder::new().id_salt("news-row").max_rect(area));
+            row.set_clip_rect(Rect::from_min_max(pos2(area.left() - 4.0, area.top() - 4.0), pos2(area.right() + 4.0, area.bottom() + 4.0)));
+            row.set_opacity(ease);
             let mut x = 0.0;
             for k in from..to {
-                let r = Rect::from_min_size(area.min + vec2(x, 0.0), sizes[k]);
+                let r = Rect::from_min_size(area.min + vec2(x + shift, 0.0), sizes[k]);
                 x += sizes[k].x + gap;
-                self.draw_card(ui, &cards[order[k]], r, theme::RADIUS, &format!("card{k}"), &acts);
-                let items = &slots[k];
-                if items.len() > 1 {
-                    let at = current(items).0;
-                    let n = items.len().min(8);
-                    let w = n as f32 * 9.0;
-                    for d in 0..n {
-                        let c = pos2(r.center().x - w / 2.0 + 4.5 + d as f32 * 9.0, r.bottom() - 8.0);
-                        ui.painter().circle_filled(c, 2.4, if d == at % n { Color32::WHITE } else { theme::white(110) });
-                    }
-                }
+                self.draw_card(&mut row, &cards[order[k]], r, theme::RADIUS, &format!("card{k}"), &acts);
             }
         }
         if self.news.rx.is_some() || self.assets.busy() {
