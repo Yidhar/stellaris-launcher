@@ -502,6 +502,28 @@ pub fn divider(ui: &mut Ui) {
     ui.add_space(12.0);
 }
 
+/// A drop-down that is only text and a chevron until the pointer is on it (a filter in a toolbar).
+pub fn text_dropdown(ui: &mut Ui, text: &str, open: bool) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.5, FontFamily::Proportional), LABEL);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 38.0, 34.0), Sense::click());
+    if open || resp.hovered() {
+        ui.painter().rect_filled(rect, cr(17.0), white(if open { 30 } else { 16 }));
+    }
+    ui.painter().galley(pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
+    (if open { Icon::Up } else { Icon::Down }).draw(ui.painter(), pos2(rect.right() - 15.0, rect.center().y), 12.0, SECONDARY, 1.8);
+    resp
+}
+
+/// A small square icon button that can be on (a view choice) or a plain tool (`on` false).
+pub fn icon_toggle(ui: &mut Ui, icon: Icon, on: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+    let fill = if on { white(40) } else if resp.hovered() { white(18) } else { Color32::TRANSPARENT };
+    ui.painter().rect_filled(rect, cr(17.0), fill);
+    let color = if on || resp.hovered() { LABEL } else { SECONDARY };
+    icon.draw(ui.painter(), rect.center(), 18.0, color, 1.7);
+    resp
+}
+
 /// A number in a small capsule (a count next to a heading).
 pub fn count_badge(ui: &mut Ui, n: usize) -> Response {
     let galley = ui.painter().layout_no_wrap(n.to_string(), FontId::new(13.0, bold()), LABEL);
@@ -623,6 +645,8 @@ pub enum Icon {
     Left,
     Right,
     Upload,
+    ViewList,
+    ViewCompact,
     Globe,
     Refresh,
     Minimize,
@@ -709,6 +733,18 @@ impl Icon {
                 let arc = |k: f32| -> Vec<Pos2> { (0..=12).map(|i| { let a = (-90.0 + 180.0 * i as f32 / 12.0).to_radians(); at(k * a.cos() * 0.4, a.sin() * 0.4) }).collect() };
                 line(arc(0.45));
                 line(arc(-0.45));
+            }
+            Icon::ViewList => {
+                // two rows, each a picture and a line
+                for y in [-0.2f32, 0.2] {
+                    closed(vec![at(-0.4, y - 0.12), at(-0.16, y - 0.12), at(-0.16, y + 0.12), at(-0.4, y + 0.12)]);
+                    line(vec![at(-0.04, y), at(0.4, y)]);
+                }
+            }
+            Icon::ViewCompact => {
+                for y in [-0.3f32, -0.1, 0.1, 0.3] {
+                    line(vec![at(-0.4, y), at(0.4, y)]);
+                }
             }
             Icon::Upload => {
                 line(vec![at(0.0, 0.2), at(0.0, -0.36)]);

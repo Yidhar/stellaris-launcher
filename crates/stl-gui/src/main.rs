@@ -1715,23 +1715,41 @@ impl App {
                 if let Some(i) = segmented(ui, &labels, cur, 240.0) {
                     acts.push(Act::SetModsSort(sorts[i].0));
                 }
-                let filters = [tr(lang, "mods.filter_all").to_string(), tr(lang, "mods.filter_ironman").to_string(), tr(lang, "mods.filter_not").to_string()];
-                if let Some(i) = segmented(ui, &filters, want, 250.0) {
-                    acts.push(Act::SetModsFilter(i));
+                // the Ironman filter: a quiet drop-down (text and a chevron, no frame)
+                let filters = ["mods.filter_all", "mods.filter_ironman", "mods.filter_not"];
+                let popup = egui::Id::new("mods-ironman-filter");
+                let open = ui.memory(|m| m.is_popup_open(popup));
+                let r = theme::text_dropdown(ui, tr(lang, filters[want.min(2)]), open);
+                if r.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(popup));
                 }
-                let views = [tr(lang, "mods.view_list").to_string(), tr(lang, "mods.view_compact").to_string()];
-                if let Some(i) = segmented(ui, &views, compact as usize, 140.0) {
-                    acts.push(Act::SetModsView(if i == 1 { "compact" } else { "list" }));
-                }
-                if circle_button(ui, Icon::Refresh, theme::white(22), LABEL, true).on_hover_text(tr(lang, "mods.refresh")).clicked() {
-                    acts.push(Act::RescanMods);
-                }
+                egui::popup::popup_below_widget(ui, popup, &r, egui::popup::PopupCloseBehavior::CloseOnClick, |ui| {
+                    ui.set_min_width(170.0);
+                    for (i, k) in filters.iter().enumerate() {
+                        if ui.selectable_label(i == want, RichText::new(tr(lang, k)).size(14.0)).clicked() {
+                            acts.push(Act::SetModsFilter(i));
+                        }
+                    }
+                });
+                // at the right: Upload, the search, then the small tools (refresh, and the two views as icons)
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
                     if pill_button(ui, tr(lang, "mods.upload_btn"), ButtonStyle::Tinted(Color32::WHITE), self.game.is_ok()).clicked() {
                         self.pick_upload = true;
                     }
-                    let w = ui.available_width().clamp(120.0, 240.0);
+                    let w = (ui.available_width() - 120.0).clamp(140.0, 260.0);
                     theme::search_field(ui, &mut self.filter, tr(lang, "mods.search"), w);
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if theme::icon_toggle(ui, Icon::Refresh, false).on_hover_text(tr(lang, "mods.refresh")).clicked() {
+                        acts.push(Act::RescanMods);
+                    }
+                    ui.add_space(6.0);
+                    if theme::icon_toggle(ui, Icon::ViewCompact, compact).on_hover_text(tr(lang, "mods.view_compact")).clicked() {
+                        acts.push(Act::SetModsView("compact"));
+                    }
+                    if theme::icon_toggle(ui, Icon::ViewList, !compact).on_hover_text(tr(lang, "mods.view_list")).clicked() {
+                        acts.push(Act::SetModsView("list"));
+                    }
                 });
             });
             theme::divider(ui);
