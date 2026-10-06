@@ -1918,7 +1918,8 @@ impl App {
                 }
                 let overlaps = r.report.files.iter().filter(|f| !f.intended).count() + r.report.keys.iter().filter(|k| k.severity > Severity::Info).count();
                 chip(ui, &tr_args(lang, "chk.overlaps", &[&overlaps.to_string()]), SECONDARY).on_hover_text(tr(lang, "chk.overlaps_hint"));
-                if r.plan.changes() && pill_button(ui, tr(lang, "chk.sort"), ButtonStyle::Tinted(BLUE), true).clicked() {
+                // the same size as the counts beside it: an action, but a quiet one (blue)
+                if r.plan.changes() && theme::chip_button(ui, tr(lang, "chk.sort"), BLUE).clicked() {
                     self.check.sheet = CheckSheet::Sort;
                 }
             } else {
