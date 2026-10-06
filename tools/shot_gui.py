@@ -75,6 +75,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "work", "gui.png"))
     ap.add_argument("--wait", type=float, default=4.0, help="seconds to let it draw before the shot")
     ap.add_argument("--idle", type=float, default=20.0)
+    ap.add_argument("--gui-args", default="", help="arguments for the window, e.g. \"--tab=1\"")
     a = ap.parse_args()
     user32.SetProcessDPIAware()
     deadline = time.time() + 540
@@ -82,7 +83,7 @@ def main():
         if time.time() > deadline:
             raise SystemExit("the user did not become idle; nothing was started")
         time.sleep(2)
-    p = subprocess.Popen([a.exe])
+    p = subprocess.Popen([a.exe, *a.gui_args.split()])
     try:
         hwnd = None
         for _ in range(60):

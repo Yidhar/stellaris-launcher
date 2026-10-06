@@ -1,7 +1,9 @@
 //! The window of the Stellaris launcher: pick a playset, switch mods and DLL plugins on and off, press Play.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use eframe::egui;
+mod theme;
+
+use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, UiBuilder, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
@@ -10,6 +12,7 @@ use stl_core::mods::{self, Kind, Mod};
 use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::{import, launch, official, pe, process};
+use theme::*;
 
 enum Msg {
     Line(String),
@@ -30,25 +33,11 @@ struct App {
     use_plugins: bool,
     alternative: Option<usize>,
     new_name: String,
-    mod_filter: String,
-    add_filter: String,
+    filter: String,
+    tab: usize,
+    browse: bool,
     game_dir_text: String,
-    link_plugin: bool,
-}
-
-fn setup_fonts(ctx: &egui::Context) {
-    // egui's built-in fonts have no CJK glyphs and mod names are often Chinese: use a system font as the fallback
-    let mut fonts = egui::FontDefinitions::default();
-    for (name, path) in [("yahei", r"C:\Windows\Fonts\msyh.ttc"), ("simhei", r"C:\Windows\Fonts\simhei.ttf"), ("simsun", r"C:\Windows\Fonts\simsun.ttc")] {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert(name.to_string(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts.families.entry(family).or_default().push(name.to_string());
-            }
-            break;
-        }
-    }
-    ctx.set_fonts(fonts);
+    confirm_delete: bool,
 }
 
 impl App {
@@ -71,12 +60,21 @@ impl App {
             use_plugins: true,
             alternative: None,
             new_name: String::new(),
-            mod_filter: String::new(),
-            add_filter: String::new(),
+            filter: String::new(),
+            tab: 0,
+            browse: false,
             game_dir_text: String::new(),
-            link_plugin: false,
+            confirm_delete: false,
         };
         app.reload();
+        // for screenshots while developing: --tab=1 --browse
+        for a in std::env::args().skip(1) {
+            if let Some(t) = a.strip_prefix("--tab=") {
+                app.tab = t.parse().unwrap_or(0);
+            } else if a == "--browse" {
+                app.browse = true;
+            }
+        }
         app
     }
 
@@ -120,7 +118,8 @@ impl App {
         let opts = launch::Options { use_plugins: self.use_plugins, continue_last: self.continue_last, alternative: self.alternative, ..Default::default() };
         let (tx, rx) = channel();
         self.launching = Some(rx);
-        self.say("---");
+        self.tab = 2;
+        self.log.clear();
         std::thread::spawn(move || {
             let tx_line = tx.clone();
             let result = launch::launch(&game, &store, &opts, &mut |line| {
@@ -157,325 +156,9 @@ impl App {
         }
     }
 
-    fn mod_name(&self, id: &str) -> (String, Option<String>, Option<&Mod>) {
-        match self.mods.iter().find(|m| m.id == id) {
-            Some(m) => (m.name.clone(), m.problem.clone(), Some(m)),
-            None => (id.to_string(), Some("not in the mod folder".to_string()), None),
-        }
-    }
-}
-
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_process();
-        self.drain_launch();
-        if self.launching.is_some() || !self.running.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(500));
-        }
-        let launching = self.launching.is_some();
-
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.heading("Stellaris Launcher");
-                ui.separator();
-                ui.label("Playset");
-                let active = self.store.active_index();
-                let mut chosen = active;
-                egui::ComboBox::from_id_salt("playset").width(260.0).selected_text(self.store.playsets[active].name.clone()).show_ui(ui, |ui| {
-                    for (i, p) in self.store.playsets.iter().enumerate() {
-                        ui.selectable_value(&mut chosen, i, format!("{}  ({} mods)", p.name, p.mods.iter().filter(|m| m.enabled).count()));
-                    }
-                });
-                if chosen != active {
-                    self.store.set_active(chosen);
-                    self.save();
-                }
-                ui.add(egui::TextEdit::singleline(&mut self.new_name).hint_text("new playset").desired_width(140.0));
-                if ui.add_enabled(!self.new_name.trim().is_empty(), egui::Button::new("New")).clicked() {
-                    match self.store.add_playset(self.new_name.trim()) {
-                        Ok(i) => {
-                            self.store.set_active(i);
-                            self.new_name.clear();
-                            self.save();
-                        }
-                        Err(e) => self.say(format!("{e:#}")),
-                    }
-                }
-                if ui.add_enabled(self.store.playsets.len() > 1, egui::Button::new("Delete")).on_hover_text("delete the active playset").clicked() {
-                    let i = self.store.active_index();
-                    let n = self.store.playsets[i].name.clone();
-                    match self.store.remove_playset(i) {
-                        Ok(()) => {
-                            self.save();
-                            self.say(format!("deleted the playset {n}"));
-                        }
-                        Err(e) => self.say(format!("{e:#}")),
-                    }
-                }
-                if ui.button("Import official").on_hover_text("copy the playsets of the Paradox Launcher into ours (its database is only read)").clicked() {
-                    self.import_official();
-                }
-                if ui.button("Reload").clicked() {
-                    self.reload();
-                }
-            });
-            if let Ok(g) = &self.game {
-                ui.small(format!("{}   build {:#010X} ({})   {}", g.settings.version, g.exe_timestamp, pe::describe(g.exe_timestamp), g.dir.display()));
-            }
-            ui.add_space(4.0);
-        });
-
-        egui::TopBottomPanel::bottom("bottom").resizable(true).min_height(150.0).show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let can = self.game.is_ok() && !launching;
-                let running = !self.running.is_empty();
-                let label = if launching {
-                    "Starting…"
-                } else if running {
-                    "Running"
-                } else {
-                    "▶  Play"
-                };
-                if ui.add_enabled(can && !running, egui::Button::new(egui::RichText::new(label).size(22.0)).min_size(egui::vec2(180.0, 44.0))).clicked() {
-                    self.start();
-                }
-                ui.vertical(|ui| {
-                    ui.checkbox(&mut self.continue_last, "Continue the last save");
-                    ui.checkbox(&mut self.use_plugins, "Load DLL plugins");
-                });
-                if let Ok(g) = &self.game {
-                    if !g.settings.alternative_executables.is_empty() {
-                        let text = match self.alternative {
-                            None => "Normal".to_string(),
-                            Some(i) => g.settings.alternative_executables.get(i).and_then(|a| a.label.get("en")).cloned().unwrap_or_else(|| format!("Alternative {i}")),
-                        };
-                        egui::ComboBox::from_id_salt("alt").selected_text(text).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.alternative, None, "Normal");
-                            for (i, a) in g.settings.alternative_executables.iter().enumerate() {
-                                ui.selectable_value(&mut self.alternative, Some(i), a.label.get("en").cloned().unwrap_or_else(|| format!("Alternative {i}")));
-                            }
-                        });
-                    }
-                }
-                if !self.running.is_empty() {
-                    ui.label(format!("Stellaris is running (pid {})", self.running.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")));
-                    if ui.button("Close the game").clicked() {
-                        for pid in self.running.clone() {
-                            if let Err(e) = process::terminate(pid) {
-                                self.say(format!("{e:#}"));
-                            }
-                        }
-                        self.last_poll = Instant::now() - Duration::from_secs(10);
-                    }
-                }
-            });
-            ui.add_space(4.0);
-            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-                for l in &self.log {
-                    ui.monospace(l);
-                }
-            });
-        });
-
-        egui::SidePanel::right("plugins").default_width(340.0).min_width(260.0).show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading("DLL plugins");
-            ui.small("loaded into the game when it is up, for this playset");
-            ui.separator();
-            let game = self.game.clone().ok();
-            let active = self.store.active_index();
-            let mut toggles: Vec<(String, bool)> = Vec::new();
-            for p in &self.plugins {
-                let on = self.store.playsets[active].plugins.iter().find(|x| x.id == p.manifest.id).map(|x| x.enabled).unwrap_or(false);
-                let mut v = on;
-                let (status, bad) = match game.as_ref().map(|g| p.compat(g)) {
-                    Some(Compat::Ok) => ("made for this game build".to_string(), false),
-                    Some(Compat::Unchecked) | None => ("build not declared".to_string(), false),
-                    Some(Compat::Mismatch { declared, .. }) => (format!("made for {} — will not be loaded", declared.iter().map(|d| format!("{d:#010X}")).collect::<Vec<_>>().join(" / ")), true),
-                    Some(Compat::MissingDll(_)) => ("the DLL is missing".to_string(), true),
-                };
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut v, "");
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(format!("{}  {}", p.manifest.name, p.manifest.version)).strong());
-                        ui.small(&p.manifest.description);
-                        let text = egui::RichText::new(format!("{}{}", status, if p.linked { " · linked" } else { "" })).small();
-                        ui.label(if bad { text.color(egui::Color32::from_rgb(230, 120, 90)) } else { text.weak() });
-                    });
-                });
-                if v != on {
-                    toggles.push((p.manifest.id.clone(), v));
-                }
-                ui.separator();
-            }
-            if self.plugins.is_empty() {
-                ui.label("No plugins installed.");
-            }
-            for (id, v) in toggles {
-                self.store.playsets[active].set_plugin(&id, v);
-                self.save();
-            }
-            for pr in &self.plugin_problems {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 90), pr);
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Install plugin…").on_hover_text("a folder holding stl-plugin.json and the DLL").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().set_title("Folder of the plugin (stl-plugin.json)").pick_folder() {
-                        match plugins::install(&dir, self.link_plugin) {
-                            Ok(p) => {
-                                let id = p.manifest.id.clone();
-                                self.say(format!("{} {}", if self.link_plugin { "linked" } else { "installed" }, id));
-                                self.reload();
-                            }
-                            Err(e) => self.say(format!("{e:#}")),
-                        }
-                    }
-                }
-                ui.checkbox(&mut self.link_plugin, "link").on_hover_text("keep the folder where it is (a plugin under development)");
-            });
-            if !self.plugins.is_empty() {
-                ui.small("Remove or link plugins with `stl plugin`.");
-            }
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Err(e) = &self.game {
-                ui.heading("Stellaris was not found");
-                ui.label(e);
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.game_dir_text).hint_text("folder of stellaris.exe").desired_width(420.0));
-                    if ui.button("Browse…").clicked() {
-                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                            self.game_dir_text = d.to_string_lossy().to_string();
-                        }
-                    }
-                    if ui.button("Use").clicked() {
-                        self.store.game_dir = Some(self.game_dir_text.trim().to_string());
-                        self.save();
-                        self.reload();
-                    }
-                });
-                return;
-            }
-            let active = self.store.active_index();
-            let enabled = self.store.playsets[active].mods.iter().filter(|m| m.enabled).count();
-            ui.horizontal(|ui| {
-                ui.heading("Mods");
-                ui.label(format!("{} in the playset, {} enabled", self.store.playsets[active].mods.len(), enabled));
-                ui.add(egui::TextEdit::singleline(&mut self.mod_filter).hint_text("filter").desired_width(160.0));
-            });
-            ui.small("Load order is top to bottom: a later mod overrides an earlier one.");
-            ui.separator();
-
-            let filter = self.mod_filter.to_lowercase();
-            let mut action: Option<(usize, &'static str)> = None;
-            let mut flag: Option<(usize, bool)> = None;
-            let height = (ui.available_height() * 0.55).max(160.0);
-            egui::ScrollArea::vertical().id_salt("playset-mods").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
-                let n = self.store.playsets[active].mods.len();
-                for (i, m) in self.store.playsets[active].mods.iter().enumerate() {
-                    let (name, problem, info) = self.mod_name(&m.id);
-                    if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-                        continue;
-                    }
-                    ui.horizontal(|ui| {
-                        let mut on = m.enabled;
-                        if ui.checkbox(&mut on, "").changed() {
-                            flag = Some((i, on));
-                        }
-                        ui.label(egui::RichText::new(format!("{:>3}", i + 1)).weak().monospace());
-                        let kind = match info.map(|x| x.kind) {
-                            Some(Kind::Workshop) => "Steam",
-                            Some(Kind::ParadoxMods) => "PDX",
-                            Some(Kind::Local) => "local",
-                            None => "?",
-                        };
-                        let mut text = egui::RichText::new(&name);
-                        if problem.is_some() {
-                            text = text.color(egui::Color32::from_rgb(230, 120, 90));
-                        } else if !m.enabled {
-                            text = text.weak();
-                        }
-                        let r = ui.label(text);
-                        if let Some(p) = &problem {
-                            r.on_hover_text(format!("will be left out: {p}"));
-                        }
-                        ui.small(kind);
-                        if let (Some(x), Some(g)) = (info, self.game.as_ref().ok()) {
-                            if let Some(sv) = &x.supported_version {
-                                if !mods::supports(sv, g.version()) {
-                                    ui.small(egui::RichText::new(format!("for {sv}")).color(egui::Color32::from_rgb(220, 180, 80)));
-                                }
-                            }
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("×").on_hover_text("remove from the playset").clicked() {
-                                action = Some((i, "remove"));
-                            }
-                            if ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).clicked() {
-                                action = Some((i, "down"));
-                            }
-                            if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
-                                action = Some((i, "up"));
-                            }
-                        });
-                    });
-                }
-            });
-            if let Some((i, on)) = flag {
-                self.store.playsets[active].mods[i].enabled = on;
-                self.save();
-            }
-            if let Some((i, what)) = action {
-                let p = &mut self.store.playsets[active];
-                match what {
-                    "remove" => {
-                        p.mods.remove(i);
-                    }
-                    "up" => p.mods.swap(i, i - 1),
-                    _ => p.mods.swap(i, i + 1),
-                }
-                self.save();
-            }
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.strong("Add mods");
-                ui.add(egui::TextEdit::singleline(&mut self.add_filter).hint_text("search the mod folder").desired_width(220.0));
-            });
-            let f = self.add_filter.to_lowercase();
-            let mut add: Option<String> = None;
-            egui::ScrollArea::vertical().id_salt("available-mods").auto_shrink([false, false]).show(ui, |ui| {
-                let shown = self.mods.iter().filter(|m| self.store.playsets[active].mod_pos(&m.id).is_none() && (f.is_empty() || m.name.to_lowercase().contains(&f)));
-                for m in shown.take(200) {
-                    ui.horizontal(|ui| {
-                        if ui.small_button("+").on_hover_text("add at the end of the playset").clicked() {
-                            add = Some(m.id.clone());
-                        }
-                        let mut t = egui::RichText::new(&m.name);
-                        if m.problem.is_some() {
-                            t = t.color(egui::Color32::from_rgb(230, 120, 90));
-                        }
-                        let r = ui.label(t);
-                        if let Some(p) = &m.problem {
-                            r.on_hover_text(p);
-                        }
-                    });
-                }
-            });
-            if let Some(id) = add {
-                self.store.playsets[active].set_mod(&id, true);
-                self.save();
-            }
-        });
-    }
-}
-
-impl App {
     fn import_official(&mut self) {
         let Ok(game) = self.game.clone() else { return };
+        self.tab = 2;
         let Some(db) = official::find_database(&game.data_dir) else {
             self.say("no launcher database found: the Paradox Launcher has not been used here");
             return;
@@ -497,18 +180,516 @@ impl App {
             Err(e) => self.say(format!("{e:#}")),
         }
     }
+
+    fn kind_chip(kind: Kind) -> (&'static str, Color32) {
+        match kind {
+            Kind::Workshop => ("Steam", ACCENT),
+            Kind::ParadoxMods => ("Paradox", PURPLE),
+            Kind::Local => ("Local", OK),
+        }
+    }
+
+    // ---------------------------------------------------------------- sidebar
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Stellaris").font(egui::FontId::new(24.0, bold())).color(TEXT));
+        });
+        ui.label(RichText::new("LAUNCHER").size(11.5).color(ACCENT).family(bold()));
+        ui.add_space(20.0);
+        caption(ui, "Playsets");
+        ui.add_space(4.0);
+
+        let active = self.store.active_index();
+        let mut pick = None;
+        egui::ScrollArea::vertical().id_salt("playsets").max_height((ui.available_height() - 210.0).max(80.0)).auto_shrink([false, true]).show(ui, |ui| {
+            for (i, p) in self.store.playsets.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+                row_background(ui, rect, resp.hovered(), i == active);
+                ui.scope_builder(UiBuilder::new().max_rect(rect.shrink2(Vec2::new(12.0, 4.0))).layout(Layout::left_to_right(Align::Center)), |ui| {
+                    let on = p.mods.iter().filter(|m| m.enabled).count();
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.add(egui::Label::new(RichText::new(&p.name).family(if i == active { bold() } else { egui::FontFamily::Proportional }).color(if i == active { TEXT } else { Color32::from_rgb(200, 206, 220) })).truncate());
+                        let np = p.plugins.iter().filter(|x| x.enabled).count();
+                        ui.label(RichText::new(format!("{on} mod{} · {np} plugin{}", if on == 1 { "" } else { "s" }, if np == 1 { "" } else { "s" })).size(11.5).color(FAINT));
+                    });
+                });
+                if resp.clicked() {
+                    pick = Some(i);
+                }
+            }
+        });
+        if let Some(i) = pick {
+            self.store.set_active(i);
+            self.confirm_delete = false;
+            self.save();
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            text_field(ui, &mut self.new_name, "New playset", 130.0);
+            let ok = !self.new_name.trim().is_empty();
+            if ghost_button_colored(ui, "Add", if ok { ACCENT } else { FAINT }, Color32::from_rgb(140, 175, 255)).clicked() && ok {
+                match self.store.add_playset(self.new_name.trim()) {
+                    Ok(i) => {
+                        self.store.set_active(i);
+                        self.new_name.clear();
+                        self.save();
+                    }
+                    Err(e) => self.say(format!("{e:#}")),
+                }
+            }
+        });
+
+        ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+            if let Ok(g) = &self.game {
+                ui.label(RichText::new(format!("build {:#010X} · {}", g.exe_timestamp, pe::describe(g.exe_timestamp).split(' ').next().unwrap_or(""))).size(11.5).color(FAINT));
+                ui.label(RichText::new(g.settings.version.clone()).size(12.5).color(MUTED));
+            }
+            ui.add_space(6.0);
+            if nav_button(ui, "Reload").clicked() {
+                self.reload();
+            }
+            if nav_button(ui, "Import from Paradox Launcher").on_hover_text("copy its playsets into ours (its database is only read)").clicked() {
+                self.import_official();
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------- mods
+    fn mods_tab(&mut self, ui: &mut egui::Ui) {
+        let active = self.store.active_index();
+        let in_playset = self.store.playsets[active].mods.len();
+        let available = self.mods.iter().filter(|m| self.store.playsets[active].mod_pos(&m.id).is_none()).count();
+        ui.horizontal(|ui| {
+            text_field(ui, &mut self.filter, "Search mods", 260.0);
+            ui.add_space(8.0);
+            if let Some(i) = tabs(ui, &[format!("In this playset  {in_playset}"), format!("Add mods  {available}")], self.browse as usize) {
+                self.browse = i == 1;
+            }
+        });
+        ui.add_space(6.0);
+        if !self.browse {
+            ui.label(RichText::new("Load order runs top to bottom: a later mod overrides an earlier one.").size(12.0).color(FAINT));
+        }
+        ui.add_space(4.0);
+        let filter = self.filter.to_lowercase();
+        let width = ui.available_width();
+        let version = self.game.as_ref().ok().map(|g| g.version().to_string()).unwrap_or_default();
+
+        let mut flag: Option<(usize, bool)> = None;
+        let mut action: Option<(usize, &'static str)> = None;
+        let mut add: Option<String> = None;
+
+        card(ui, |ui| {
+            ui.set_width(width - 30.0);
+            let list_height = ui.available_height() - 4.0;
+            egui::ScrollArea::vertical().id_salt(if self.browse { "browse" } else { "playset-mods" }).max_height(list_height).auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if !self.browse {
+                    let n = self.store.playsets[active].mods.len();
+                    if n == 0 {
+                        ui.add_space(30.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("No mods in this playset yet.").size(15.0).color(MUTED));
+                            ui.label(RichText::new("Open “Add mods” to pick from your mod folder, or import your playsets from the Paradox Launcher.").size(12.5).color(FAINT));
+                        });
+                    }
+                    for (i, m) in self.store.playsets[active].mods.iter().enumerate() {
+                        let info = self.mods.iter().find(|x| x.id == m.id);
+                        let name = info.map(|x| x.name.clone()).unwrap_or_else(|| m.id.clone());
+                        if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        let problem = match info {
+                            Some(x) => x.problem.clone(),
+                            None => Some("not in the mod folder".to_string()),
+                        };
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
+                        row_background(ui, rect, resp.hovered(), false);
+                        let inner = rect.shrink2(Vec2::new(8.0, 4.0));
+                        let right = egui::Rect::from_min_max(egui::pos2(inner.right() - 92.0, inner.top()), inner.max);
+                        let left = egui::Rect::from_min_max(inner.min, egui::pos2(inner.right() - 98.0, inner.bottom()));
+                        ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)), |ui| {
+                            let mut on = m.enabled;
+                            if switch(ui, &mut on).changed() {
+                                flag = Some((i, on));
+                            }
+                            ui.label(RichText::new(format!("{:>3}", i + 1)).size(12.0).color(FAINT).monospace());
+                            let mut chips_w = 60.0;
+                            let mismatch = info.and_then(|x| x.supported_version.clone()).filter(|sv| !mods::supports(sv, &version));
+                            if mismatch.is_some() {
+                                chips_w += 96.0;
+                            }
+                            if problem.is_some() {
+                                chips_w += 90.0;
+                            }
+                            let name_w = (ui.available_width() - chips_w).max(80.0);
+                            let color = if problem.is_some() { DANGER } else if m.enabled { TEXT } else { FAINT };
+                            ui.allocate_ui_with_layout(Vec2::new(name_w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(&name).color(color)).truncate());
+                            });
+                            if let Some(x) = info {
+                                let (t, c) = Self::kind_chip(x.kind);
+                                chip(ui, t, c);
+                            }
+                            if let Some(sv) = &mismatch {
+                                chip(ui, &format!("for {sv}"), WARN).on_hover_text("the game will ask whether to load it");
+                            }
+                            if let Some(p) = &problem {
+                                chip(ui, "left out", DANGER).on_hover_text(format!("{p}"));
+                            }
+                        });
+                        ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            if icon_button(ui, "×", true).on_hover_text("remove from the playset").clicked() {
+                                action = Some((i, "remove"));
+                            }
+                            if icon_button(ui, "↓", i + 1 < n).clicked() {
+                                action = Some((i, "down"));
+                            }
+                            if icon_button(ui, "↑", i > 0).clicked() {
+                                action = Some((i, "up"));
+                            }
+                        });
+                    }
+                } else {
+                    let shown = self.mods.iter().filter(|m| self.store.playsets[active].mod_pos(&m.id).is_none() && (filter.is_empty() || m.name.to_lowercase().contains(&filter)));
+                    for m in shown.take(300) {
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
+                        row_background(ui, rect, resp.hovered(), false);
+                        ui.scope_builder(UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 4.0))).layout(Layout::left_to_right(Align::Center)), |ui| {
+                            if icon_button(ui, "+", true).on_hover_text("add at the end of the playset").clicked() {
+                                add = Some(m.id.clone());
+                            }
+                            let chips_w = 70.0 + if m.problem.is_some() { 90.0 } else { 0.0 };
+                            let name_w = (ui.available_width() - chips_w).max(80.0);
+                            ui.allocate_ui_with_layout(Vec2::new(name_w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(&m.name).color(if m.problem.is_some() { DANGER } else { TEXT })).truncate());
+                            });
+                            let (t, c) = Self::kind_chip(m.kind);
+                            chip(ui, t, c);
+                            if let Some(p) = &m.problem {
+                                chip(ui, "unusable", DANGER).on_hover_text(p.clone());
+                            }
+                        });
+                    }
+                }
+            });
+        });
+
+        if let Some((i, on)) = flag {
+            self.store.playsets[active].mods[i].enabled = on;
+            self.save();
+        }
+        if let Some((i, what)) = action {
+            let p = &mut self.store.playsets[active];
+            match what {
+                "remove" => {
+                    p.mods.remove(i);
+                }
+                "up" => p.mods.swap(i, i - 1),
+                _ => p.mods.swap(i, i + 1),
+            }
+            self.save();
+        }
+        if let Some(id) = add {
+            self.store.playsets[active].set_mod(&id, true);
+            self.save();
+        }
+    }
+
+    // ---------------------------------------------------------------- plugins
+    fn plugins_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Native libraries loaded into the game once its window is up. Each says which game build it was made for.").size(12.5).color(MUTED));
+        });
+        ui.add_space(8.0);
+        let game = self.game.clone().ok();
+        let active = self.store.active_index();
+        let mut toggles: Vec<(String, bool)> = Vec::new();
+        let mut remove: Option<String> = None;
+        egui::ScrollArea::vertical().id_salt("plugins").auto_shrink([false, true]).max_height((ui.available_height() - 56.0).max(100.0)).show(ui, |ui| {
+            for p in &self.plugins {
+                let on = self.store.playsets[active].plugins.iter().find(|x| x.id == p.manifest.id).map(|x| x.enabled).unwrap_or(false);
+                let mut v = on;
+                let (status, color) = match game.as_ref().map(|g| p.compat(g)) {
+                    Some(Compat::Ok) => ("made for this game build".to_string(), OK),
+                    Some(Compat::Unchecked) | None => ("build not declared".to_string(), MUTED),
+                    Some(Compat::Mismatch { declared, .. }) => (format!("made for {} — will not load", declared.iter().map(|d| format!("{d:#010X}")).collect::<Vec<_>>().join(" / ")), DANGER),
+                    Some(Compat::MissingDll(_)) => ("the DLL is missing".to_string(), DANGER),
+                };
+                card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&p.manifest.name).size(16.0).family(bold()));
+                                ui.label(RichText::new(&p.manifest.version).size(12.5).color(FAINT));
+                            });
+                            if !p.manifest.description.is_empty() {
+                                ui.label(RichText::new(&p.manifest.description).size(13.0).color(MUTED));
+                            }
+                            ui.horizontal(|ui| {
+                                chip(ui, &status, color);
+                                if p.linked {
+                                    chip(ui, "linked", PURPLE);
+                                }
+                                ui.label(RichText::new(&p.manifest.id).size(11.5).color(FAINT));
+                            });
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if switch(ui, &mut v).changed() {
+                                toggles.push((p.manifest.id.clone(), v));
+                            }
+                            if ghost_button_colored(ui, "Remove", FAINT, DANGER).clicked() {
+                                remove = Some(p.manifest.id.clone());
+                            }
+                        });
+                    });
+                });
+                ui.add_space(6.0);
+            }
+            if self.plugins.is_empty() {
+                ui.add_space(24.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("No plugins installed.").size(15.0).color(MUTED));
+                    ui.label(RichText::new("A plugin is a folder with its DLL and a stl-plugin.json.").size(12.5).color(FAINT));
+                });
+            }
+            for pr in &self.plugin_problems {
+                ui.label(RichText::new(pr).size(12.0).color(DANGER));
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ghost_button_colored(ui, "+  Install plugin…", ACCENT, Color32::from_rgb(140, 175, 255)).on_hover_text("choose the folder that holds stl-plugin.json and the DLL").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().set_title("Folder of the plugin (stl-plugin.json)").pick_folder() {
+                    match plugins::install(&dir, false) {
+                        Ok(p) => {
+                            self.say(format!("installed {}", p.manifest.id));
+                            self.reload();
+                        }
+                        Err(e) => self.say(format!("{e:#}")),
+                    }
+                }
+            }
+            if ghost_button(ui, "Link a plugin under development…").on_hover_text("keep its folder where it is").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().set_title("Folder of the plugin (stl-plugin.json)").pick_folder() {
+                    match plugins::install(&dir, true) {
+                        Ok(p) => {
+                            self.say(format!("linked {}", p.manifest.id));
+                            self.reload();
+                        }
+                        Err(e) => self.say(format!("{e:#}")),
+                    }
+                }
+            }
+        });
+        for (id, v) in toggles {
+            self.store.playsets[active].set_plugin(&id, v);
+            self.save();
+        }
+        if let Some(id) = remove {
+            match plugins::remove(&id) {
+                Ok(()) => {
+                    self.say(format!("removed {id}"));
+                    self.reload();
+                }
+                Err(e) => self.say(format!("{e:#}")),
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- log
+    fn log_tab(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width();
+        card(ui, |ui| {
+            ui.set_width(width - 30.0);
+            let h = ui.available_height() - 4.0;
+            egui::ScrollArea::vertical().stick_to_bottom(true).max_height(h).auto_shrink([false, false]).show(ui, |ui| {
+                if self.log.is_empty() {
+                    ui.label(RichText::new("What the launcher does appears here: which mods are written, which plugins are loaded.").color(FAINT));
+                }
+                for l in &self.log {
+                    let color = if l.contains("could not") || l.contains("failed") || l.contains("!!") {
+                        DANGER
+                    } else if l.contains("left out") || l.contains("warning") || l.contains("skipped") {
+                        WARN
+                    } else if l.contains("loaded") || l.contains("running") || l.contains("started") {
+                        OK
+                    } else {
+                        MUTED
+                    };
+                    ui.label(RichText::new(l).monospace().color(color));
+                }
+            });
+        });
+    }
+
+    // ---------------------------------------------------------------- play bar
+    fn play_bar(&mut self, ui: &mut egui::Ui) {
+        let launching = self.launching.is_some();
+        let running = !self.running.is_empty();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 18.0;
+            ui.horizontal(|ui| {
+                switch(ui, &mut self.continue_last);
+                ui.label(RichText::new("Continue last save").color(MUTED));
+            });
+            ui.horizontal(|ui| {
+                switch(ui, &mut self.use_plugins);
+                ui.label(RichText::new("Load DLL plugins").color(MUTED));
+            });
+            if let Ok(g) = &self.game {
+                if !g.settings.alternative_executables.is_empty() {
+                    let label = |i: Option<usize>| match i {
+                        None => "Standard".to_string(),
+                        Some(i) => g.settings.alternative_executables.get(i).and_then(|a| a.label.get("en")).cloned().unwrap_or_else(|| format!("Alternative {i}")),
+                    };
+                    egui::ComboBox::from_id_salt("alt").selected_text(label(self.alternative)).width(190.0).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.alternative, None, label(None));
+                        for i in 0..g.settings.alternative_executables.len() {
+                            ui.selectable_value(&mut self.alternative, Some(i), label(Some(i)));
+                        }
+                    });
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let can = self.game.is_ok() && !launching && !running;
+                let text = if launching {
+                    "Starting…"
+                } else if running {
+                    "Running"
+                } else {
+                    "▶  Play"
+                };
+                if primary_button(ui, text, Vec2::new(190.0, 46.0), can).clicked() {
+                    self.start();
+                }
+                if running && ghost_button_colored(ui, "Close game", MUTED, DANGER).clicked() {
+                    for pid in self.running.clone() {
+                        if let Err(e) = process::terminate(pid) {
+                            self.say(format!("{e:#}"));
+                        }
+                    }
+                    self.last_poll = Instant::now() - Duration::from_secs(10);
+                }
+            });
+        });
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_process();
+        self.drain_launch();
+        if self.launching.is_some() || !self.running.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+
+        egui::SidePanel::left("sidebar")
+            .exact_width(256.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(16, 18)).stroke(egui::Stroke::new(1.0, LINE)))
+            .show(ctx, |ui| self.sidebar(ui));
+
+        egui::TopBottomPanel::bottom("playbar")
+            .exact_height(76.0)
+            .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(24, 15)).stroke(egui::Stroke::new(1.0, LINE)))
+            .show(ctx, |ui| self.play_bar(ui));
+
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(26, 22))).show(ctx, |ui| {
+            if let Err(e) = &self.game {
+                let e = e.clone();
+                ui.label(RichText::new("Stellaris was not found").font(egui::FontId::new(24.0, bold())));
+                ui.label(RichText::new(e).color(MUTED));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    text_field(ui, &mut self.game_dir_text, "Folder of stellaris.exe", 420.0);
+                    if ghost_button(ui, "Browse…").clicked() {
+                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                            self.game_dir_text = d.to_string_lossy().to_string();
+                        }
+                    }
+                    if ghost_button_colored(ui, "Use this folder", ACCENT, TEXT).clicked() {
+                        self.store.game_dir = Some(self.game_dir_text.trim().to_string());
+                        self.save();
+                        self.reload();
+                    }
+                });
+                return;
+            }
+            let active = self.store.active_index();
+            let name = self.store.playsets[active].name.clone();
+            let total = self.store.playsets[active].mods.len();
+            let enabled = self.store.playsets[active].mods.iter().filter(|m| m.enabled).count();
+            let plugins_on = self.store.playsets[active].plugins.iter().filter(|p| p.enabled).count();
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&name).font(egui::FontId::new(26.0, bold())));
+                    ui.horizontal(|ui| {
+                        chip(ui, &format!("{total} mod{}", if total == 1 { "" } else { "s" }), MUTED);
+                        chip(ui, &format!("{enabled} enabled"), ACCENT);
+                        chip(ui, &format!("{plugins_on} plugin{}", if plugins_on == 1 { "" } else { "s" }), PURPLE);
+                        if self.launching.is_some() {
+                            chip(ui, "starting the game…", ACCENT);
+                        } else if let Some(pid) = self.running.first() {
+                            chip(ui, &format!("● Stellaris is running · pid {pid}"), OK);
+                        } else if let Some(last) = self.log.last().filter(|l| l.contains("could not")) {
+                            chip(ui, &last.chars().take(70).collect::<String>(), DANGER);
+                        }
+                    });
+                });
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if self.store.playsets.len() > 1 {
+                        if self.confirm_delete {
+                            if ghost_button_colored(ui, "Really delete?", DANGER, DANGER).clicked() {
+                                let i = self.store.active_index();
+                                let n = self.store.playsets[i].name.clone();
+                                if self.store.remove_playset(i).is_ok() {
+                                    self.save();
+                                    self.say(format!("deleted the playset {n}"));
+                                }
+                                self.confirm_delete = false;
+                            }
+                            if ghost_button(ui, "Keep").clicked() {
+                                self.confirm_delete = false;
+                            }
+                        } else if ghost_button_colored(ui, "Delete playset", FAINT, DANGER).clicked() {
+                            self.confirm_delete = true;
+                        }
+                    }
+                });
+            });
+            ui.add_space(14.0);
+            let labels = ["Mods".to_string(), format!("DLL plugins  {}", self.plugins.len()), "Log".to_string()];
+            if let Some(i) = tabs(ui, &labels, self.tab) {
+                self.tab = i;
+            }
+            let rule = ui.max_rect().left_top();
+            let _ = rule;
+            ui.add_space(8.0);
+            match self.tab {
+                0 => self.mods_tab(ui),
+                1 => self.plugins_tab(ui),
+                _ => self.log_tab(ui),
+            }
+        });
+    }
 }
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]).with_min_inner_size([820.0, 520.0]).with_title("Stellaris Launcher"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 780.0]).with_min_inner_size([960.0, 600.0]).with_title("Stellaris Launcher").with_icon(theme::icon()),
         ..Default::default()
     };
     eframe::run_native(
         "Stellaris Launcher",
         options,
         Box::new(|cc| {
-            setup_fonts(&cc.egui_ctx);
+            theme::install(&cc.egui_ctx);
             Ok(Box::new(App::new()))
         }),
     )
