@@ -289,7 +289,7 @@ impl Rows {
     pub fn row(&mut self, ui: &mut Ui, height: f32, trail_w: f32, clickable: bool, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) -> Response {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), if clickable { Sense::click() } else { Sense::hover() });
         if std::mem::take(&mut self.mark) {
-            ui.painter().rect_filled(rect.shrink2(vec2(6.0, 2.0)), cr(10.0), BLUE.gamma_multiply(0.38));
+            ui.painter().rect_filled(rect.shrink2(vec2(6.0, 2.0)), cr(10.0), white(34));
         } else if clickable && resp.hovered() {
             let a = if resp.is_pointer_button_down_on() { 30 } else { 16 };
             ui.painter().rect_filled(rect.shrink2(vec2(6.0, 2.0)), cr(10.0), white(a));

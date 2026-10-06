@@ -983,17 +983,12 @@ impl App {
                 }
                 let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
                 let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
-                let r = rows.row(ui, 58.0, 24.0, true, |ui| {
+                let r = rows.row(ui, 58.0, 0.0, true, |ui| {
                     stack(ui, 58.0, 38.0, |ui| {
                         ui.add(egui::Label::new(RichText::new(&p.name).size(15.5).family(bold())).truncate());
                         ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(12.0).color(SECONDARY));
                     });
-                }, |ui| {
-                    if i == active {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                        Icon::Check.draw(ui.painter(), r.center(), 18.0, LABEL, 2.0);
-                    }
-                });
+                }, |_| {});
                 if r.clicked() {
                     acts.push(Act::SetActive(i));
                 }
@@ -1018,16 +1013,21 @@ impl App {
         let lang = self.lang;
         let active = self.store.active_index();
         let p = &self.store.playsets[active];
-        let name = p.name.clone();
-        let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
-        let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
+        let mods_n = p.mods.len();
+        let plugins_n = p.plugins.iter().filter(|x| x.enabled).count();
+        let dlc_off = p.disabled_dlcs_or(&self.dlc_current).iter().filter(|id| self.dlcs.iter().any(|d| &d.id == *id)).count();
+        let dlc_n = self.dlcs.len().saturating_sub(dlc_off);
         let can_delete = self.store.playsets.len() > 1;
+        let labels = [
+            format!("{}  {mods_n}", tr(lang, "seg.mods")),
+            format!("{}  {dlc_n}", tr(lang, "seg.dlc")),
+            format!("{}  {plugins_n}", tr(lang, "seg.plugins")),
+        ];
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add(egui::Label::new(RichText::new(&name).size(24.0).family(bold())).truncate());
-                ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(13.0).color(SECONDARY));
-            });
+            let width = ui.available_width();
+            if let Some(i) = segmented(ui, &labels, self.seg, width.min(420.0)) {
+                self.seg = i;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if can_delete {
                     if self.confirm_delete {
@@ -1043,12 +1043,6 @@ impl App {
                 }
             });
         });
-        ui.add_space(10.0);
-        let labels = [tr(lang, "seg.mods").to_string(), tr(lang, "seg.dlc").to_string(), tr(lang, "seg.plugins").to_string()];
-        let width = ui.available_width();
-        if let Some(i) = segmented(ui, &labels, self.seg, width.min(380.0)) {
-            self.seg = i;
-        }
         ui.add_space(10.0);
         let now = ui.input(|i| i.time);
         if self.seg != self.seg_shown {
