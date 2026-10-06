@@ -1,4 +1,4 @@
-; The Windows setup program (Inno Setup 7): installs the launcher for the current user, with no administrator rights, into
+﻿; The Windows setup program (Inno Setup 7): installs the launcher for the current user, with no administrator rights, into
 ; %LOCALAPPDATA%\Programs\Stellaris Launcher (a folder the launcher can update itself in), adds it to the Start menu and to
 ; "Apps & features" with an uninstaller, and on uninstall asks whether to keep the playsets and settings.
 ;
