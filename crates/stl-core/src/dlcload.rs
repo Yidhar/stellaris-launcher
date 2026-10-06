@@ -16,19 +16,27 @@ pub fn read(path: &Path) -> Result<(Vec<String>, Value)> {
     Ok((mods, doc))
 }
 
+/// The `disabled_dlcs` of a document.
+pub fn disabled_dlcs_of(doc: &Value) -> Vec<String> {
+    doc.get("disabled_dlcs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
 /// Writes `enabled_mods` (and keeps the rest). The first time it changes anything, the original is kept as `dlc_load.json.stl_backup`.
 /// Returns whether the file changed.
-pub fn write(path: &Path, enabled: &[String]) -> Result<bool> {
+pub fn write(path: &Path, enabled: &[String], disabled_dlcs: Option<&[String]>) -> Result<bool> {
     let (current, mut doc) = read(path)?;
-    if current == enabled && path.is_file() {
+    let current_dlcs = disabled_dlcs_of(&doc);
+    if current == enabled && path.is_file() && disabled_dlcs.map_or(true, |d| d == &current_dlcs[..]) {
         return Ok(false);
     }
     if !doc.is_object() {
         doc = json!({});
     }
     doc["enabled_mods"] = json!(enabled);
-    if doc.get("disabled_dlcs").is_none() {
-        doc["disabled_dlcs"] = json!([]);
+    match disabled_dlcs {
+        Some(d) => doc["disabled_dlcs"] = json!(d),
+        None if doc.get("disabled_dlcs").is_none() => doc["disabled_dlcs"] = json!([]),
+        None => {}
     }
     if path.is_file() {
         let mut backup = path.as_os_str().to_owned();
@@ -52,17 +60,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("dlc_load.json");
         std::fs::write(&p, r#"{"enabled_mods":["mod/old.mod"],"disabled_dlcs":["dlc/dlc001.dlc"],"extra":1}"#).unwrap();
-        assert!(write(&p, &["mod/a.mod".to_string(), "mod/b.mod".to_string()]).unwrap());
+        assert!(write(&p, &["mod/a.mod".to_string(), "mod/b.mod".to_string()], None).unwrap());
         let (mods, doc) = read(&p).unwrap();
         assert_eq!(mods, vec!["mod/a.mod", "mod/b.mod"]);
         assert_eq!(doc["disabled_dlcs"][0], "dlc/dlc001.dlc");
         assert_eq!(doc["extra"], 1);
-        assert!(!write(&p, &["mod/a.mod".to_string(), "mod/b.mod".to_string()]).unwrap(), "no change, no write");
+        assert!(!write(&p, &["mod/a.mod".to_string(), "mod/b.mod".to_string()], None).unwrap(), "no change, no write");
+        // the playset's DLC list replaces the file's; None leaves it
+        let two = ["mod/a.mod".to_string(), "mod/b.mod".to_string()];
+        assert!(write(&p, &two, Some(&["dlc/x/x.dlc".to_string()])).unwrap());
+        assert_eq!(disabled_dlcs_of(&read(&p).unwrap().1), vec!["dlc/x/x.dlc"]);
+        assert!(!write(&p, &two, Some(&["dlc/x/x.dlc".to_string()])).unwrap());
+        assert!(!write(&p, &two, None).unwrap());
+        assert!(write(&p, &two, Some(&[])).unwrap());
+        assert!(disabled_dlcs_of(&read(&p).unwrap().1).is_empty());
         let backup = std::fs::read_to_string(dir.join("dlc_load.json.stl_backup")).unwrap();
         assert!(backup.contains("mod/old.mod"));
         let fresh = dir.join("sub");
         std::fs::create_dir_all(&fresh).unwrap();
-        assert!(write(&fresh.join("dlc_load.json"), &[]).unwrap_or(false) || true);
+        assert!(write(&fresh.join("dlc_load.json"), &[], None).unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

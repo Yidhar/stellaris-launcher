@@ -67,10 +67,13 @@ Mods are `.mod` descriptors (`ugc_<id>.mod` Steam workshop, `pdx_<id>.mod` Parad
 database, the playsets or the launch code knows about DLLs. Anyone who wants a native plugin has to put a DLL next to the exe by hand (and
 remember it when the game is verified or updated), or inject it from outside. This is the feature gap this project is for.
 
-### L13. A hand-edited `dlc_load.json` is silently overwritten — `verified` (code), not yet seen live
+### L13. A hand-edited `dlc_load.json` is silently overwritten — `verified` (code, and seen live on 2026-10-06)
 The database is the source of truth: when the launcher saves the playset it writes `enabled_mods` from its own rows, and when it reads the file
 it drops every entry that matches no row. Anything that is not a mod the launcher knows (a local mod added by a tool, a hand edit) is lost the next
 time the launcher saves. Evidence: `EnabledModsStorageV0` (`mapModFilePathsToModId`, `save`).
+Seen live: our `stl launch` had written `{"enabled_mods":["mod/live2d_humans.mod"],…}`; when the Paradox Launcher was started at 12:07:41 it rewrote the
+file at 12:07:50 to `{"enabled_mods":[],"disabled_dlcs":[]}` (its database has no active playset), wiping the list. `stl launch` writes the file again
+before every start, so nothing is lost on our side, but starting the game from the official launcher in between loses the mods.
 
 ### L14. The launcher runs the open-beta branch although the setting says it is off — `guess`
 `…\launchereta_branch` contains `openbeta` and the bootstrapper logs "Found `openbeta` branch", while `userSettings.json` has

@@ -123,8 +123,11 @@ pub fn launch(game: &Game, store: &Store, opts: &Options, say: &mut dyn FnMut(&s
         say(&format!("would write {} mod(s) to {}", ids.len(), game.dlc_load_path().display()));
     } else {
         std::fs::create_dir_all(&game.data_dir)?;
-        let changed = dlcload::write(&game.dlc_load_path(), &ids)?;
+        let changed = dlcload::write(&game.dlc_load_path(), &ids, playset.disabled_dlcs.as_deref())?;
         say(&format!("{} mod(s) in dlc_load.json{}", ids.len(), if changed { "" } else { " (unchanged)" }));
+        if let Some(d) = &playset.disabled_dlcs {
+            say(&format!("  {} DLC switched off by the playset", d.len()));
+        }
     }
 
     // plugins

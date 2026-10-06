@@ -44,6 +44,17 @@ enum Cmd {
         #[arg(long)]
         replace: bool,
     },
+    /// the installed DLC and whether the active playset switches it off
+    Dlc {
+        #[command(subcommand)]
+        command: Option<DlcCmd>,
+    },
+    /// the news cards of the official launcher's home page (a public feed)
+    News {
+        /// fetch the feed again
+        #[arg(long)]
+        refresh: bool,
+    },
     /// DLL plugins
     Plugins,
     Plugin {
@@ -105,6 +116,14 @@ enum PlaysetCmd {
     Disable { mods: Vec<String> },
     /// move a mod to a position (1 = loaded first)
     Move { r#mod: String, position: usize },
+}
+
+#[derive(Subcommand)]
+enum DlcCmd {
+    /// switch DLC on in the active playset (by name)
+    Enable { names: Vec<String> },
+    /// switch DLC off in the active playset
+    Disable { names: Vec<String> },
 }
 
 #[derive(Subcommand)]
@@ -331,6 +350,53 @@ fn run() -> Result<()> {
                 }
             }
             store.save()?;
+        }
+        Cmd::Dlc { command } => {
+            let game = open_game(&cli, &store)?;
+            let all = stl_core::dlc::scan(&game.dir);
+            let current = stl_core::dlcload::disabled_dlcs_of(&stl_core::dlcload::read(&game.dlc_load_path())?.1);
+            if let Some(c) = command {
+                let (names, on) = match c {
+                    DlcCmd::Enable { names } => (names, true),
+                    DlcCmd::Disable { names } => (names, false),
+                };
+                let idx = store.active_index();
+                for n in names {
+                    let w = n.to_lowercase();
+                    let hits: Vec<_> = all.iter().filter(|d| d.name.to_lowercase().contains(&w) || d.id.to_lowercase().contains(&w)).collect();
+                    match hits.len() {
+                        0 => bail!("no DLC matches {n:?} (stl dlc)"),
+                        1 => {
+                            store.playsets[idx].set_dlc_enabled(&hits[0].id, on, &current);
+                            println!("{} {}", if on { "enabled" } else { "disabled" }, hits[0].name);
+                        }
+                        k => bail!("{k} DLC match {n:?}: {}", hits.iter().take(6).map(|d| d.name.as_str()).collect::<Vec<_>>().join("; ")),
+                    }
+                }
+                store.save()?;
+            } else {
+                let p = store.active_playset();
+                let off = p.disabled_dlcs_or(&current);
+                for d in &all {
+                    println!("[{}] {:<44} {}", if off.contains(&d.id) { ' ' } else { 'x' }, d.name, d.category);
+                }
+                println!("{} installed, {} switched off in the playset {}{}", all.len(), all.iter().filter(|d| off.contains(&d.id)).count(), p.name, if p.disabled_dlcs.is_none() { " (it has no list of its own: dlc_load.json's is used)" } else { "" });
+            }
+        }
+        Cmd::News { refresh } => {
+            let game = open_game(&cli, &store)?;
+            let lang = "en";
+            let cards = if *refresh { stl_core::news::refresh(&game.settings.game_id, &game.settings.dist_platform, lang)? } else {
+                let c = stl_core::news::load_cached(lang);
+                if c.is_empty() { stl_core::news::load_official_cache(&game.data_dir, lang) } else { c }
+            };
+            if cards.is_empty() {
+                println!("no cached news; try --refresh");
+            }
+            for c in cards {
+                println!("[{}] {}
+      {}", c.slot, c.link.as_deref().unwrap_or("(no link)"), c.image.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| c.image_url.unwrap_or_default()));
+            }
         }
         Cmd::Plugins => {
             let game = open_game(&cli, &store).ok();

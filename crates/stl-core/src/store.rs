@@ -26,6 +26,9 @@ pub struct Playset {
     pub mods: Vec<PlaysetMod>,
     #[serde(default)]
     pub plugins: Vec<PlaysetPlugin>,
+    /// DLC switched off in this playset (`dlc/dlc001_x/dlc001.dlc`); None = leave whatever `dlc_load.json` says
+    #[serde(default)]
+    pub disabled_dlcs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -39,6 +42,12 @@ pub struct Store {
     /// the game folder the user chose, if it is not found by itself
     #[serde(default)]
     pub game_dir: Option<String>,
+    /// the window's language (`en`, `zh-Hans`, …); None = the game's language
+    #[serde(default)]
+    pub language: Option<String>,
+    /// `auto`, `launcher`, `steam` or `none`
+    #[serde(default)]
+    pub background: Option<String>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -71,7 +80,7 @@ impl Store {
         s.version = 1;
         s.path = path.to_path_buf();
         if s.playsets.is_empty() {
-            let p = Playset { id: new_id("default"), name: "Default".into(), mods: Vec::new(), plugins: Vec::new() };
+            let p = Playset { id: new_id("default"), name: "Default".into(), mods: Vec::new(), plugins: Vec::new(), disabled_dlcs: None };
             s.active = Some(p.id.clone());
             s.playsets.push(p);
         }
@@ -109,7 +118,7 @@ impl Store {
         if self.find(name).is_some() {
             bail!("there is already a playset called {name}");
         }
-        self.playsets.push(Playset { id: new_id(name), name: name.to_string(), mods: Vec::new(), plugins: Vec::new() });
+        self.playsets.push(Playset { id: new_id(name), name: name.to_string(), mods: Vec::new(), plugins: Vec::new(), disabled_dlcs: None });
         Ok(self.playsets.len() - 1)
     }
 
@@ -162,6 +171,19 @@ impl Playset {
         true
     }
 
+    /// The DLC this playset switches off: its own list, or `fallback` (the current `dlc_load.json`) while it has none.
+    pub fn disabled_dlcs_or<'a>(&'a self, fallback: &'a [String]) -> &'a [String] {
+        self.disabled_dlcs.as_deref().unwrap_or(fallback)
+    }
+
+    pub fn set_dlc_enabled(&mut self, id: &str, enabled: bool, fallback: &[String]) {
+        let list = self.disabled_dlcs.get_or_insert_with(|| fallback.to_vec());
+        list.retain(|d| d != id);
+        if !enabled {
+            list.push(id.to_string());
+        }
+    }
+
     pub fn set_plugin(&mut self, id: &str, enabled: bool) {
         match self.plugins.iter().position(|p| p.id == id) {
             Some(i) => self.plugins[i].enabled = enabled,
@@ -206,7 +228,7 @@ mod tests {
 
     #[test]
     fn mod_order() {
-        let mut p = Playset { id: "x".into(), name: "x".into(), mods: vec![], plugins: vec![] };
+        let mut p = Playset { id: "x".into(), name: "x".into(), mods: vec![], plugins: vec![], disabled_dlcs: None };
         for m in ["a", "b", "c", "d"] {
             p.set_mod(m, true);
         }
@@ -217,5 +239,17 @@ mod tests {
         assert!(!p.remove_mod("b"));
         p.set_mod("c", false);
         assert_eq!(p.enabled_mods(), vec!["d", "a"]);
+    }
+
+    #[test]
+    fn dlc_switches_start_from_the_current_file() {
+        let mut p = Playset { id: "x".into(), name: "x".into(), mods: vec![], plugins: vec![], disabled_dlcs: None };
+        let current = vec!["dlc/a/a.dlc".to_string()];
+        assert_eq!(p.disabled_dlcs_or(&current), &current[..], "no list of its own: the file's");
+        p.set_dlc_enabled("dlc/b/b.dlc", false, &current);
+        assert_eq!(p.disabled_dlcs.as_deref().unwrap(), &["dlc/a/a.dlc".to_string(), "dlc/b/b.dlc".to_string()]);
+        p.set_dlc_enabled("dlc/a/a.dlc", true, &current);
+        p.set_dlc_enabled("dlc/b/b.dlc", false, &current);
+        assert_eq!(p.disabled_dlcs.as_deref().unwrap(), &["dlc/b/b.dlc".to_string()], "no duplicates");
     }
 }
