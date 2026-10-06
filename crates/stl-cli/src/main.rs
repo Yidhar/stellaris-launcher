@@ -515,7 +515,7 @@ fn run() -> Result<()> {
             let game = open_game(&cli, &store)?;
             let lang = "en";
             let cards = if *refresh { stl_core::news::refresh(&game.settings.game_id, &game.settings.dist_platform, lang)? } else {
-                let c = stl_core::news::load_cached(lang);
+                let c = stl_core::news::load_cached(&game.settings.game_id, &game.settings.dist_platform, lang);
                 if c.is_empty() { stl_core::news::load_official_cache(&game.data_dir, lang) } else { c }
             };
             if cards.is_empty() {

@@ -199,6 +199,11 @@ impl Acts {
     }
 }
 
+/// The news cards' height: about a fifth of the window, between 128 and 200 points.
+fn news_card_height(ui: &Ui) -> f32 {
+    (ui.ctx().screen_rect().height() * 0.22).clamp(128.0, 200.0)
+}
+
 struct News {
     cards: Vec<Card>,
     rx: Option<Receiver<Result<Vec<Card>, String>>>,
@@ -412,10 +417,7 @@ impl App {
         theme::install_fonts(ctx, app.lang);
         app.load_news_local();
         if app.store.news_online != Some(false) {
-            let stale = news::cache_dir().ok().and_then(|d| std::fs::metadata(d.join("feed.json")).ok()).and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map_or(true, |age| age > Duration::from_secs(6 * 3600));
-            if stale || app.news.cards.is_empty() {
-                app.refresh_news();
-            }
+            app.refresh_news();
         }
         app
     }
@@ -472,9 +474,10 @@ impl App {
 
     fn load_news_local(&mut self) {
         let code = self.lang.code();
-        let mut cards = news::load_cached(code);
-        if cards.is_empty() {
-            if let Ok(g) = &self.game {
+        let mut cards = Vec::new();
+        if let Ok(g) = &self.game {
+            cards = news::load_cached(&g.settings.game_id, &g.settings.dist_platform, code);
+            if cards.is_empty() {
                 cards = news::load_official_cache(&g.data_dir, code);
             }
         }
@@ -1050,7 +1053,7 @@ impl App {
         let right_rect = Rect::from_min_max(pos2(avail.right() - controls_w, avail.top()), avail.max);
         let mut brand = ui.new_child(UiBuilder::new().id_salt("play-brand").max_rect(left_rect));
         self.brand(&mut brand);
-        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 168.0), left_rect.max);
+        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - news_card_height(ui) - 40.0), left_rect.max);
         let mut news = ui.new_child(UiBuilder::new().id_salt("play-news").max_rect(news_rect));
         self.news_strip(&mut news);
         // the controls stand on the bottom edge: they are as high as they were laid out last frame (one frame late, then right)
@@ -1122,7 +1125,7 @@ impl App {
         let acts = Acts::default();
         let loading = self.news.rx.is_some();
         let cards = self.news.cards.clone();
-        let height = 128.0;
+        let height = news_card_height(ui);
         let gap = 16.0;
         let width = ui.available_width();
 

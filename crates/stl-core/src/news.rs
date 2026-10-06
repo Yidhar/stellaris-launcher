@@ -1,11 +1,18 @@
-//! The news cards the official launcher shows on its home page (promotions of DLC and other games, announcements): a public, anonymous feed of
-//! "content cards" per game. We read what the official launcher has cached, and can fetch the same public feed ourselves; pictures are kept in
-//! our own cache. Nothing about the user is sent and no impression is reported; a card only opens its link in the browser when it is clicked.
+//! The news cards the official launcher shows on its home page (patch notes, dev diaries, promotions). It has two sources:
+//! - signed in, the cards Braze sends to the account (the official launcher keeps them in its Chromium Local Storage, `ab.storage.cc.<key>`);
+//!   we read that copy from disk, so a user who signs in there sees the same news here;
+//! - otherwise a public, anonymous feed per game, which we fetch ourselves (and can read from the official launcher's cache).
+//! Pictures are kept in our own cache. Nothing about the user is sent and no impression is reported; a card only opens its link when clicked.
 
 use crate::{net, paths, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+/// The Braze app key the official launcher's cards are stored under.
+const BRAZE_KEY: &str = "0381b29f-827d-4e24-9906-ad99933faa11";
+/// Launcher starts we assume for the cards aimed at a number of them (a returning player).
+const ASSUMED_LAUNCHES: f64 = 100.0;
 
 pub const FEED_URL: &str = "https://api.paradox-interactive.com/communication/braze/contentcards";
 
@@ -148,6 +155,93 @@ pub fn parse_feed_with(json: &str, language: &str, now_ms: i64, owned: &[String]
     out
 }
 
+fn ms_of(v: &Value) -> Option<i64> {
+    v.as_str().and_then(parse_time_ms).or_else(|| v.as_i64().map(|x| if x < 100_000_000_000 { x * 1000 } else { x }))
+}
+
+/// The account's cards (the stored Braze list, minified keys: `i` picture, `u` link, `e` extras, `ca`/`ea` created/expires, `p` pinned, `r` removed)
+/// picked the way the official launcher does: the card is for this game (`extras.game`) and platform (`extras.distributionPlatforms`), its
+/// launch-count target holds, and it names a known section; then each slot in turn (main, secondary-1, secondary-2) takes up to 8 cards that
+/// list it in `extras.sections` and no earlier slot took. Each shows for `extras.delay` (4 s when unset).
+pub fn parse_braze(json: &str, game_id: &str, platform: &str, now_ms: i64) -> Vec<Card> {
+    let Ok(doc) = serde_json::from_str::<Value>(json) else { return Vec::new() };
+    let Some(list) = doc.get("v").unwrap_or(&doc).as_array() else { return Vec::new() };
+    let split = |v: &Value| -> Vec<String> { v.as_str().map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default() };
+    let num = |v: &Value| -> Option<f64> { v.as_str().and_then(|s| s.trim().parse::<f64>().ok()).or_else(|| v.as_f64()).filter(|x| *x != 0.0) };
+    const SLOTS: [&str; 3] = ["main", "secondary-1", "secondary-2"];
+    let mut cards: Vec<&Value> = list
+        .iter()
+        .filter(|c| {
+            let e = &c["e"];
+            let link = c["u"].as_str().unwrap_or("");
+            if !e.is_object() || link.is_empty() || c["r"].as_bool() == Some(true) {
+                return false;
+            }
+            if ms_of(&c["ea"]).is_some_and(|t| t < now_ms) {
+                return false;
+            }
+            let n = ASSUMED_LAUNCHES;
+            let launches_ok = match num(&e["numberOfLauncherStarts"]) {
+                Some(exact) => exact == n,
+                None => !(num(&e["minNumberOfLauncherStarts"]).is_some_and(|m| n < m) || num(&e["maxNumberOfLauncherStarts"]).is_some_and(|m| n > m)),
+            };
+            split(&e["game"]).iter().any(|g| g == game_id)
+                && split(&e["distributionPlatforms"]).iter().any(|p| p == platform)
+                && launches_ok
+                && split(&e["sections"]).iter().any(|s| SLOTS.contains(&s.as_str()) || s == "onboarding" || s == "onboarding-main")
+        })
+        .collect();
+    // as the SDK lists them: pinned first, then the newest
+    cards.sort_by_key(|c| (c["p"].as_bool() != Some(true), std::cmp::Reverse(ms_of(&c["ca"]).unwrap_or(0))));
+    let mut used = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for slot in SLOTS {
+        let mut n = 0;
+        for c in &cards {
+            let id = c["id"].as_str().unwrap_or("").to_string();
+            if n >= 8 || used.contains(&id) || !split(&c["e"]["sections"]).iter().any(|s| s == slot) {
+                continue;
+            }
+            n += 1;
+            used.insert(id.clone());
+            out.push(Card {
+                slot: slot.to_string(),
+                id,
+                title: c["tt"].as_str().unwrap_or("").to_string(),
+                text: c["ds"].as_str().unwrap_or("").to_string(),
+                image_url: c["i"].as_str().filter(|s| !s.is_empty()).map(str::to_string),
+                image: None,
+                link: c["u"].as_str().filter(|s| s.starts_with("http")).map(str::to_string),
+                delay_ms: num(&c["e"]["delay"]).map(|d| d as u64).unwrap_or(4000).max(1000),
+            });
+        }
+    }
+    out
+}
+
+/// The cards the official launcher received for the signed-in account, read from its Local Storage; empty when it never signed in.
+pub fn load_account_cards(game_id: &str, platform: &str) -> Vec<Card> {
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else { return Vec::new() };
+    let dir = PathBuf::from(local).join("Paradox Interactive").join("launcher-v2").join("chromium-data").join("Local Storage").join("leveldb");
+    let key = format!("ab.storage.cc.{BRAZE_KEY}");
+    let values = crate::leveldb::read(&dir, key.as_bytes());
+    let Some(text) = values.iter().find(|(k, _)| k.ends_with(key.as_bytes())).and_then(|(_, v)| crate::leveldb::chromium_string(v)) else { return Vec::new() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    parse_braze(&text, game_id, platform, now)
+}
+
+fn attach_cached_images(cards: &mut [Card]) {
+    let Ok(dir) = cache_dir() else { return };
+    for c in cards {
+        if let Some(u) = &c.image_url {
+            let p = dir.join(image_name(u));
+            if p.is_file() {
+                c.image = Some(p);
+            }
+        }
+    }
+}
+
 pub fn cache_dir() -> Result<PathBuf> {
     Ok(paths::app_data_dir()?.join("cache").join("news"))
 }
@@ -159,19 +253,15 @@ fn image_name(url: &str) -> String {
     format!("{stem}.{ext}")
 }
 
-/// The feed we last fetched, with the pictures that are in our cache.
-pub fn load_cached(language: &str) -> Vec<Card> {
-    let Ok(dir) = cache_dir() else { return Vec::new() };
-    let Ok(text) = std::fs::read_to_string(dir.join("feed.json")) else { return Vec::new() };
-    let mut cards = parse_feed(&text, language);
-    for c in &mut cards {
-        if let Some(u) = &c.image_url {
-            let p = dir.join(image_name(u));
-            if p.is_file() {
-                c.image = Some(p);
-            }
-        }
+/// What can be shown without the network: the account's cards, else the feed we last fetched; with the pictures that are in our cache.
+pub fn load_cached(game_id: &str, platform: &str, language: &str) -> Vec<Card> {
+    let mut cards = load_account_cards(game_id, platform);
+    if cards.is_empty() {
+        let Ok(dir) = cache_dir() else { return Vec::new() };
+        let Ok(text) = std::fs::read_to_string(dir.join("feed.json")) else { return Vec::new() };
+        cards = parse_feed(&text, language);
     }
+    attach_cached_images(&mut cards);
     cards
 }
 
@@ -213,15 +303,19 @@ pub fn load_official_cache(data_dir: &Path, language: &str) -> Vec<Card> {
     Vec::new()
 }
 
-/// Fetches the public feed for a game id (`stellaris`), saves it and its pictures in our cache and returns the cards.
+/// The account's cards when the official launcher has them, else the public feed for a game id (`stellaris`), fetched and saved; with their
+/// pictures downloaded into our cache.
 pub fn refresh(game_id: &str, platform: &str, language: &str) -> Result<Vec<Card>> {
-    let url = format!("{FEED_URL}/{game_id}?distributionPlatform={platform}");
-    let body = net::http_get(&url, 15_000, 4 << 20)?;
-    let text = String::from_utf8(body).context("the feed is not text")?;
-    let mut cards = parse_feed(&text, language);
     let dir = cache_dir()?;
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("feed.json"), &text)?;
+    let mut cards = load_account_cards(game_id, platform);
+    if cards.is_empty() {
+        let url = format!("{FEED_URL}/{game_id}?distributionPlatform={platform}");
+        let body = net::http_get(&url, 15_000, 4 << 20)?;
+        let text = String::from_utf8(body).context("the feed is not text")?;
+        cards = parse_feed(&text, language);
+        std::fs::write(dir.join("feed.json"), &text)?;
+    }
     for c in &mut cards {
         let Some(u) = c.image_url.clone() else { continue };
         let p = dir.join(image_name(&u));
@@ -282,6 +376,27 @@ mod tests {
         assert_eq!(c[1].delay_ms, 4000);
         assert_eq!(c[2].delay_ms, 5000, "5 s when the item says nothing");
         assert!(parse_feed("not json", "en").is_empty());
+    }
+
+    #[test]
+    fn picks_account_cards_like_the_official_launcher() {
+        let cards = r#"{"v":[
+          {"id":"old","i":"https://img/o.jpg","u":"https://x/o","ca":"2026-09-01T00:00:00Z","ea":"2026-09-02T00:00:00Z","e":{"game":"stellaris","sections":"main","distributionPlatforms":"steam"}},
+          {"id":"m","i":"https://img/m.jpg","u":"https://x/m","ca":"2026-09-22T00:00:00Z","ea":"2026-10-20T00:00:00Z","e":{"game":"stellaris","sections":"main","distributionPlatforms":"steam,pdx"}},
+          {"id":"dd","i":"https://img/dd.jpg","u":"https://x/dd","ca":"2026-10-06T00:00:00Z","ea":"2026-10-08T00:00:00Z","e":{"game":"stellaris","delay":"6000","sections":"secondary-1","distributionPlatforms":"steam","minNumberOfLauncherStarts":"2"}},
+          {"id":"both","i":"https://img/b.jpg","u":"https://x/b","ca":"2026-10-05T00:00:00Z","e":{"game":"ck3, stellaris","sections":"secondary-1,secondary-2","distributionPlatforms":"steam"}},
+          {"id":"new","i":"https://img/n.jpg","u":"https://x/n","ca":"2026-10-05T00:00:00Z","e":{"game":"stellaris","sections":"secondary-2","distributionPlatforms":"steam","maxNumberOfLauncherStarts":"3"}},
+          {"id":"gog","i":"https://img/g.jpg","u":"https://x/g","ca":"2026-10-05T00:00:00Z","e":{"game":"stellaris","sections":"main","distributionPlatforms":"gog"}},
+          {"id":"ck","i":"https://img/c.jpg","u":"https://x/c","ca":"2026-10-05T00:00:00Z","e":{"game":"ck3","sections":"main","distributionPlatforms":"steam"}},
+          {"id":"nolink","i":"https://img/l.jpg","u":"","ca":"2026-10-05T00:00:00Z","e":{"game":"stellaris","sections":"main","distributionPlatforms":"steam"}}
+        ]}"#;
+        let now = parse_time_ms("2026-10-06T12:00:00Z").unwrap();
+        let c = parse_braze(cards, "stellaris", "steam", now);
+        let got: Vec<(&str, &str)> = c.iter().map(|c| (c.slot.as_str(), c.id.as_str())).collect();
+        // expired, other platforms, other games, cards for new players and cards without a link are left out; a card fills one slot only
+        assert_eq!(got, vec![("main", "m"), ("secondary-1", "dd"), ("secondary-1", "both")]);
+        assert_eq!(c[1].delay_ms, 6000);
+        assert_eq!(c[0].delay_ms, 4000);
     }
 
     #[test]
