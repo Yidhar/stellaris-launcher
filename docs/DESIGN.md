@@ -49,8 +49,8 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
    own `launcher-settings.json` (`-gdpr-compliant`), `--continuelastsave` for continue, stderr to a log. Steam must be running (the game
    talks to it); no account token is passed, which only affects Paradox online features (to be measured, FINDINGS.md open question 2).
 4. **Plugins are loaded by injection from outside**, not by files dropped into the game folder: nothing to clean up after a game update or a
-   "verify files", nothing to forget. The cost is that the launcher must be the one starting the game (or `stl inject` run by hand). A
-   proxy-DLL host mode, for starting from Steam directly, can be added later without changing the manifest.
+   "verify files", nothing to forget. The cost is that the launcher must be the one starting the game (or `stl inject` run by hand). This is
+   the only way plugins are loaded: no proxy/stand-in DLLs (decided 2026-10-06); a game started from Steam runs without plugins.
 5. **A plugin states which game builds it is for** (`exe_timestamps`), and the launcher refuses to load it into another. The plugins of this
    project already refuse for themselves; the launcher says why *before* the game is running, and says it in one place for all of them.
 6. **No account login.** The official launcher signs in to a Paradox account to give the game a session token. Reproducing that means handling
@@ -69,4 +69,4 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
 2. **Done:** the window (Play with news, Playsets with Mods | DLC | Plugins, Mods library, Plugins, Settings); drag-to-reorder mods is still up/down buttons.
 3. Mod conflict report (files two mods both provide, with the load-order winner) — the feature the official launcher hides behind a flag.
 4. Release builds in CI, a zip with `stl.exe` and the window.
-5. Proxy-DLL host (launch from Steam), per-plugin settings, plugin dependencies and update checks.
+5. Plugin dependencies and update checks.

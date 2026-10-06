@@ -73,7 +73,7 @@ Rules for the plugin:
 - **Link** (`--link`, "Link a plugin under development"): uses the folder where it is (for development); its `config\` is in that folder.
 - **Launch**: skips (and says why) a plugin that is not installed, whose DLL is missing, or that lists builds not including this one; makes
   missing settings files; starts the game; waits for its window and `delay_ms`; loads each plugin with `LoadLibraryW` in a remote thread. A
-  plugin already in the process (loaded by a proxy DLL) is not loaded twice. The launcher never calls `FreeLibrary` in the game.
+  plugin already in the process is not loaded twice. The launcher never calls `FreeLibrary` in the game.
 - **Settings**: the gear button of a plugin opens its `config\` files as text, with *Save*, *Restore default* and *Open folder*.
 - An earlier version kept plugins in `%APPDATA%\stellaris-launcher\plugins`; they are moved here once (that folder becomes
   `plugins.migrated`).
