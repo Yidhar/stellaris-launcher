@@ -15,6 +15,7 @@ pub mod paths;
 pub mod pe;
 pub mod plugins;
 pub mod process;
+pub mod saves;
 pub mod script;
 pub mod store;
 

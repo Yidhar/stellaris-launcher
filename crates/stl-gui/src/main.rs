@@ -18,6 +18,7 @@ use stl_core::mods::{self, Kind, Mod};
 use stl_core::news::{self, Card};
 use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
+use stl_core::saves::{self, Save};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
 use theme::{bold, chip, circle_button, glass, glass_floating, glass_pane, glass_rows, glass_scroll, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
@@ -140,6 +141,19 @@ struct App {
     focus_playset_filter: bool,
     /// development: open the playset drop-down on the first frame
     dev_popup: bool,
+    /// the newest save, for the Continue button
+    last_save: Option<Save>,
+    /// page transition: the page on show, when it came, and from which side
+    shown_page: Page,
+    page_t0: f64,
+    page_dir: f32,
+    /// the same for the Mods | DLC | Plugins switch of a playset
+    seg_shown: usize,
+    seg_t0: f64,
+    seg_dir: f32,
+    /// development: slow the transitions down, and switch to a page two seconds after the start
+    dev_slow: f64,
+    dev_then: Option<Page>,
     game_dir_text: String,
     assets: Assets,
     news: News,
@@ -210,6 +224,15 @@ impl App {
             ps_filter: String::new(),
             focus_playset_filter: false,
             dev_popup: false,
+            last_save: None,
+            shown_page: Page::Play,
+            page_t0: -10.0,
+            page_dir: 1.0,
+            seg_shown: 0,
+            seg_t0: -10.0,
+            seg_dir: 1.0,
+            dev_slow: 1.0,
+            dev_then: None,
             game_dir_text: String::new(),
             assets: Assets::new(ctx),
             news: News { cards: Vec::new(), rx: None, hero: 0, switched: 0.0, error: None, page: 0, wheel: 0.0 },
@@ -227,6 +250,10 @@ impl App {
                 app.seg = v.parse().unwrap_or(0);
             } else if let Some(v) = a.strip_prefix("--lang=") {
                 app.lang = Lang::from_code(v).unwrap_or(Lang::En);
+            } else if let Some(v) = a.strip_prefix("--slow=") {
+                app.dev_slow = v.parse().unwrap_or(1.0);
+            } else if let Some(v) = a.strip_prefix("--then=") {
+                app.dev_then = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied();
             } else if a == "--popup" {
                 app.dev_popup = true;
             } else if let Some(v) = a.strip_prefix("--many=") {
@@ -236,6 +263,8 @@ impl App {
                 }
             }
         }
+        app.shown_page = app.page;
+        app.seg_shown = app.seg;
         theme::install_fonts(ctx, app.lang);
         app.load_news_local();
         if app.store.news_online != Some(false) {
@@ -271,6 +300,7 @@ impl App {
                 self.dlc_current = dlcload::disabled_dlcs_of(&dlcload::read(&g.dlc_load_path()).map(|x| x.1).unwrap_or_default());
                 self.backgrounds = artwork::backgrounds(&g.settings.game_id, STEAM_APP_ID).into_iter().map(|s| (s.id, s.path)).collect();
                 self.logo = artwork::logo(&g.settings.game_id, STEAM_APP_ID);
+                self.last_save = saves::latest(&g.data_dir);
             }
             Err(_) => {
                 self.mods.clear();
@@ -341,8 +371,15 @@ impl App {
 
     fn poll_process(&mut self) {
         if self.last_poll.elapsed() > Duration::from_secs(1) {
+            let was_running = !self.running.is_empty();
             self.running = process::find_processes("stellaris.exe");
             self.last_poll = Instant::now();
+            if was_running && self.running.is_empty() {
+                // the game has just closed: it may have written a newer save
+                if let Ok(g) = &self.game {
+                    self.last_save = saves::latest(&g.data_dir);
+                }
+            }
         }
     }
 
@@ -852,11 +889,18 @@ impl App {
             ui.add_space(14.0);
             let w = ui.available_width();
             let text = if launching { tr(lang, "play.starting") } else if running { tr(lang, "play.running") } else { tr(lang, "play.button") };
-            if theme::capsule_button(ui, text, vec2(w, 56.0), ButtonStyle::Filled(BLUE), ready).clicked() {
+            if theme::hero_button(ui, vec2(w, 62.0), text, None, Icon::PlayFilled, true, ready).clicked() {
                 acts.push(Act::Start(false));
             }
-            ui.add_space(8.0);
-            if theme::capsule_button(ui, tr(lang, "play.continue"), vec2(w, 48.0), ButtonStyle::Tinted(Color32::WHITE), ready).clicked() {
+            ui.add_space(12.0);
+            let save_line = match &self.last_save {
+                Some(sv) => match saves::local_time(sv.modified) {
+                    Some((_, mo, d, h, mi)) => format!("{}  ·  {mo:02}-{d:02} {h:02}:{mi:02}", sv.name),
+                    None => sv.name.clone(),
+                },
+                None => tr(lang, "play.no_save").to_string(),
+            };
+            if theme::hero_button(ui, vec2(w, 62.0), tr(lang, "play.continue"), Some(&save_line), Icon::Resume, false, ready && self.last_save.is_some()).clicked() {
                 acts.push(Act::Start(true));
             }
             if running {
@@ -979,10 +1023,24 @@ impl App {
             self.seg = i;
         }
         ui.add_space(10.0);
+        let now = ui.input(|i| i.time);
+        if self.seg != self.seg_shown {
+            self.seg_dir = if self.seg >= self.seg_shown { 1.0 } else { -1.0 };
+            self.seg_shown = self.seg;
+            self.seg_t0 = now;
+        }
+        let t = ((now - self.seg_t0) / (0.24 * self.dev_slow)).clamp(0.0, 1.0) as f32;
+        let ease = theme::ease_out(t);
+        if t < 1.0 {
+            ui.ctx().request_repaint();
+        }
+        let rect = ui.available_rect_before_wrap().translate(vec2(self.seg_dir * 28.0 * (1.0 - ease), 0.0));
+        let mut body = ui.new_child(UiBuilder::new().id_salt("playset-body").max_rect(rect));
+        body.set_opacity(ease);
         match self.seg {
-            0 => self.playset_mods(ui, acts),
-            1 => self.playset_dlc(ui, acts),
-            _ => self.playset_plugins(ui, acts),
+            0 => self.playset_mods(&mut body, acts),
+            1 => self.playset_dlc(&mut body, acts),
+            _ => self.playset_plugins(&mut body, acts),
         }
     }
 
@@ -1488,6 +1546,27 @@ impl eframe::App for App {
         }
         self.assets.set_background(self.background_path());
         self.paint_background(ctx);
+        // the page on show changes: it slides in from the side of its tab and fades in
+        let now = ctx.input(|i| i.time);
+        if let Some(p) = self.dev_then {
+            if now > 2.0 {
+                self.page = p;
+                self.dev_then = None;
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+        if self.page != self.shown_page {
+            let index = |p: Page| Page::ALL.iter().position(|x| *x == p).unwrap_or(0);
+            self.page_dir = if index(self.page) >= index(self.shown_page) { 1.0 } else { -1.0 };
+            self.shown_page = self.page;
+            self.page_t0 = now;
+        }
+        let t = ((now - self.page_t0) / (0.32 * self.dev_slow)).clamp(0.0, 1.0) as f32;
+        let ease = theme::ease_out(t);
+        if t < 1.0 {
+            ctx.request_repaint();
+        }
 
         egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
         egui::TopBottomPanel::bottom("tabs").exact_height(76.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
@@ -1498,6 +1577,10 @@ impl eframe::App for App {
             }
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 34, right: 34, top: 2, bottom: 14 })).show(ctx, |ui| {
+            let rect = ui.max_rect().translate(vec2(self.page_dir * 44.0 * (1.0 - ease), 0.0));
+            let mut page = ui.new_child(UiBuilder::new().id_salt("page").max_rect(rect));
+            page.set_opacity(ease);
+            let ui = &mut page;
             if self.game.is_err() && self.page != Page::Settings {
                 self.page_missing(ui);
                 return;

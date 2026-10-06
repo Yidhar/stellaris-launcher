@@ -420,6 +420,92 @@ pub fn capsule_button(ui: &mut Ui, text: &str, size: Vec2, style: ButtonStyle, e
     response
 }
 
+/// Fast start, gentle end: 0..1 -> 0..1.
+pub fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
+}
+
+/// A capsule filled with a vertical gradient (a fan of triangles with a colour per vertex: exact for a gradient along one axis).
+fn gradient_capsule(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    let r = rect.height() / 2.0;
+    let steps = 14;
+    let mut points = Vec::new();
+    for k in 0..=steps {
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / steps as f32;
+        points.push(pos2(rect.right() - r + a.cos() * r, rect.center().y + a.sin() * r));
+    }
+    for k in 0..=steps {
+        let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / steps as f32;
+        points.push(pos2(rect.left() + r + a.cos() * r, rect.center().y + a.sin() * r));
+    }
+    let at = |y: f32| mix(top, bottom, ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0));
+    let mut mesh = egui::Mesh::default();
+    for pt in &points {
+        mesh.colored_vertex(*pt, at(pt.y));
+    }
+    let centre = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.center(), at(rect.center().y));
+    for i in 0..points.len() as u32 {
+        mesh.add_triangle(centre, i, (i + 1) % points.len() as u32);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// The two big controls of the Play page. `primary` is the blue one: a gradient with a glow under it and a gloss on top; the other is glass.
+/// Both lift a little under the pointer and press in when clicked. `sub` is a smaller line under the label.
+pub fn hero_button(ui: &mut Ui, size: Vec2, label: &str, sub: Option<&str>, icon: Icon, primary: bool, enabled: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    let hot = ui.ctx().animate_bool_with_time(resp.id.with("hot"), enabled && resp.hovered(), 0.16);
+    let down = ui.ctx().animate_bool_with_time(resp.id.with("down"), enabled && resp.is_pointer_button_down_on(), 0.07);
+    let r = rect.shrink(2.5 * down);
+    let radius = r.height() / 2.0;
+    let painter = ui.painter();
+    let (fg, sub_color) = if primary && enabled {
+        painter.add(Shadow { offset: [0, (7.0 + 4.0 * hot - 4.0 * down) as i8], blur: (20.0 + 10.0 * hot) as u8, spread: 0, color: BLUE.gamma_multiply(0.45 + 0.25 * hot) }.as_shape(r, cr(radius)));
+        painter.rect_filled(r, cr(radius), Color32::from_rgb(16, 104, 236));
+        let top = mix(Color32::from_rgb(84, 172, 255), Color32::from_rgb(112, 190, 255), hot);
+        let bottom = mix(Color32::from_rgb(8, 96, 228), Color32::from_rgb(24, 116, 246), hot);
+        gradient_capsule(painter, r.shrink(0.8), top, bottom);
+        let gloss = Rect::from_min_max(pos2(r.left() + radius * 0.55, r.top() + 3.0), pos2(r.right() - radius * 0.55, r.top() + r.height() * 0.46));
+        painter.rect_filled(gloss, cr(gloss.height() / 2.0), white(30));
+        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white(80)), StrokeKind::Inside);
+        (Color32::WHITE, white(205))
+    } else if enabled {
+        painter.add(Shadow { offset: [0, (5.0 + 3.0 * hot) as i8], blur: 16, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(r, cr(radius)));
+        painter.add(glass_shapes(ui.ctx(), r, radius));
+        painter.rect_filled(r, cr(radius), white((10.0 + 26.0 * hot + 14.0 * down) as u8));
+        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white((50.0 + 50.0 * hot) as u8)), StrokeKind::Inside);
+        (LABEL, SECONDARY)
+    } else {
+        painter.rect_filled(r, cr(radius), white(12));
+        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white(26)), StrokeKind::Inside);
+        (TERTIARY, TERTIARY)
+    };
+    // icon and label side by side, centred; the small line under them
+    let label_font = FontId::new(if primary { 19.0 } else { 17.0 }, bold());
+    let galley = painter.layout_no_wrap(label.to_owned(), label_font, fg);
+    let icon_w = 22.0;
+    let gap = 10.0;
+    let total = icon_w + gap + galley.size().x;
+    let cy = r.center().y - if sub.is_some() { 9.0 } else { 0.0 };
+    let x0 = r.center().x - total / 2.0;
+    icon.draw(painter, pos2(x0 + icon_w / 2.0, cy), icon_w, fg, 2.0);
+    painter.galley(pos2(x0 + icon_w + gap, cy - galley.size().y / 2.0), galley, fg);
+    if let Some(text) = sub {
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(12.0, FontFamily::Proportional), sub_color, (r.width() - 40.0).max(20.0));
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let g = painter.layout_job(job);
+        painter.galley(pos2(r.center().x - g.size().x / 2.0, r.center().y + 8.0), g, sub_color);
+    }
+    resp
+}
+
 /// A button as wide as its text needs.
 pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.5, bold()), Color32::WHITE);
@@ -523,13 +609,16 @@ pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<
     let bar = Rect::from_center_size(pos2(area.center().x, area.bottom() - 8.0 - 29.0), vec2(item_w * n as f32 + 12.0, 58.0));
     ui.painter().add(Shape::Vec(vec![lift(bar, 29.0), glass_shapes(ui.ctx(), bar, 29.0)]));
     let mut clicked = None;
+    // the blue wash slides from the old page to the new one
+    let at = ui.ctx().animate_value_with_time(ui.id().with("tab-pill"), current as f32, 0.24);
+    let pill = Rect::from_min_size(pos2(bar.left() + 6.0 + at * item_w, bar.top() + 5.0), vec2(item_w, 48.0));
+    ui.painter().rect_filled(pill, cr(24.0), BLUE.gamma_multiply(0.30));
+    ui.painter().rect_stroke(pill, cr(24.0), Stroke::new(1.0, BLUE.gamma_multiply(0.45)), StrokeKind::Inside);
     for (i, (icon, label)) in items.iter().enumerate() {
         let r = Rect::from_min_size(pos2(bar.left() + 6.0 + i as f32 * item_w, bar.top() + 5.0), vec2(item_w, 48.0));
         let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
         let selected = i == current;
-        if selected {
-            ui.painter().rect_filled(r, cr(24.0), BLUE.gamma_multiply(0.30));
-        } else if resp.hovered() {
+        if !selected && resp.hovered() {
             ui.painter().rect_filled(r, cr(24.0), white(14));
         }
         let color = if selected { BLUE } else if resp.hovered() { white(210) } else { SECONDARY };
@@ -547,6 +636,8 @@ pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<
 #[derive(Clone, Copy, PartialEq)]
 pub enum Icon {
     Play,
+    PlayFilled,
+    Resume,
     Playsets,
     Mods,
     Plugins,
@@ -579,6 +670,13 @@ impl Icon {
         };
         match self {
             Icon::Play => closed(vec![at(-0.26, -0.4), at(0.42, 0.0), at(-0.26, 0.4)]),
+            Icon::PlayFilled => {
+                p.add(Shape::convex_polygon(vec![at(-0.3, -0.42), at(0.46, 0.0), at(-0.3, 0.42)], color, Stroke::NONE));
+            }
+            Icon::Resume => {
+                line(vec![at(-0.34, -0.36), at(-0.34, 0.36)]);
+                closed(vec![at(-0.12, -0.36), at(0.42, 0.0), at(-0.12, 0.36)]);
+            }
             Icon::Playsets => {
                 for y in [-0.3, 0.0, 0.3] {
                     p.circle_filled(at(-0.4, y), width * 0.7, color);
