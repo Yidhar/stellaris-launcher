@@ -502,6 +502,49 @@ pub fn divider(ui: &mut Ui) {
     ui.add_space(12.0);
 }
 
+/// The menu of a drop-down: a floating glass card under `anchor`, its left edge on the anchor's, at least `width` wide. Open while the
+/// popup `id` is open; a click outside it (or Esc) closes it. `add` lays out `menu_item`s.
+pub fn menu<R>(ui: &mut Ui, id: egui::Id, anchor: &Response, width: f32, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    if !ui.memory(|m| m.is_popup_open(id)) {
+        return None;
+    }
+    let shown = egui::Area::new(id.with("menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor.rect.left_bottom() + vec2(0.0, 6.0))
+        .show(ui.ctx(), |ui| {
+            let w = width.max(anchor.rect.width());
+            ui.set_min_width(w);
+            ui.set_max_width(w);
+            glass_with(ui, RADIUS, 6.0, true, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                add(ui)
+            })
+        });
+    let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p) && !anchor.rect.contains(p)));
+    if outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.memory_mut(|m| m.close_popup());
+    }
+    Some(shown.inner)
+}
+
+/// One choice in a `menu`: a full-width row, lit under the pointer, a check after the chosen one. A click closes the menu.
+pub fn menu_item(ui: &mut Ui, text: &str, chosen: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, cr(10.0), white(22));
+    }
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.5, FontFamily::Proportional), LABEL);
+    // the card's margin (6) and this make 12: the text starts where the drop-down's own text does
+    ui.painter().galley(pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
+    if chosen {
+        Icon::Check.draw(ui.painter(), pos2(rect.right() - 18.0, rect.center().y), 15.0, BLUE, 2.0);
+    }
+    if resp.clicked() {
+        ui.memory_mut(|m| m.close_popup());
+    }
+    resp
+}
+
 /// A drop-down that is only text and a chevron until the pointer is on it (a filter in a toolbar).
 pub fn text_dropdown(ui: &mut Ui, text: &str, open: bool) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.5, FontFamily::Proportional), LABEL);

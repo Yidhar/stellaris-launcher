@@ -238,7 +238,7 @@ struct App {
     ps_filter: String,
     focus_playset_filter: bool,
     /// development: open the playset drop-down on the first frame
-    dev_popup: bool,
+    dev_popup: Option<String>,
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
@@ -345,7 +345,7 @@ impl App {
             playset_filter: String::new(),
             ps_filter: String::new(),
             focus_playset_filter: false,
-            dev_popup: false,
+            dev_popup: None,
             make: None,
             config: None,
             updates: PluginUpdates::default(),
@@ -405,7 +405,9 @@ impl App {
                     app.acts.push(Act::OpenUpload(m.id.clone()));
                 }
             } else if a == "--popup" {
-                app.dev_popup = true;
+                app.dev_popup = Some("playset-popup".into());
+            } else if let Some(v) = a.strip_prefix("--popup=") {
+                app.dev_popup = Some(v.to_string());
             } else if let Some(v) = a.strip_prefix("--many=") {
                 // this many extra playsets, in memory only (nothing is saved unless something is changed)
                 for i in 1..=v.parse::<usize>().unwrap_or(0) {
@@ -1727,10 +1729,9 @@ impl App {
                 if r.clicked() {
                     ui.memory_mut(|m| m.toggle_popup(popup));
                 }
-                egui::popup::popup_below_widget(ui, popup, &r, egui::popup::PopupCloseBehavior::CloseOnClick, |ui| {
-                    ui.set_min_width(170.0);
+                theme::menu(ui, popup, &r, 180.0, |ui| {
                     for (i, k) in filters.iter().enumerate() {
-                        if ui.selectable_label(i == want, RichText::new(tr(lang, k)).size(14.0)).clicked() {
+                        if theme::menu_item(ui, tr(lang, k), i == want).clicked() {
                             acts.push(Act::SetModsFilter(i));
                         }
                     }
@@ -2235,8 +2236,8 @@ impl eframe::App for App {
         if self.launching.is_some() || !self.running.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
-        if std::mem::take(&mut self.dev_popup) {
-            ctx.memory_mut(|m| m.open_popup(egui::Id::new("playset-popup")));
+        if let Some(id) = self.dev_popup.take() {
+            ctx.memory_mut(|m| m.open_popup(egui::Id::new(id.as_str())));
         }
         self.assets.set_background(self.background_path());
         self.paint_background(ctx);
@@ -2732,12 +2733,11 @@ impl App {
                     ui.memory_mut(|m| m.toggle_popup(popup));
                 }
                 let _ = open;
-                egui::popup::popup_below_widget(ui, popup, &r, egui::popup::PopupCloseBehavior::CloseOnClick, |ui| {
-                    ui.set_min_width(180.0);
+                theme::menu(ui, popup, &r, 180.0, |ui| {
                     egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                         for (w, h) in &sizes {
                             let chosen = (*w, *h) == res;
-                            if ui.selectable_label(chosen, RichText::new(format!("{w} × {h}")).size(14.0)).clicked() {
+                            if theme::menu_item(ui, &format!("{w} × {h}"), chosen).clicked() {
                                 if windowed {
                                     g.windowed_resolution = (*w, *h);
                                 } else {
