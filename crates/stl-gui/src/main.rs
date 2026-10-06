@@ -20,7 +20,7 @@ use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::saves::{self, Save};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
-use theme::{bold, chip, circle_button, glass, glass_floating, glass_pane, glass_rows, glass_scroll, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
+use theme::{bold, chip, circle_button, glass, glass_pane, glass_rows, glass_scroll, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
 const STEAM_APP_ID: u32 = 281990;
 
@@ -604,24 +604,38 @@ impl App {
 
     // ---------------------------------------------------------------- Play
     fn page_play(&mut self, ui: &mut Ui) {
-        // The plan: the artwork stays free. The eye starts at the top left (logo, then the version in large type), drops to the bottom right where
-        // the one bright thing is (the Play button of the control card), and the news sit quietly along the bottom left, small.
+        // The plan: the picture stays free. The eye starts at the top left (logo, version), and ends at the bottom right on the one light
+        // object, the white Play button. Along the bottom, a dark scrim carries the controls (right) and the news (left); both stand on the
+        // same baseline, and nothing has a panel of its own.
         let avail = ui.available_rect_before_wrap();
-        let panel_w = 312.0f32.min(avail.width() * 0.4);
-        let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - panel_w - 24.0, avail.bottom()));
-        let right_rect = Rect::from_min_max(pos2(avail.right() - panel_w, avail.top()), avail.max);
+        let screen = ui.ctx().screen_rect();
+        let scrim_top = avail.bottom() - 360.0;
+        let mut mesh = egui::Mesh::default();
+        let (clear, dark) = (Color32::from_black_alpha(0), Color32::from_black_alpha(150));
+        mesh.colored_vertex(pos2(screen.left(), scrim_top), clear);
+        mesh.colored_vertex(pos2(screen.right(), scrim_top), clear);
+        mesh.colored_vertex(screen.right_bottom(), dark);
+        mesh.colored_vertex(screen.left_bottom(), dark);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        ui.ctx().layer_painter(egui::LayerId::background()).add(Shape::mesh(mesh));
+
+        let gap = 32.0;
+        let controls_w = 296.0f32.min(avail.width() * 0.36);
+        let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - controls_w - gap, avail.bottom()));
+        let right_rect = Rect::from_min_max(pos2(avail.right() - controls_w, avail.top()), avail.max);
         let mut brand = ui.new_child(UiBuilder::new().id_salt("play-brand").max_rect(left_rect));
         self.brand(&mut brand);
-        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 172.0), left_rect.max);
+        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 168.0), left_rect.max);
         let mut news = ui.new_child(UiBuilder::new().id_salt("play-news").max_rect(news_rect));
         self.news_strip(&mut news);
-        // the card sits on the bottom edge: it is as high as it was laid out last frame (one frame late, then right)
-        let height_id = egui::Id::new("play-panel-height");
-        let last: f32 = ui.ctx().data(|d| d.get_temp(height_id)).unwrap_or(400.0);
-        let panel_rect = Rect::from_min_max(pos2(right_rect.left(), (right_rect.bottom() - last).max(right_rect.top())), right_rect.max);
-        let mut panel = ui.new_child(UiBuilder::new().id_salt("play-panel").max_rect(panel_rect));
-        self.play_panel(&mut panel);
-        let used = panel.min_rect().height();
+        // the controls stand on the bottom edge: they are as high as they were laid out last frame (one frame late, then right)
+        let height_id = egui::Id::new("play-controls-height");
+        let last: f32 = ui.ctx().data(|d| d.get_temp(height_id)).unwrap_or(200.0);
+        let controls_rect = Rect::from_min_max(pos2(right_rect.left(), (right_rect.bottom() - last).max(right_rect.top())), right_rect.max);
+        let mut controls = ui.new_child(UiBuilder::new().id_salt("play-controls").max_rect(controls_rect));
+        self.play_controls(&mut controls);
+        let used = controls.min_rect().height();
         if (used - last).abs() > 0.5 {
             ui.ctx().data_mut(|d| d.insert_temp(height_id, used));
             ui.ctx().request_repaint();
@@ -638,7 +652,7 @@ impl App {
             }
             Err(_) => Default::default(),
         };
-        ui.add_space(16.0);
+        ui.add_space(24.0);
         let logo = self.logo.clone();
         match logo.as_ref().and_then(|p| self.assets.image(p, 700)) {
             Some(t) => {
@@ -650,15 +664,15 @@ impl App {
                 ui.label(RichText::new("Stellaris").size(56.0).family(bold()).color(LABEL));
             }
         }
-        ui.add_space(14.0);
+        ui.add_space(16.0);
         if number.is_empty() {
             return;
         }
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            ui.label(RichText::new(format!("v{number}")).size(54.0).family(bold()).color(LABEL));
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.label(RichText::new(format!("v{number}")).size(48.0).family(bold()).color(LABEL));
             if !codename.is_empty() {
-                theme::tag(ui, &codename, BLUE);
+                ui.label(RichText::new(&codename).size(22.0).color(SECONDARY));
             }
         });
         let mut detail = Vec::new();
@@ -680,8 +694,8 @@ impl App {
         let acts = Acts::default();
         let loading = self.news.rx.is_some();
         let cards = self.news.cards.clone();
-        let height = 132.0;
-        let gap = 12.0;
+        let height = 128.0;
+        let gap = 16.0;
         let width = ui.available_width();
 
         // the cards in the order shown (the card of the main slot first), each at the row's height
@@ -741,7 +755,7 @@ impl App {
                 });
             }
         });
-        ui.add_space(2.0);
+        ui.add_space(8.0);
         if order.is_empty() {
             let text = if loading { "…".to_string() } else { self.news.error.clone().unwrap_or_else(|| tr(lang, "play.news_empty").to_string()) };
             ui.label(RichText::new(text).size(12.5).color(SECONDARY));
@@ -764,7 +778,7 @@ impl App {
             for k in from..to {
                 let r = Rect::from_min_size(area.min + vec2(x, 0.0), sizes[k]);
                 x += sizes[k].x + gap;
-                self.draw_card(ui, &cards[order[k]], r, 14.0, &format!("card{k}"), &acts);
+                self.draw_card(ui, &cards[order[k]], r, theme::RADIUS, &format!("card{k}"), &acts);
                 if k == 0 && main_len > 1 {
                     let dots = main_len as f32 * 11.0;
                     for d in 0..main_len {
@@ -788,11 +802,14 @@ impl App {
     fn draw_card(&mut self, ui: &mut Ui, card: &Card, rect: Rect, radius: f32, id: &str, acts: &Acts) {
         let resp = ui.interact(rect, egui::Id::new(("news", id)), Sense::click());
         let now = ui.input(|i| i.time);
+        // the advertisements are loud: they stay a little dimmed, and come up to full brightness under the pointer
+        let lit = ui.ctx().animate_bool_with_time(resp.id.with("lit"), resp.hovered(), 0.18);
+        let tint = Color32::from_gray((200.0 + 55.0 * lit) as u8);
         let mut preview = None;
         match card.image.as_ref().and_then(|p| self.assets.image(p, 1400)) {
             Some(tex) => {
                 let id = tex.at(now).id();
-                theme::cover_image(ui, rect, id, tex.size, radius, Color32::WHITE);
+                theme::cover_image(ui, rect, id, tex.size, radius, tint);
                 preview = Some((id, tex.size));
                 if tex.animated() {
                     ui.ctx().request_repaint_after(Duration::from_millis(40));
@@ -804,7 +821,7 @@ impl App {
         }
         if card.link.is_some() && resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            ui.painter().add(Shape::rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(2.0, Color32::WHITE.gamma_multiply(0.7)), egui::StrokeKind::Inside));
+            ui.painter().add(Shape::rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.0, theme::white(90)), egui::StrokeKind::Inside));
         }
         if let Some((tex, size)) = preview {
             resp.clone().on_hover_ui(|ui| {
@@ -818,18 +835,19 @@ impl App {
         }
     }
 
-    /// The card at the bottom right. Two large controls, Play and Continue, and the playset they use; the rest of the launch options are in Settings.
-    fn play_panel(&mut self, ui: &mut Ui) {
+    /// The controls at the bottom right: the playset, then the two big buttons, Play and Continue, then one line saying what Continue continues
+    /// (or that the game is running). The rest of the launch options are in Settings.
+    fn play_controls(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let active = self.store.active_index();
         let acts = Acts::default();
         let launching = self.launching.is_some();
         let running = !self.running.is_empty();
         let ready = self.game.is_ok() && !launching && !running;
-        glass_floating(ui, 24.0, 18.0, |ui| {
+        {
             let popup_id = egui::Id::new("playset-popup");
             let open = ui.memory(|m| m.is_popup_open(popup_id));
-            let trigger = theme::dropdown_field(ui, Icon::Playsets, &self.store.playsets[active].name, open);
+            let trigger = theme::inline_picker(ui, tr(lang, "tab.playsets"), &self.store.playsets[active].name, open);
             if trigger.clicked() {
                 ui.memory_mut(|m| m.toggle_popup(popup_id));
                 self.focus_playset_filter = true;
@@ -886,38 +904,38 @@ impl App {
                     ui.label(RichText::new("—").color(SECONDARY));
                 }
             });
-            ui.add_space(14.0);
+            ui.add_space(16.0);
             let w = ui.available_width();
             let text = if launching { tr(lang, "play.starting") } else if running { tr(lang, "play.running") } else { tr(lang, "play.button") };
-            if theme::hero_button(ui, vec2(w, 62.0), text, None, Icon::PlayFilled, true, ready).clicked() {
+            if theme::hero_button(ui, vec2(w, 56.0), text, Icon::PlayFilled, true, ready).clicked() {
                 acts.push(Act::Start(false));
             }
             ui.add_space(12.0);
-            let save_line = match &self.last_save {
-                Some(sv) => match saves::local_time(sv.modified) {
-                    Some((_, mo, d, h, mi)) => format!("{}  ·  {mo:02}-{d:02} {h:02}:{mi:02}", sv.name),
-                    None => sv.name.clone(),
-                },
-                None => tr(lang, "play.no_save").to_string(),
-            };
-            if theme::hero_button(ui, vec2(w, 62.0), tr(lang, "play.continue"), Some(&save_line), Icon::Resume, false, ready && self.last_save.is_some()).clicked() {
+            if theme::hero_button(ui, vec2(w, 48.0), tr(lang, "play.continue"), Icon::Resume, false, ready && self.last_save.is_some()).clicked() {
                 acts.push(Act::Start(true));
             }
-            if running {
-                ui.add_space(10.0);
-                ui.vertical_centered(|ui| {
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                if running {
                     let pid = self.running[0].to_string();
-                    ui.label(RichText::new(format!("●  {}", tr_args(lang, "play.status_running", &[&pid]))).size(13.0).color(GREEN));
+                    ui.label(RichText::new(format!("●  {}", tr_args(lang, "play.status_running", &[&pid]))).size(12.5).color(GREEN));
                     if pill_button(ui, tr(lang, "play.close"), ButtonStyle::Plain(RED), true).clicked() {
                         acts.push(Act::CloseGame);
                     }
-                });
-            } else if let Some(last) = self.log.last() {
-                ui.add_space(10.0);
-                let bad = last.contains("could not") || last.contains("failed");
-                ui.add(egui::Label::new(RichText::new(last).size(12.0).color(if bad { RED } else { SECONDARY })).truncate());
-            }
-        });
+                } else if let Some(last) = self.log.last().filter(|l| l.contains("could not") || l.contains("failed")) {
+                    ui.add(egui::Label::new(RichText::new(last).size(12.0).color(RED)).truncate());
+                } else {
+                    let line = match &self.last_save {
+                        Some(sv) => match saves::local_time(sv.modified) {
+                            Some((_, mo, d, h, mi)) => format!("{}  ·  {mo:02}-{d:02} {h:02}:{mi:02}", sv.name),
+                            None => sv.name.clone(),
+                        },
+                        None => tr(lang, "play.no_save").to_string(),
+                    };
+                    ui.add(egui::Label::new(RichText::new(line).size(12.0).color(SECONDARY)).truncate());
+                }
+            });
+        }
         self.acts.extend(acts.take());
     }
 
@@ -982,7 +1000,7 @@ impl App {
         }
 
         // the chosen playset
-        glass_pane(ui, right_rect, 20.0, 18.0, |pane| self.playset_detail(pane, &acts));
+        glass_pane(ui, right_rect, theme::RADIUS, 18.0, |pane| self.playset_detail(pane, &acts));
         ui.advance_cursor_after_rect(avail);
         self.acts.extend(acts.take());
     }
@@ -1258,7 +1276,7 @@ impl App {
         let game = self.game.clone().ok();
         let active = self.store.active_index();
         if self.plugins.is_empty() && self.plugin_problems.is_empty() {
-            glass(ui, 20.0, 40.0, |ui| {
+            glass(ui, theme::RADIUS, 40.0, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new(tr(lang, "pl.empty")).size(18.0).color(LABEL));
                     ui.label(RichText::new(tr(lang, "pl.empty_hint")).size(13.5).color(SECONDARY));
@@ -1270,7 +1288,7 @@ impl App {
             for p in &self.plugins {
                 let on = self.store.playsets[active].plugins.iter().find(|x| x.id == p.manifest.id).map(|x| x.enabled).unwrap_or(false);
                 let (status, color) = plugin_status(lang, game.as_ref(), p);
-                glass(ui, 18.0, 18.0, |ui| {
+                glass(ui, theme::RADIUS, 18.0, |ui| {
                     let w = ui.available_width();
                     ui.horizontal_top(|ui| {
                         ui.allocate_ui_with_layout(vec2(w - 150.0, 0.0), Layout::top_down(Align::Min), |ui| {
@@ -1493,7 +1511,7 @@ impl App {
         let err = self.game.as_ref().err().cloned().unwrap_or_default();
         large_title(ui, tr(lang, "common.not_found"), Some(&err), |_| {});
         let acts = Acts::default();
-        glass(ui, 18.0, 18.0, |ui| {
+        glass(ui, theme::RADIUS, 18.0, |ui| {
             ui.horizontal(|ui| {
                 theme::text_field(ui, &mut self.game_dir_text, tr(lang, "common.folder_hint"), 460.0);
                 if pill_button(ui, tr(lang, "common.browse"), ButtonStyle::Tinted(BLUE), true).clicked() {
@@ -1576,7 +1594,7 @@ impl eframe::App for App {
                 self.page = Page::ALL[i];
             }
         });
-        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 34, right: 34, top: 2, bottom: 14 })).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 16 })).show(ctx, |ui| {
             let rect = ui.max_rect().translate(vec2(self.page_dir * 44.0 * (1.0 - ease), 0.0));
             let mut page = ui.new_child(UiBuilder::new().id_salt("page").max_rect(rect));
             page.set_opacity(ease);

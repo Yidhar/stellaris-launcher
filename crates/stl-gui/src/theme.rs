@@ -22,6 +22,9 @@ pub const SECONDARY: Color32 = Color32::from_rgba_premultiplied(141, 141, 147, 1
 pub const TERTIARY: Color32 = Color32::from_rgba_premultiplied(71, 71, 74, 77);
 pub const SEGMENT_ON: Color32 = Color32::from_rgb(99, 99, 102);
 
+/// The corner radius of every card, list, popup and picture; everything else is a capsule.
+pub const RADIUS: f32 = 16.0;
+
 pub fn white(alpha: u8) -> Color32 {
     Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha)
 }
@@ -121,8 +124,8 @@ pub fn install_style(ctx: &egui::Context) {
     v.panel_fill = Color32::TRANSPARENT;
     v.window_fill = Color32::from_rgb(44, 44, 46);
     v.window_stroke = Stroke::new(1.0, white(30));
-    v.window_corner_radius = cr(14.0);
-    v.menu_corner_radius = cr(14.0);
+    v.window_corner_radius = cr(RADIUS);
+    v.menu_corner_radius = cr(RADIUS);
     v.extreme_bg_color = Color32::from_rgba_premultiplied(0, 0, 0, 90);
     v.faint_bg_color = white(10);
     v.hyperlink_color = BLUE;
@@ -192,11 +195,6 @@ pub fn glass_shapes(ctx: &egui::Context, rect: Rect, radius: f32) -> Shape {
 /// A glass card around whatever `add` puts in it.
 pub fn glass<R>(ui: &mut Ui, radius: f32, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     glass_with(ui, radius, margin, false, add)
-}
-
-/// A glass card that floats above the picture: the same, with a soft shadow under it.
-pub fn glass_floating<R>(ui: &mut Ui, radius: f32, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
-    glass_with(ui, radius, margin, true, add)
 }
 
 fn glass_with<R>(ui: &mut Ui, radius: f32, margin: f32, floating: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -374,13 +372,13 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
 /// A segmented control; returns the index chosen this frame.
 pub fn segmented(ui: &mut Ui, labels: &[String], current: usize, width: f32) -> Option<usize> {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-    ui.painter().rect_filled(rect, cr(10.0), white(30));
+    ui.painter().rect_filled(rect, cr(rect.height() / 2.0), white(30));
     let n = labels.len().max(1);
     let seg_w = (rect.width() - 4.0) / n as f32;
     let pill_x = ui.ctx().animate_value_with_time(ui.id().with("seg-pill").with(rect.min.x as i32), current as f32, 0.16);
     let pill = Rect::from_min_size(pos2(rect.left() + 2.0 + pill_x * seg_w, rect.top() + 2.0), vec2(seg_w, rect.height() - 4.0));
-    ui.painter().add(Shadow { offset: [0, 1], blur: 3, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(pill, cr(8.0)));
-    ui.painter().rect_filled(pill, cr(8.0), SEGMENT_ON);
+    ui.painter().add(Shadow { offset: [0, 1], blur: 3, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(pill, cr(pill.height() / 2.0)));
+    ui.painter().rect_filled(pill, cr(pill.height() / 2.0), SEGMENT_ON);
     let mut clicked = None;
     for (i, l) in labels.iter().enumerate() {
         let r = Rect::from_min_size(pos2(rect.left() + 2.0 + i as f32 * seg_w, rect.top() + 2.0), vec2(seg_w, rect.height() - 4.0));
@@ -430,78 +428,51 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
-/// A capsule filled with a vertical gradient (a fan of triangles with a colour per vertex: exact for a gradient along one axis).
-fn gradient_capsule(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
-    let r = rect.height() / 2.0;
-    let steps = 14;
-    let mut points = Vec::new();
-    for k in 0..=steps {
-        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / steps as f32;
-        points.push(pos2(rect.right() - r + a.cos() * r, rect.center().y + a.sin() * r));
-    }
-    for k in 0..=steps {
-        let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / steps as f32;
-        points.push(pos2(rect.left() + r + a.cos() * r, rect.center().y + a.sin() * r));
-    }
-    let at = |y: f32| mix(top, bottom, ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0));
-    let mut mesh = egui::Mesh::default();
-    for pt in &points {
-        mesh.colored_vertex(*pt, at(pt.y));
-    }
-    let centre = mesh.vertices.len() as u32;
-    mesh.colored_vertex(rect.center(), at(rect.center().y));
-    for i in 0..points.len() as u32 {
-        mesh.add_triangle(centre, i, (i + 1) % points.len() as u32);
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
-/// The two big controls of the Play page. `primary` is the blue one: a gradient with a glow under it and a gloss on top; the other is glass.
-/// Both lift a little under the pointer and press in when clicked. `sub` is a smaller line under the label.
-pub fn hero_button(ui: &mut Ui, size: Vec2, label: &str, sub: Option<&str>, icon: Icon, primary: bool, enabled: bool) -> Response {
+/// The two big controls of the Play page. The primary one is a white capsule with dark text (it reads on any picture and does not compete
+/// with it); the other is plain glass. Both brighten a little under the pointer and press in when clicked.
+pub fn hero_button(ui: &mut Ui, size: Vec2, label: &str, icon: Icon, primary: bool, enabled: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let hot = ui.ctx().animate_bool_with_time(resp.id.with("hot"), enabled && resp.hovered(), 0.16);
     let down = ui.ctx().animate_bool_with_time(resp.id.with("down"), enabled && resp.is_pointer_button_down_on(), 0.07);
-    let r = rect.shrink(2.5 * down);
+    let r = rect.shrink(2.0 * down);
     let radius = r.height() / 2.0;
     let painter = ui.painter();
-    let (fg, sub_color) = if primary && enabled {
-        // a quiet lift under the button, not a halo; a gentle gradient; a hairline rim. No gloss.
-        painter.add(Shadow { offset: [0, (4.0 + 2.0 * hot - 2.0 * down) as i8], blur: (14.0 + 6.0 * hot) as u8, spread: 0, color: Color32::from_rgba_unmultiplied(0, 60, 160, (70.0 + 30.0 * hot) as u8) }.as_shape(r, cr(radius)));
-        painter.rect_filled(r, cr(radius), Color32::from_rgb(20, 118, 245));
-        let top = mix(Color32::from_rgb(54, 150, 255), Color32::from_rgb(72, 164, 255), hot);
-        let bottom = mix(Color32::from_rgb(14, 108, 240), Color32::from_rgb(26, 122, 248), hot);
-        gradient_capsule(painter, r.shrink(0.8), top, bottom);
-        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white(34)), StrokeKind::Inside);
-        (Color32::WHITE, white(205))
+    let fg = if primary && enabled {
+        painter.add(Shadow { offset: [0, 4], blur: (12.0 + 6.0 * hot) as u8, spread: 0, color: Color32::from_black_alpha((60.0 + 30.0 * hot) as u8) }.as_shape(r, cr(radius)));
+        let rest = mix(Color32::from_rgb(236, 236, 240), Color32::WHITE, hot);
+        painter.rect_filled(r, cr(radius), mix(rest, Color32::from_rgb(214, 214, 220), down));
+        Color32::from_rgb(22, 22, 26)
     } else if enabled {
-        painter.add(Shadow { offset: [0, (5.0 + 3.0 * hot) as i8], blur: 16, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(r, cr(radius)));
         painter.add(glass_shapes(ui.ctx(), r, radius));
-        painter.rect_filled(r, cr(radius), white((10.0 + 26.0 * hot + 14.0 * down) as u8));
-        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white((50.0 + 50.0 * hot) as u8)), StrokeKind::Inside);
-        (LABEL, SECONDARY)
+        painter.rect_filled(r, cr(radius), white((8.0 + 20.0 * hot + 12.0 * down) as u8));
+        LABEL
     } else {
-        painter.rect_filled(r, cr(radius), white(12));
-        painter.rect_stroke(r, cr(radius), Stroke::new(1.0, white(26)), StrokeKind::Inside);
-        (TERTIARY, TERTIARY)
+        painter.rect_filled(r, cr(radius), white(14));
+        TERTIARY
     };
-    // icon and label side by side, centred; the small line under them
-    let label_font = FontId::new(if primary { 19.0 } else { 17.0 }, bold());
-    let galley = painter.layout_no_wrap(label.to_owned(), label_font, fg);
-    let icon_w = 22.0;
+    let galley = painter.layout_no_wrap(label.to_owned(), FontId::new(if primary { 18.0 } else { 16.0 }, bold()), fg);
+    let icon_w = if primary { 18.0 } else { 16.0 };
     let gap = 10.0;
-    let total = icon_w + gap + galley.size().x;
-    let cy = r.center().y - if sub.is_some() { 9.0 } else { 0.0 };
-    let x0 = r.center().x - total / 2.0;
-    icon.draw(painter, pos2(x0 + icon_w / 2.0, cy), icon_w, fg, 2.0);
-    painter.galley(pos2(x0 + icon_w + gap, cy - galley.size().y / 2.0), galley, fg);
-    if let Some(text) = sub {
-        let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(12.0, FontFamily::Proportional), sub_color, (r.width() - 40.0).max(20.0));
-        job.wrap.max_rows = 1;
-        job.wrap.break_anywhere = true;
-        let g = painter.layout_job(job);
-        painter.galley(pos2(r.center().x - g.size().x / 2.0, r.center().y + 8.0), g, sub_color);
+    let x0 = r.center().x - (icon_w + gap + galley.size().x) / 2.0;
+    icon.draw(painter, pos2(x0 + icon_w / 2.0, r.center().y), icon_w, fg, 1.8);
+    painter.galley(pos2(x0 + icon_w + gap, r.center().y - galley.size().y / 2.0), galley, fg);
+    resp
+}
+
+/// A quiet picker: a caption over the chosen value, and a chevron; it only shows a shape under the pointer or while open.
+pub fn inline_picker(ui: &mut Ui, caption: &str, text: &str, open: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
+    if open || resp.hovered() {
+        ui.painter().rect_filled(rect, cr(24.0), white(if open { 30 } else { 18 }));
     }
+    let left = rect.left() + 18.0;
+    ui.painter().text(pos2(left, rect.top() + 14.0), Align2::LEFT_CENTER, caption, FontId::new(11.5, FontFamily::Proportional), SECONDARY);
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(16.0, bold()), LABEL, (rect.width() - 64.0).max(20.0));
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(left, rect.top() + 23.0), galley, LABEL);
+    (if open { Icon::Up } else { Icon::Down }).draw(ui.painter(), pos2(rect.right() - 22.0, rect.center().y), 14.0, SECONDARY, 1.8);
     resp
 }
 
@@ -511,40 +482,12 @@ pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -
     capsule_button(ui, text, vec2(galley.size().x + 28.0, 32.0), style, enabled)
 }
 
-/// The closed state of a drop-down: the chosen text and a chevron on a rounded field. `open` shows it pressed in.
-pub fn dropdown_field(ui: &mut Ui, icon: Icon, text: &str, open: bool) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
-    let fill = if open { white(44) } else if resp.hovered() { white(38) } else { white(26) };
-    ui.painter().rect_filled(rect, cr(12.0), fill);
-    if open {
-        ui.painter().rect_stroke(rect, cr(12.0), Stroke::new(1.5, BLUE), StrokeKind::Inside);
-    }
-    icon.draw(ui.painter(), pos2(rect.left() + 26.0, rect.center().y), 20.0, SECONDARY, 1.6);
-    let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(15.5, bold()), LABEL, (rect.width() - 92.0).max(20.0));
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    let galley = ui.painter().layout_job(job);
-    ui.painter().galley(pos2(rect.left() + 48.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
-    (if open { Icon::Up } else { Icon::Down }).draw(ui.painter(), pos2(rect.right() - 24.0, rect.center().y), 16.0, SECONDARY, 1.8);
-    resp
-}
-
 /// A small coloured capsule label.
 pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = FontId::new(11.5, FontFamily::Proportional);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 14.0, 20.0), Sense::hover());
     ui.painter().rect_filled(rect, cr(10.0), color.gamma_multiply(0.22));
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
-    resp
-}
-
-/// A larger tag (the code name of a version): bold text on a tinted capsule.
-pub fn tag(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(16.0, bold()), color);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 30.0), Sense::hover());
-    ui.painter().rect_filled(rect, cr(15.0), color.gamma_multiply(0.28));
-    ui.painter().rect_stroke(rect, cr(15.0), Stroke::new(1.0, color.gamma_multiply(0.7)), StrokeKind::Inside);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp
 }
@@ -592,15 +535,15 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
 /// A text field in a grouped list.
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-    ui.painter().rect_filled(rect, cr(10.0), white(30));
-    let inner = rect.shrink2(vec2(12.0, 0.0));
+    ui.painter().rect_filled(rect, cr(18.0), white(30));
+    let inner = rect.shrink2(vec2(16.0, 0.0));
     let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
     child.add(egui::TextEdit::singleline(text).hint_text(RichText::new(hint).color(SECONDARY)).frame(false).desired_width(inner.width()).margin(egui::Margin::symmetric(0, 8)))
 }
 
 // ------------------------------------------------------------------ the tab bar
 
-/// The tab bar: a floating glass capsule, centred at the bottom, the chosen page on a blue wash. Returns the page clicked.
+/// The tab bar: a floating glass capsule, centred at the bottom, the chosen page on a light wash. Returns the page clicked.
 pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<usize> {
     let area = ui.max_rect();
     let n = items.len();
@@ -611,8 +554,7 @@ pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<
     // the blue wash slides from the old page to the new one
     let at = ui.ctx().animate_value_with_time(ui.id().with("tab-pill"), current as f32, 0.24);
     let pill = Rect::from_min_size(pos2(bar.left() + 6.0 + at * item_w, bar.top() + 5.0), vec2(item_w, 48.0));
-    ui.painter().rect_filled(pill, cr(24.0), BLUE.gamma_multiply(0.30));
-    ui.painter().rect_stroke(pill, cr(24.0), Stroke::new(1.0, BLUE.gamma_multiply(0.45)), StrokeKind::Inside);
+    ui.painter().rect_filled(pill, cr(24.0), white(34));
     for (i, (icon, label)) in items.iter().enumerate() {
         let r = Rect::from_min_size(pos2(bar.left() + 6.0 + i as f32 * item_w, bar.top() + 5.0), vec2(item_w, 48.0));
         let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
@@ -620,7 +562,7 @@ pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<
         if !selected && resp.hovered() {
             ui.painter().rect_filled(r, cr(24.0), white(14));
         }
-        let color = if selected { BLUE } else if resp.hovered() { white(210) } else { SECONDARY };
+        let color = if selected { LABEL } else if resp.hovered() { white(210) } else { SECONDARY };
         icon.draw(ui.painter(), pos2(r.center().x, r.top() + 18.0), 22.0, color, if selected { 1.9 } else { 1.6 });
         ui.painter().text(pos2(r.center().x, r.bottom() - 10.0), Align2::CENTER_CENTER, label, FontId::new(11.0, if selected { bold() } else { FontFamily::Proportional }), color);
         if resp.clicked() {
