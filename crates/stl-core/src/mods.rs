@@ -86,7 +86,9 @@ pub fn scan(data_dir: &Path) -> Vec<Mod> {
             }
         }
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // sorted by name, ignoring the punctuation modders put in front to float themselves to the top ("!!! Universal Patch")
+    let key = |m: &Mod| m.name.trim_start_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    out.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.id.cmp(&b.id)));
     out
 }
 
