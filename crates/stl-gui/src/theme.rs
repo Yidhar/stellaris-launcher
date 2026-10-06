@@ -492,6 +492,15 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, time: f64) {
     ui.ctx().request_repaint();
 }
 
+/// A hairline across the card, between its first row and what it holds.
+pub fn divider(ui: &mut Ui) {
+    ui.add_space(12.0);
+    let r = ui.max_rect();
+    let y = ui.cursor().top();
+    ui.painter().line_segment([pos2(r.left(), y), pos2(r.right(), y)], Stroke::new(1.0, white(30)));
+    ui.add_space(12.0);
+}
+
 /// A number in a small capsule (a count next to a heading).
 pub fn count_badge(ui: &mut Ui, n: usize) -> Response {
     let galley = ui.painter().layout_no_wrap(n.to_string(), FontId::new(13.0, bold()), LABEL);
@@ -563,11 +572,13 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
 // ------------------------------------------------------------------ the tab bar
 
 /// The tab bar: a floating glass capsule, centred at the bottom, the chosen page on a light wash. Returns the page clicked.
-pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<usize> {
+/// `sink` 0..1 lowers it by half its height and fades it a little (while the pointer is elsewhere).
+pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize, sink: f32) -> Option<usize> {
     let area = ui.max_rect();
     let n = items.len();
     let item_w = 92.0f32.min((area.width() - 24.0) / n as f32);
-    let bar = Rect::from_center_size(pos2(area.center().x, area.bottom() - 8.0 - 29.0), vec2(item_w * n as f32 + 12.0, 58.0));
+    let bar = Rect::from_center_size(pos2(area.center().x, area.bottom() - 8.0 - 29.0 + sink * 36.0), vec2(item_w * n as f32 + 12.0, 58.0));
+    ui.set_opacity(1.0 - 0.35 * sink);
     ui.painter().add(Shape::Vec(vec![lift(bar, 29.0), glass_shapes(ui.ctx(), bar, 29.0)]));
     let mut clicked = None;
     // the blue wash slides from the old page to the new one

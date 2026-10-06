@@ -120,6 +120,7 @@ enum Act {
     Open(String),
     CreateMod,
     RescanMods,
+    RescanPlugins,
     SetModsSort(&'static str),
     SetModsView(&'static str),
     OpenUpload(String),
@@ -191,6 +192,8 @@ struct App {
     seg_shown: usize,
     seg_t0: f64,
     seg_dir: f32,
+    /// when the pointer was last near the tab bar
+    bar_active: f64,
     /// what was on show before the change, drawn fading out while the new one comes in
     prev_page: Option<Page>,
     prev_seg: Option<usize>,
@@ -278,6 +281,7 @@ impl App {
             seg_shown: 0,
             seg_t0: -10.0,
             seg_dir: 1.0,
+            bar_active: 0.0,
             prev_page: None,
             prev_seg: None,
             dev_slow: 1.0,
@@ -773,6 +777,13 @@ impl App {
                 }
                 self.mod_times.clear();
             }
+            Act::RescanPlugins => match plugins::list() {
+                Ok((p, problems)) => {
+                    self.plugins = p;
+                    self.plugin_problems = problems;
+                }
+                Err(e) => self.plugin_problems = vec![format!("{e:#}")],
+            },
             Act::SetModsSort(v) => {
                 self.store.mods_sort = Some(v.to_string());
                 self.save();
@@ -1157,12 +1168,12 @@ impl App {
                     acts.push(Act::AddPlayset(self.new_name.clone()));
                 }
             });
+            theme::divider(ui);
             if self.store.playsets.len() > 8 {
-                ui.add_space(8.0);
                 let w = ui.available_width();
                 theme::search_field(ui, &mut self.ps_filter, tr(lang, "mods.search"), w);
+                ui.add_space(8.0);
             }
-            ui.add_space(10.0);
             // the playsets; the import from the official launcher at the foot
             let q = self.ps_filter.to_lowercase();
             let list_h = (ui.available_height() - 44.0).max(60.0);
@@ -1237,7 +1248,7 @@ impl App {
                 }
             });
         });
-        ui.add_space(10.0);
+        theme::divider(ui);
         let now = ui.input(|i| i.time);
         if self.seg != self.seg_shown {
             self.seg_dir = if self.seg >= self.seg_shown { 1.0 } else { -1.0 };
@@ -1459,7 +1470,8 @@ impl App {
         let total = shown.len();
         let rect = ui.available_rect_before_wrap();
         glass_pane(ui, rect, theme::RADIUS, 18.0, |ui| {
-            ui.horizontal(|ui| {
+            // a row of a fixed height, so that everything in it is centred on one line (a growing row centres the first items too high)
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.label(RichText::new(tr(lang, "mods.title")).size(17.0).family(bold()));
                 theme::count_badge(ui, total);
@@ -1485,7 +1497,7 @@ impl App {
                     theme::search_field(ui, &mut self.filter, tr(lang, "mods.search"), w);
                 });
             });
-            ui.add_space(10.0);
+            theme::divider(ui);
             let row_h = if compact { 40.0 } else { 58.0 };
             plain_rows(ui, "mods-library", row_h, total, |ui, range| {
                 let mut rows = Rows::starting_at(range.start);
@@ -1541,40 +1553,54 @@ impl App {
     fn page_plugins(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let acts = Acts::default();
-        large_title(ui, tr(lang, "pl.title"), Some(tr(lang, "pl.hint")), |ui| {
-            if pill_button(ui, tr(lang, "pl.link"), ButtonStyle::Plain(BLUE), true).clicked() {
-                acts.push(Act::PluginInstall(true));
-            }
-            if pill_button(ui, tr(lang, "pl.install"), ButtonStyle::Filled(BLUE), true).clicked() {
-                acts.push(Act::PluginInstall(false));
-            }
-        });
+        ui.add_space(8.0);
         let game = self.game.clone().ok();
         let active = self.store.active_index();
-        if self.plugins.is_empty() && self.plugin_problems.is_empty() {
-            glass(ui, theme::RADIUS, 40.0, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(tr(lang, "pl.empty")).size(18.0).color(LABEL));
-                    ui.label(RichText::new(tr(lang, "pl.empty_hint")).size(13.5).color(SECONDARY));
+        let rect = ui.available_rect_before_wrap();
+        glass_pane(ui, rect, theme::RADIUS, 18.0, |ui| {
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(tr(lang, "pl.title")).size(17.0).family(bold())).on_hover_text(tr(lang, "pl.hint"));
+                theme::count_badge(ui, self.plugins.len());
+                if circle_button(ui, Icon::Refresh, theme::white(22), LABEL, true).on_hover_text(tr(lang, "mods.refresh")).clicked() {
+                    acts.push(Act::RescanPlugins);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, tr(lang, "pl.install"), ButtonStyle::Tinted(Color32::WHITE), true).clicked() {
+                        acts.push(Act::PluginInstall(false));
+                    }
+                    if pill_button(ui, tr(lang, "pl.link"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        acts.push(Act::PluginInstall(true));
+                    }
                 });
             });
-        }
-        egui::ScrollArea::vertical().id_salt("plugins-page").auto_shrink([false, false]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 12.0;
-            for p in &self.plugins {
-                let on = self.store.playsets[active].plugins.iter().find(|x| x.id == p.manifest.id).map(|x| x.enabled).unwrap_or(false);
-                let (status, color) = plugin_status(lang, game.as_ref(), p);
-                glass(ui, theme::RADIUS, 18.0, |ui| {
-                    let w = ui.available_width();
-                    ui.horizontal_top(|ui| {
-                        ui.allocate_ui_with_layout(vec2(w - 150.0, 0.0), Layout::top_down(Align::Min), |ui| {
-                            ui.spacing_mut().item_spacing.y = 5.0;
+            theme::divider(ui);
+            if self.plugins.is_empty() && self.plugin_problems.is_empty() {
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(tr(lang, "pl.empty")).size(17.0).color(LABEL));
+                    ui.label(RichText::new(tr(lang, "pl.empty_hint")).size(13.0).color(SECONDARY));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(tr(lang, "pl.hint")).size(12.5).color(SECONDARY));
+                });
+                return;
+            }
+            egui::ScrollArea::vertical().id_salt("plugins-page").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut rows = Rows::new();
+                for p in &self.plugins {
+                    let on = self.store.playsets[active].plugins.iter().find(|x| x.id == p.manifest.id).map(|x| x.enabled).unwrap_or(false);
+                    let (status, color) = plugin_status(lang, game.as_ref(), p);
+                    let has_text = !p.manifest.description.is_empty();
+                    let h = if has_text { 84.0 } else { 64.0 };
+                    rows.row(ui, h, 150.0, false, |ui| {
+                        stack(ui, h, if has_text { 64.0 } else { 44.0 }, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(&p.manifest.name).size(18.0).family(bold()));
-                                ui.label(RichText::new(&p.manifest.version).size(13.0).color(SECONDARY));
+                                ui.label(RichText::new(&p.manifest.name).size(15.5).family(bold()));
+                                ui.label(RichText::new(&p.manifest.version).size(12.5).color(SECONDARY));
                             });
-                            if !p.manifest.description.is_empty() {
-                                ui.label(RichText::new(&p.manifest.description).size(13.5).color(SECONDARY));
+                            if has_text {
+                                ui.add(egui::Label::new(RichText::new(&p.manifest.description).size(13.0).color(SECONDARY)).truncate());
                             }
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1585,23 +1611,24 @@ impl App {
                                 ui.label(RichText::new(&p.manifest.id).size(11.5).color(theme::TERTIARY));
                             });
                         });
-                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                            let mut v = on;
-                            if switch(ui, &mut v).changed() {
-                                acts.push(Act::PluginFlag(p.manifest.id.clone(), v));
-                            }
-                            ui.add_space(4.0);
-                            if pill_button(ui, tr(lang, "pl.remove"), ButtonStyle::Plain(RED), true).clicked() {
-                                acts.push(Act::PluginRemove(p.manifest.id.clone()));
-                            }
-                        });
+                    }, |ui| {
+                        let mut v = on;
+                        if switch(ui, &mut v).changed() {
+                            acts.push(Act::PluginFlag(p.manifest.id.clone(), v));
+                        }
+                        ui.add_space(6.0);
+                        if pill_button(ui, tr(lang, "pl.remove"), ButtonStyle::Plain(RED), true).clicked() {
+                            acts.push(Act::PluginRemove(p.manifest.id.clone()));
+                        }
                     });
-                });
-            }
-            for pr in &self.plugin_problems {
-                ui.label(RichText::new(pr).size(12.5).color(RED));
-            }
+                }
+                for pr in &self.plugin_problems {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(pr).size(12.5).color(RED));
+                }
+            });
         });
+        ui.advance_cursor_after_rect(rect);
         self.acts.extend(acts.take());
     }
 
@@ -1856,10 +1883,19 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
+        let near_bottom = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y > ctx.screen_rect().bottom() - 130.0);
+        if near_bottom || self.page != self.shown_page || ctx.memory(|m| m.any_popup_open()) {
+            self.bar_active = now;
+        }
+        let sunk = now - self.bar_active > 1.5;
+        if !sunk {
+            ctx.request_repaint_after(Duration::from_millis(1600));
+        }
+        let sink = ctx.animate_bool_with_time(egui::Id::new("tab-bar-sink"), sunk, 0.35);
         egui::TopBottomPanel::bottom("tabs").exact_height(76.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
             let items: Vec<(Icon, String)> = Page::ALL.iter().map(|p| (p.icon(), tr(self.lang, p.key()).to_string())).collect();
             let current = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
-            if let Some(i) = theme::tab_bar(ui, &items, current) {
+            if let Some(i) = theme::tab_bar(ui, &items, current, sink) {
                 self.page = Page::ALL[i];
             }
         });
