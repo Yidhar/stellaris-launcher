@@ -19,7 +19,7 @@ use stl_core::news::{self, Card};
 use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
-use theme::{bold, chip, circle_button, glass, glass_pane, glass_rows, glass_scroll, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
+use theme::{bold, chip, circle_button, glass, glass_floating, glass_pane, glass_rows, glass_scroll, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
 const STEAM_APP_ID: u32 = 281990;
 
@@ -76,7 +76,10 @@ enum Act {
     PluginFlag(String, bool),
     PluginRemove(String),
     PluginInstall(bool),
-    Start,
+    /// start the game; true = continue the last save
+    Start(bool),
+    SetUsePlugins(bool),
+    SetAlternative(Option<usize>),
     CloseGame,
     RefreshNews,
     Reload,
@@ -108,6 +111,9 @@ struct News {
     hero: usize,
     switched: f64,
     error: Option<String>,
+    /// the page of the strip shown, and when the wheel last turned it
+    page: usize,
+    wheel: f64,
 }
 
 struct App {
@@ -122,9 +128,6 @@ struct App {
     running: Vec<u32>,
     last_poll: Instant,
     launching: Option<Receiver<Msg>>,
-    continue_last: bool,
-    use_plugins: bool,
-    alternative: Option<usize>,
     lang: Lang,
     page: Page,
     seg: usize,
@@ -197,9 +200,6 @@ impl App {
             running: Vec::new(),
             last_poll: Instant::now() - Duration::from_secs(10),
             launching: None,
-            continue_last: false,
-            use_plugins: true,
-            alternative: None,
             lang: Lang::En,
             page: Page::Play,
             seg: 0,
@@ -212,7 +212,7 @@ impl App {
             dev_popup: false,
             game_dir_text: String::new(),
             assets: Assets::new(ctx),
-            news: News { cards: Vec::new(), rx: None, hero: 0, switched: 0.0, error: None },
+            news: News { cards: Vec::new(), rx: None, hero: 0, switched: 0.0, error: None, page: 0, wheel: 0.0 },
             acts: Vec::new(),
             logo: None,
             backgrounds: Vec::new(),
@@ -306,6 +306,7 @@ impl App {
         }
         self.news.cards = cards;
         self.news.hero = 0;
+        self.news.page = 0;
     }
 
     fn refresh_news(&mut self) {
@@ -345,10 +346,11 @@ impl App {
         }
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, continue_last: bool) {
         let Ok(game) = self.game.clone() else { return };
         let store = self.store.clone();
-        let opts = launch::Options { use_plugins: self.use_plugins, continue_last: self.continue_last, alternative: self.alternative, ..Default::default() };
+        let alternative = self.store.alternative.filter(|&i| game.settings.alternative_executables.len() > i);
+        let opts = launch::Options { use_plugins: self.store.use_plugins != Some(false), continue_last, alternative, ..Default::default() };
         let (tx, rx) = channel();
         self.launching = Some(rx);
         self.log.clear();
@@ -496,7 +498,15 @@ impl App {
                     }
                 }
             }
-            Act::Start => self.start(),
+            Act::Start(continue_last) => self.start(continue_last),
+            Act::SetUsePlugins(on) => {
+                self.store.use_plugins = Some(on);
+                self.save();
+            }
+            Act::SetAlternative(i) => {
+                self.store.alternative = i;
+                self.save();
+            }
             Act::CloseGame => {
                 for pid in self.running.clone() {
                     if let Err(e) = process::terminate(pid) {
@@ -560,12 +570,12 @@ impl App {
         // The plan: the artwork stays free. The eye starts at the top left (logo, then the version in large type), drops to the bottom right where
         // the one bright thing is (the Play button of the control card), and the news sit quietly along the bottom left, small.
         let avail = ui.available_rect_before_wrap();
-        let panel_w = 340.0f32.min(avail.width() * 0.4);
+        let panel_w = 312.0f32.min(avail.width() * 0.4);
         let left_rect = Rect::from_min_max(avail.min, pos2(avail.right() - panel_w - 24.0, avail.bottom()));
         let right_rect = Rect::from_min_max(pos2(avail.right() - panel_w, avail.top()), avail.max);
         let mut brand = ui.new_child(UiBuilder::new().id_salt("play-brand").max_rect(left_rect));
         self.brand(&mut brand);
-        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 146.0), left_rect.max);
+        let news_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 172.0), left_rect.max);
         let mut news = ui.new_child(UiBuilder::new().id_salt("play-news").max_rect(news_rect));
         self.news_strip(&mut news);
         // the card sits on the bottom edge: it is as high as it was laid out last frame (one frame late, then right)
@@ -626,65 +636,111 @@ impl App {
         }
     }
 
-    /// The news cards, small, in one row along the bottom (a tooltip shows one at full size); a quiet line when there are none.
+    /// The news cards in one row along the bottom, a page at a time (arrows, or the wheel over the row); a tooltip shows one at full size.
     fn news_strip(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let now = ui.input(|i| i.time);
         let acts = Acts::default();
         let loading = self.news.rx.is_some();
         let cards = self.news.cards.clone();
-        let height = 104.0;
+        let height = 132.0;
+        let gap = 12.0;
         let width = ui.available_width();
+
+        // the cards in the order shown (the card of the main slot first), each at the row's height
+        let mut order: Vec<usize> = Vec::new();
+        let mut main_len = 0;
+        if !cards.is_empty() {
+            let main: Vec<usize> = cards.iter().enumerate().filter(|(_, c)| c.slot == "main").map(|(i, _)| i).collect();
+            let main = if main.is_empty() { vec![0] } else { main };
+            main_len = main.len();
+            if main.len() > 1 && now - self.news.switched > 8.0 {
+                self.news.hero = (self.news.hero + 1) % main.len();
+                self.news.switched = now;
+            }
+            let hero_i = main[self.news.hero.min(main.len() - 1)];
+            order.push(hero_i);
+            order.extend((0..cards.len()).filter(|i| !main.contains(i)));
+        }
+        let sizes: Vec<Vec2> = order
+            .iter()
+            .map(|&i| {
+                let s = cards[i].image.as_ref().and_then(|p| self.assets.image(p, 1400)).map(|t| t.size).unwrap_or(vec2(246.0, 230.0));
+                vec2(s.x * height / s.y, height)
+            })
+            .collect();
+        // the pages: as many cards as fit the width
+        let mut pages: Vec<(usize, usize)> = Vec::new();
+        let (mut start, mut x) = (0usize, 0.0f32);
+        for (k, s) in sizes.iter().enumerate() {
+            if k > start && x + s.x > width + 0.5 {
+                pages.push((start, k));
+                start = k;
+                x = 0.0;
+            }
+            x += s.x + gap;
+        }
+        if !sizes.is_empty() {
+            pages.push((start, sizes.len()));
+        }
+        let page_count = pages.len().max(1);
+        self.news.page = self.news.page.min(page_count - 1);
+
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(RichText::new(tr(lang, "play.news").to_uppercase()).size(12.0).color(SECONDARY));
             if circle_button(ui, Icon::Refresh, theme::white(22), SECONDARY, !loading).clicked() {
                 acts.push(Act::RefreshNews);
             }
+            if page_count > 1 {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if circle_button(ui, Icon::Right, theme::white(22), LABEL, self.news.page + 1 < page_count).clicked() {
+                        self.news.page += 1;
+                    }
+                    ui.label(RichText::new(format!("{}/{}", self.news.page + 1, page_count)).size(12.0).color(SECONDARY));
+                    if circle_button(ui, Icon::Left, theme::white(22), LABEL, self.news.page > 0).clicked() {
+                        self.news.page -= 1;
+                    }
+                });
+            }
         });
         ui.add_space(2.0);
-        if !cards.is_empty() {
-            let main: Vec<usize> = cards.iter().enumerate().filter(|(_, c)| c.slot == "main").map(|(i, _)| i).collect();
-            let main = if main.is_empty() { vec![0] } else { main };
-            let others: Vec<usize> = (0..cards.len()).filter(|i| !main.contains(i)).collect();
-            if main.len() > 1 && now - self.news.switched > 8.0 {
-                self.news.hero = (self.news.hero + 1) % main.len();
-                self.news.switched = now;
-            }
-            let hero_i = main[self.news.hero.min(main.len() - 1)];
-            let order: Vec<usize> = std::iter::once(hero_i).chain(others.iter().copied()).collect();
-            let gap = 10.0;
-            let sizes: Vec<Vec2> = order
-                .iter()
-                .map(|&i| {
-                    let s = cards[i].image.as_ref().and_then(|p| self.assets.image(p, 1400)).map(|t| t.size).unwrap_or(vec2(246.0, 230.0));
-                    vec2(s.x * height / s.y, height)
-                })
-                .collect();
-            let total: f32 = sizes.iter().map(|s| s.x).sum::<f32>() + gap * (sizes.len() as f32 - 1.0);
-            egui::ScrollArea::horizontal().id_salt("news").auto_shrink([false, true]).show(ui, |ui| {
-                let (area, _) = ui.allocate_exact_size(vec2(total.max(width), height), Sense::hover());
-                let mut x = 0.0;
-                for (k, &i) in order.iter().enumerate() {
-                    let r = Rect::from_min_size(area.min + vec2(x, 0.0), sizes[k]);
-                    x += sizes[k].x + gap;
-                    self.draw_card(ui, &cards[i], r, 12.0, &format!("card{k}"), &acts);
-                    if k == 0 && main.len() > 1 {
-                        let dots = main.len() as f32 * 11.0;
-                        for d in 0..main.len() {
-                            let c = pos2(r.center().x - dots / 2.0 + 5.5 + d as f32 * 11.0, r.bottom() - 9.0);
-                            if ui.interact(Rect::from_center_size(c, Vec2::splat(11.0)), egui::Id::new(("dot", d)), Sense::click()).clicked() {
-                                self.news.hero = d;
-                                self.news.switched = now;
-                            }
-                            ui.painter().circle_filled(c, 2.6, if d == self.news.hero { Color32::WHITE } else { theme::white(110) });
-                        }
-                        ui.ctx().request_repaint_after(Duration::from_secs(1));
-                    }
-                }
-            });
+        if order.is_empty() {
+            let text = if loading { "…".to_string() } else { self.news.error.clone().unwrap_or_else(|| tr(lang, "play.news_empty").to_string()) };
+            ui.label(RichText::new(text).size(12.5).color(SECONDARY));
         } else {
-            ui.label(RichText::new(if loading { "…".to_string() } else { self.news.error.clone().unwrap_or_else(|| tr(lang, "play.news_empty").to_string()) }).size(12.5).color(SECONDARY));
+            let (from, to) = pages[self.news.page];
+            let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+            if page_count > 1 && ui.rect_contains_pointer(area) {
+                let d = ui.input(|i| i.raw_scroll_delta);
+                let amount = if d.x.abs() > d.y.abs() { d.x } else { d.y };
+                if amount.abs() > 1.0 && now - self.news.wheel > 0.3 {
+                    if amount < 0.0 && self.news.page + 1 < page_count {
+                        self.news.page += 1;
+                    } else if amount > 0.0 && self.news.page > 0 {
+                        self.news.page -= 1;
+                    }
+                    self.news.wheel = now;
+                }
+            }
+            let mut x = 0.0;
+            for k in from..to {
+                let r = Rect::from_min_size(area.min + vec2(x, 0.0), sizes[k]);
+                x += sizes[k].x + gap;
+                self.draw_card(ui, &cards[order[k]], r, 14.0, &format!("card{k}"), &acts);
+                if k == 0 && main_len > 1 {
+                    let dots = main_len as f32 * 11.0;
+                    for d in 0..main_len {
+                        let c = pos2(r.center().x - dots / 2.0 + 5.5 + d as f32 * 11.0, r.bottom() - 9.0);
+                        if ui.interact(Rect::from_center_size(c, Vec2::splat(11.0)), egui::Id::new(("dot", d)), Sense::click()).clicked() {
+                            self.news.hero = d;
+                            self.news.switched = now;
+                        }
+                        ui.painter().circle_filled(c, 2.6, if d == self.news.hero { Color32::WHITE } else { theme::white(110) });
+                    }
+                    ui.ctx().request_repaint_after(Duration::from_secs(1));
+                }
+            }
         }
         if self.news.rx.is_some() || self.assets.busy() {
             ui.ctx().request_repaint_after(Duration::from_millis(300));
@@ -725,26 +781,18 @@ impl App {
         }
     }
 
+    /// The card at the bottom right. Two large controls, Play and Continue, and the playset they use; the rest of the launch options are in Settings.
     fn play_panel(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let active = self.store.active_index();
         let acts = Acts::default();
         let launching = self.launching.is_some();
         let running = !self.running.is_empty();
-        let game_ok = self.game.is_ok();
-        let alt_labels: Vec<String> = match &self.game {
-            Ok(g) if !g.settings.alternative_executables.is_empty() => {
-                let mut v = vec![tr(lang, "play.standard").to_string()];
-                v.extend(g.settings.alternative_executables.iter().enumerate().map(|(i, a)| a.label.get("en").cloned().unwrap_or_else(|| format!("#{}", i + 1))));
-                v
-            }
-            _ => Vec::new(),
-        };
-        glass(ui, 22.0, 18.0, |ui| {
-            theme::section(ui, tr(lang, "play.playset"));
+        let ready = self.game.is_ok() && !launching && !running;
+        glass_floating(ui, 24.0, 18.0, |ui| {
             let popup_id = egui::Id::new("playset-popup");
             let open = ui.memory(|m| m.is_popup_open(popup_id));
-            let trigger = theme::dropdown_field(ui, &self.store.playsets[active].name, open);
+            let trigger = theme::dropdown_field(ui, Icon::Playsets, &self.store.playsets[active].name, open);
             if trigger.clicked() {
                 ui.memory_mut(|m| m.toggle_popup(popup_id));
                 self.focus_playset_filter = true;
@@ -801,45 +849,18 @@ impl App {
                     ui.label(RichText::new("—").color(SECONDARY));
                 }
             });
-            let p = &self.store.playsets[active];
-            let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
-            let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
-            ui.add_space(4.0);
-            ui.label(RichText::new(tr_args(lang, "play.summary", &[&mods_on, &plugins_on])).size(13.0).color(SECONDARY));
-            ui.add_space(12.0);
-            egui::Frame::new().fill(Color32::from_black_alpha(55)).corner_radius(14).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let mut rows = Rows::new();
-                rows.row(ui, 42.0, 46.0, false, |ui| { ui.label(tr(lang, "play.continue")); }, |ui| { switch(ui, &mut self.continue_last); });
-                rows.row(ui, 42.0, 46.0, false, |ui| { ui.label(tr(lang, "play.plugins")); }, |ui| { switch(ui, &mut self.use_plugins); });
-                if !alt_labels.is_empty() {
-                    let cur = self.alternative.map_or(0, |i| i + 1);
-                    let mut pick = None;
-                    for (i, l) in alt_labels.iter().enumerate() {
-                        let r = rows.row(ui, 40.0, 24.0, true, |ui| {
-                            ui.add(egui::Label::new(RichText::new(l).color(if i == cur { LABEL } else { SECONDARY })).truncate());
-                        }, |ui| {
-                            if i == cur {
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                                Icon::Check.draw(ui.painter(), r.center(), 18.0, BLUE, 2.2);
-                            }
-                        });
-                        if r.clicked() {
-                            pick = Some(i);
-                        }
-                    }
-                    if let Some(i) = pick {
-                        self.alternative = if i == 0 { None } else { Some(i - 1) };
-                    }
-                }
-            });
             ui.add_space(14.0);
-            let (text, enabled) = if launching { (tr(lang, "play.starting"), false) } else if running { (tr(lang, "play.running"), false) } else { (tr(lang, "play.button"), game_ok) };
-            if theme::capsule_button(ui, text, vec2(ui.available_width(), 54.0), ButtonStyle::Filled(BLUE), enabled).clicked() {
-                acts.push(Act::Start);
+            let w = ui.available_width();
+            let text = if launching { tr(lang, "play.starting") } else if running { tr(lang, "play.running") } else { tr(lang, "play.button") };
+            if theme::capsule_button(ui, text, vec2(w, 56.0), ButtonStyle::Filled(BLUE), ready).clicked() {
+                acts.push(Act::Start(false));
+            }
+            ui.add_space(8.0);
+            if theme::capsule_button(ui, tr(lang, "play.continue"), vec2(w, 48.0), ButtonStyle::Tinted(Color32::WHITE), ready).clicked() {
+                acts.push(Act::Start(true));
             }
             if running {
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.vertical_centered(|ui| {
                     let pid = self.running[0].to_string();
                     ui.label(RichText::new(format!("●  {}", tr_args(lang, "play.status_running", &[&pid]))).size(13.0).color(GREEN));
@@ -848,7 +869,7 @@ impl App {
                     }
                 });
             } else if let Some(last) = self.log.last() {
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 let bad = last.contains("could not") || last.contains("failed");
                 ui.add(egui::Label::new(RichText::new(last).size(12.0).color(if bad { RED } else { SECONDARY })).truncate());
             }
@@ -1244,6 +1265,41 @@ impl App {
         egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
             let w = ui.available_width().min(820.0);
             ui.set_max_width(w);
+            // launch
+            theme::section(ui, tr(lang, "set.launch"));
+            glass(ui, 16.0, 0.0, |ui| {
+                let mut rows = Rows::new();
+                rows.row(ui, 48.0, 46.0, false, |ui| { ui.label(tr(lang, "play.plugins")); }, |ui| {
+                    let mut on = self.store.use_plugins != Some(false);
+                    if switch(ui, &mut on).changed() {
+                        acts.push(Act::SetUsePlugins(on));
+                    }
+                });
+            });
+            if let Ok(g) = &self.game {
+                if !g.settings.alternative_executables.is_empty() {
+                    theme::section(ui, tr(lang, "play.mode"));
+                    glass(ui, 16.0, 0.0, |ui| {
+                        let mut rows = Rows::new();
+                        let cur = self.store.alternative.filter(|&i| i < g.settings.alternative_executables.len());
+                        let mut names = vec![(None, tr(lang, "play.standard").to_string())];
+                        names.extend(g.settings.alternative_executables.iter().enumerate().map(|(i, a)| (Some(i), a.label.get("en").cloned().unwrap_or_else(|| format!("#{}", i + 1)))));
+                        for (which, name) in names {
+                            let r = rows.row(ui, 44.0, 24.0, true, |ui| {
+                                ui.add(egui::Label::new(RichText::new(&name).color(if cur == which { LABEL } else { SECONDARY })).truncate());
+                            }, |ui| {
+                                if cur == which {
+                                    let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                                    Icon::Check.draw(ui.painter(), r.center(), 18.0, BLUE, 2.2);
+                                }
+                            });
+                            if r.clicked() {
+                                acts.push(Act::SetAlternative(which));
+                            }
+                        }
+                    });
+                }
+            }
             // language
             theme::section(ui, tr(lang, "set.language"));
             glass(ui, 16.0, 0.0, |ui| {
@@ -1434,7 +1490,7 @@ impl eframe::App for App {
         self.paint_background(ctx);
 
         egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
-        egui::TopBottomPanel::bottom("tabs").exact_height(66.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("tabs").exact_height(76.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
             let items: Vec<(Icon, String)> = Page::ALL.iter().map(|p| (p.icon(), tr(self.lang, p.key()).to_string())).collect();
             let current = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
             if let Some(i) = theme::tab_bar(ui, &items, current) {

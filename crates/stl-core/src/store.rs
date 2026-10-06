@@ -51,6 +51,12 @@ pub struct Store {
     /// fetch the public news feed; None = yes
     #[serde(default)]
     pub news_online: Option<bool>,
+    /// load the playset's DLL plugins when starting; None = yes
+    #[serde(default)]
+    pub use_plugins: Option<bool>,
+    /// the alternative executable of `launcher-settings.json` to start (None = the standard one)
+    #[serde(default)]
+    pub alternative: Option<usize>,
     #[serde(skip)]
     path: PathBuf,
 }

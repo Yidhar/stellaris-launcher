@@ -191,13 +191,29 @@ pub fn glass_shapes(ctx: &egui::Context, rect: Rect, radius: f32) -> Shape {
 
 /// A glass card around whatever `add` puts in it.
 pub fn glass<R>(ui: &mut Ui, radius: f32, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    glass_with(ui, radius, margin, false, add)
+}
+
+/// A glass card that floats above the picture: the same, with a soft shadow under it.
+pub fn glass_floating<R>(ui: &mut Ui, radius: f32, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    glass_with(ui, radius, margin, true, add)
+}
+
+fn glass_with<R>(ui: &mut Ui, radius: f32, margin: f32, floating: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
     let slot = ui.painter().add(Shape::Noop);
     let out = egui::Frame::new().inner_margin(egui::Margin::same(margin as i8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui)
     });
-    ui.painter().set(slot, glass_shapes(ui.ctx(), out.response.rect, radius));
+    let rect = out.response.rect;
+    let shape = if floating { Shape::Vec(vec![lift(rect, radius), glass_shapes(ui.ctx(), rect, radius)]) } else { glass_shapes(ui.ctx(), rect, radius) };
+    ui.painter().set(slot, shape);
     out.inner
+}
+
+/// The shadow of a floating card.
+pub fn lift(rect: Rect, radius: f32) -> Shape {
+    Shape::Rect(Shadow { offset: [0, 8], blur: 26, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(rect, cr(radius)))
 }
 
 /// A glass card that fills the rest of the page and scrolls its content.
@@ -411,18 +427,19 @@ pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -
 }
 
 /// The closed state of a drop-down: the chosen text and a chevron on a rounded field. `open` shows it pressed in.
-pub fn dropdown_field(ui: &mut Ui, text: &str, open: bool) -> Response {
+pub fn dropdown_field(ui: &mut Ui, icon: Icon, text: &str, open: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
     let fill = if open { white(44) } else if resp.hovered() { white(38) } else { white(26) };
     ui.painter().rect_filled(rect, cr(12.0), fill);
     if open {
         ui.painter().rect_stroke(rect, cr(12.0), Stroke::new(1.5, BLUE), StrokeKind::Inside);
     }
-    let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(15.5, bold()), LABEL, (rect.width() - 56.0).max(20.0));
+    icon.draw(ui.painter(), pos2(rect.left() + 26.0, rect.center().y), 20.0, SECONDARY, 1.6);
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), FontId::new(15.5, bold()), LABEL, (rect.width() - 92.0).max(20.0));
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = ui.painter().layout_job(job);
-    ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
+    ui.painter().galley(pos2(rect.left() + 48.0, rect.center().y - galley.size().y / 2.0), galley, LABEL);
     (if open { Icon::Up } else { Icon::Down }).draw(ui.painter(), pos2(rect.right() - 24.0, rect.center().y), 16.0, SECONDARY, 1.8);
     resp
 }
@@ -498,25 +515,26 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
 
 // ------------------------------------------------------------------ the tab bar
 
-/// The bar at the bottom: glass, with the pages as icon over label. Returns the page clicked.
+/// The tab bar: a floating glass capsule, centred at the bottom, the chosen page on a blue wash. Returns the page clicked.
 pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<usize> {
-    let rect = ui.max_rect();
-    ui.painter().add(glass_shapes(ui.ctx(), rect, 0.0));
-    ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, white(34)));
+    let area = ui.max_rect();
     let n = items.len();
-    let item_w = (rect.width() / n as f32).min(116.0);
-    let left = rect.center().x - item_w * n as f32 / 2.0;
+    let item_w = 92.0f32.min((area.width() - 24.0) / n as f32);
+    let bar = Rect::from_center_size(pos2(area.center().x, area.bottom() - 8.0 - 29.0), vec2(item_w * n as f32 + 12.0, 58.0));
+    ui.painter().add(Shape::Vec(vec![lift(bar, 29.0), glass_shapes(ui.ctx(), bar, 29.0)]));
     let mut clicked = None;
     for (i, (icon, label)) in items.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(left + i as f32 * item_w, rect.top() + 4.0), vec2(item_w, rect.height() - 8.0));
+        let r = Rect::from_min_size(pos2(bar.left() + 6.0 + i as f32 * item_w, bar.top() + 5.0), vec2(item_w, 48.0));
         let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
         let selected = i == current;
-        let color = if selected { BLUE } else if resp.hovered() { white(190) } else { SECONDARY };
-        if resp.hovered() && !selected {
-            ui.painter().rect_filled(r.shrink2(vec2(8.0, 2.0)), cr(12.0), white(12));
+        if selected {
+            ui.painter().rect_filled(r, cr(24.0), BLUE.gamma_multiply(0.30));
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, cr(24.0), white(14));
         }
-        icon.draw(ui.painter(), pos2(r.center().x, r.top() + 20.0), 26.0, color, if selected { 2.0 } else { 1.6 });
-        ui.painter().text(pos2(r.center().x, r.bottom() - 12.0), Align2::CENTER_CENTER, label, FontId::new(11.5, if selected { bold() } else { FontFamily::Proportional }), color);
+        let color = if selected { BLUE } else if resp.hovered() { white(210) } else { SECONDARY };
+        icon.draw(ui.painter(), pos2(r.center().x, r.top() + 18.0), 22.0, color, if selected { 1.9 } else { 1.6 });
+        ui.painter().text(pos2(r.center().x, r.bottom() - 10.0), Align2::CENTER_CENTER, label, FontId::new(11.0, if selected { bold() } else { FontFamily::Proportional }), color);
         if resp.clicked() {
             clicked = Some(i);
         }
@@ -539,6 +557,8 @@ pub enum Icon {
     Close,
     Up,
     Down,
+    Left,
+    Right,
     Refresh,
     Minimize,
     Maximize,
@@ -609,6 +629,8 @@ impl Icon {
                 line(vec![at(-0.28, -0.28), at(0.28, 0.28)]);
                 line(vec![at(0.28, -0.28), at(-0.28, 0.28)]);
             }
+            Icon::Left => line(vec![at(0.14, -0.3), at(-0.14, 0.0), at(0.14, 0.3)]),
+            Icon::Right => line(vec![at(-0.14, -0.3), at(0.14, 0.0), at(-0.14, 0.3)]),
             Icon::Up => line(vec![at(-0.3, 0.14), at(0.0, -0.16), at(0.3, 0.14)]),
             Icon::Down => line(vec![at(-0.3, -0.14), at(0.0, 0.16), at(0.3, -0.14)]),
             Icon::Minimize => line(vec![at(-0.34, 0.0), at(0.34, 0.0)]),
