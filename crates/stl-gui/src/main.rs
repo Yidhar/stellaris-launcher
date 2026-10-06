@@ -20,7 +20,7 @@ use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::saves::{self, Save};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
-use theme::{bold, chip, circle_button, glass, glass_pane, glass_rows, glass_scroll, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
+use theme::{bold, chip, circle_button, glass, glass_pane, glass_rows, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
 const STEAM_APP_ID: u32 = 281990;
 
@@ -950,58 +950,67 @@ impl App {
 
     // ---------------------------------------------------------------- Playsets
     fn page_playsets(&mut self, ui: &mut Ui) {
+        // No page title: the tab bar already says where we are. Two cards side by side, their first rows level: the new-playset field on the
+        // left, the Mods | DLC | Plugins switch on the right.
         let lang = self.lang;
         let acts = Acts::default();
-        large_title(ui, tr(lang, "ps.title"), None, |ui| {
-            if pill_button(ui, tr(lang, "ps.import"), ButtonStyle::Tinted(BLUE), self.game.is_ok()).clicked() {
-                acts.push(Act::Import);
-            }
-        });
+        ui.add_space(8.0);
         let avail = ui.available_rect_before_wrap();
-        let left_w = 290.0f32.min(avail.width() * 0.32);
+        let left_w = 300.0f32.min(avail.width() * 0.32);
         let left_rect = Rect::from_min_max(avail.min, pos2(avail.left() + left_w, avail.bottom()));
-        let right_rect = Rect::from_min_max(pos2(avail.left() + left_w + 20.0, avail.top()), avail.max);
+        let right_rect = Rect::from_min_max(pos2(avail.left() + left_w + 16.0, avail.top()), avail.max);
         let active = self.store.active_index();
 
-        // the list of playsets, and the field for a new one under it
-        let mut list_rect = Rect::from_min_max(left_rect.min, pos2(left_rect.right(), left_rect.bottom() - 52.0));
-        if self.store.playsets.len() > 8 {
-            let mut search = ui.new_child(UiBuilder::new().id_salt("ps-search").max_rect(Rect::from_min_size(list_rect.min, vec2(list_rect.width(), 36.0))).layout(Layout::left_to_right(Align::Center)));
-            theme::search_field(&mut search, &mut self.ps_filter, tr(lang, "mods.search"), list_rect.width());
-            list_rect.min.y += 46.0;
-        }
-        let q = self.ps_filter.to_lowercase();
-        let mut left = ui.new_child(UiBuilder::new().max_rect(list_rect));
-        glass_scroll(&mut left, "ps-list", |ui| {
-            let mut rows = Rows::new();
-            for (i, p) in self.store.playsets.iter().enumerate() {
-                if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
-                    continue;
+        glass_pane(ui, left_rect, theme::RADIUS, 18.0, |ui| {
+            // a new playset
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let add_w = ui.painter().layout_no_wrap(tr(lang, "ps.add").to_owned(), egui::FontId::new(14.5, bold()), Color32::WHITE).size().x + 28.0;
+                theme::text_field(ui, &mut self.new_name, tr(lang, "ps.new"), ui.available_width() - add_w - 8.0);
+                let ok = !self.new_name.trim().is_empty();
+                if pill_button(ui, tr(lang, "ps.add"), ButtonStyle::Filled(BLUE), ok).clicked() {
+                    acts.push(Act::AddPlayset(self.new_name.clone()));
                 }
-                if i == active {
-                    rows.highlight_next();
-                }
-                let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
-                let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
-                let r = rows.row(ui, 58.0, 0.0, true, |ui| {
-                    stack(ui, 58.0, 38.0, |ui| {
-                        ui.add(egui::Label::new(RichText::new(&p.name).size(15.5).family(bold())).truncate());
-                        ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(12.0).color(SECONDARY));
-                    });
-                }, |_| {});
-                if r.clicked() {
-                    acts.push(Act::SetActive(i));
-                }
+            });
+            if self.store.playsets.len() > 8 {
+                ui.add_space(8.0);
+                let w = ui.available_width();
+                theme::search_field(ui, &mut self.ps_filter, tr(lang, "mods.search"), w);
             }
+            ui.add_space(10.0);
+            // the playsets; the import from the official launcher at the foot
+            let q = self.ps_filter.to_lowercase();
+            let list_h = (ui.available_height() - 44.0).max(60.0);
+            egui::ScrollArea::vertical().id_salt("ps-list").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut rows = Rows::new();
+                for (i, p) in self.store.playsets.iter().enumerate() {
+                    if !q.is_empty() && !p.name.to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    if i == active {
+                        rows.highlight_next();
+                    }
+                    let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
+                    let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
+                    let r = rows.row(ui, 58.0, 0.0, true, |ui| {
+                        stack(ui, 58.0, 38.0, |ui| {
+                            ui.add(egui::Label::new(RichText::new(&p.name).size(15.5).family(bold())).truncate());
+                            ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(12.0).color(SECONDARY));
+                        });
+                    }, |_| {});
+                    if r.clicked() {
+                        acts.push(Act::SetActive(i));
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                if pill_button(ui, tr(lang, "ps.import"), ButtonStyle::Plain(BLUE), self.game.is_ok()).clicked() {
+                    acts.push(Act::Import);
+                }
+            });
         });
-        let add_rect = Rect::from_min_max(pos2(left_rect.left(), left_rect.bottom() - 40.0), left_rect.max);
-        let mut add_ui = ui.new_child(UiBuilder::new().max_rect(add_rect).layout(Layout::left_to_right(Align::Center)));
-        let add_w = add_ui.painter().layout_no_wrap(tr(lang, "ps.add").to_owned(), egui::FontId::new(14.5, bold()), Color32::WHITE).size().x + 28.0;
-        theme::text_field(&mut add_ui, &mut self.new_name, tr(lang, "ps.new"), left_w - add_w - 10.0);
-        let ok = !self.new_name.trim().is_empty();
-        if pill_button(&mut add_ui, tr(lang, "ps.add"), ButtonStyle::Filled(BLUE), ok).clicked() {
-            acts.push(Act::AddPlayset(self.new_name.clone()));
-        }
 
         // the chosen playset
         glass_pane(ui, right_rect, theme::RADIUS, 18.0, |pane| self.playset_detail(pane, &acts));

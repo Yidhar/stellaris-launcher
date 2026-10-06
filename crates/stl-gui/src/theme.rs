@@ -214,17 +214,6 @@ pub fn lift(rect: Rect, radius: f32) -> Shape {
     Shape::Rect(Shadow { offset: [0, 8], blur: 26, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(rect, cr(radius)))
 }
 
-/// A glass card that fills the rest of the page and scrolls its content.
-pub fn glass_scroll<R>(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().add(glass_shapes(ui.ctx(), rect, 16.0));
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(0.0, 6.0))).layout(Layout::top_down(Align::Min)));
-    child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
-    let out = egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(&mut child, add).inner;
-    ui.advance_cursor_after_rect(rect);
-    out
-}
-
 /// A long list of rows of one height that fills the rest of the space and scrolls: only the rows in view are built.
 pub fn plain_rows(ui: &mut Ui, id: &str, row_height: f32, total: usize, add: impl FnOnce(&mut Ui, std::ops::Range<usize>)) {
     let rect = ui.available_rect_before_wrap();
@@ -371,7 +360,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
 
 /// A segmented control; returns the index chosen this frame.
 pub fn segmented(ui: &mut Ui, labels: &[String], current: usize, width: f32) -> Option<usize> {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
     ui.painter().rect_filled(rect, cr(rect.height() / 2.0), white(30));
     let n = labels.len().max(1);
     let seg_w = (rect.width() - 4.0) / n as f32;
