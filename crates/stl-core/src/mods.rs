@@ -24,6 +24,8 @@ pub struct Mod {
     /// A zip (`archive=`), made absolute.
     pub archive: Option<PathBuf>,
     pub remote_file_id: Option<String>,
+    /// the cover picture's file name (`picture=`), when the descriptor names one
+    pub picture: Option<String>,
     pub tags: Vec<String>,
     pub kind: Kind,
     /// Why the game cannot load it, if so.
@@ -66,6 +68,7 @@ pub fn parse_descriptor(file: &Path, text: &str, data_dir: &Path) -> Mod {
         path,
         archive,
         remote_file_id: script::get(&s, "remote_file_id").map(str::to_string),
+        picture: script::get(&s, "picture").map(str::to_string),
         tags: script::get_list(&s, "tags").into_iter().map(str::to_string).collect(),
         kind,
         problem,
@@ -139,4 +142,41 @@ mod tests {
         assert_eq!(local.kind, Kind::Local);
         assert_eq!(local.path.as_deref(), Some(data.join(r"mod\mine").as_path()));
     }
+}
+
+/// The folders where Steam keeps the downloaded copy of a Workshop item of Stellaris.
+pub fn workshop_folders(id: &str) -> Vec<PathBuf> {
+    crate::paths::steam_libraries().into_iter().map(|lib| lib.join("workshop").join("content").join("281990").join(id)).filter(|d| d.is_dir()).collect()
+}
+
+/// A mod's cover: `picture=` (or `thumbnail.png`) in its content folder, or else in Steam's downloaded copy of its Workshop item. Collaborators
+/// often have no cover locally (the one who uploaded it keeps it); the Workshop copy still shows it.
+pub fn thumbnail(m: &Mod) -> Option<PathBuf> {
+    let mut names: Vec<String> = Vec::new();
+    if let Some(p) = &m.picture {
+        names.push(p.clone());
+    }
+    names.extend(["thumbnail.png", "thumbnail.jpg"].iter().map(|s| s.to_string()));
+    let mut dirs: Vec<PathBuf> = m.path.iter().cloned().collect();
+    if let Some(id) = &m.remote_file_id {
+        dirs.extend(workshop_folders(id));
+    }
+    for d in dirs {
+        for n in &names {
+            let f = d.join(n);
+            if f.is_file() {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// The cover to send with an upload: only one in the mod's own content folder (one found elsewhere is not sent again; an update without a
+/// cover keeps the cover the item has).
+pub fn own_thumbnail(m: &Mod) -> Option<PathBuf> {
+    let p = m.path.as_ref()?;
+    let mut names: Vec<String> = m.picture.iter().cloned().collect();
+    names.extend(["thumbnail.png", "thumbnail.jpg"].iter().map(|s| s.to_string()));
+    names.into_iter().map(|n| p.join(n)).find(|f| f.is_file())
 }

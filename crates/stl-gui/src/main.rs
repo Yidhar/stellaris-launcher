@@ -34,6 +34,33 @@ struct MakeForm {
     error: Option<String>,
 }
 
+/// The settings editor of a plugin: its files in `config/`, one open at a time.
+struct ConfigEditor {
+    plugin: Plugin,
+    files: Vec<PathBuf>,
+    index: usize,
+    text: String,
+    saved: String,
+    status: Option<(String, bool)>,
+}
+
+impl ConfigEditor {
+    fn open(plugin: Plugin) -> ConfigEditor {
+        let _ = plugin.ensure_config();
+        let files = plugin.config_files();
+        let mut e = ConfigEditor { plugin, files, index: 0, text: String::new(), saved: String::new(), status: None };
+        e.load(0);
+        e
+    }
+
+    fn load(&mut self, i: usize) {
+        self.index = i;
+        self.text = self.files.get(i).and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+        self.saved = self.text.clone();
+        self.status = None;
+    }
+}
+
 enum UpMsg {
     Progress(workshop::Stage, u64, u64),
     Done(Result<workshop::Outcome, String>),
@@ -121,6 +148,7 @@ enum Act {
     CreateMod,
     RescanMods,
     RescanPlugins,
+    EditConfig(String),
     SetModsSort(&'static str),
     SetModsView(&'static str),
     OpenUpload(String),
@@ -177,10 +205,13 @@ struct App {
     /// development: open the playset drop-down on the first frame
     dev_popup: bool,
     make: Option<MakeForm>,
+    config: Option<ConfigEditor>,
     /// the "Upload mod" picker is open
     pick_upload: bool,
     /// when each mod was last changed (for the sort by date), filled when needed
     mod_times: std::collections::HashMap<String, Option<std::time::SystemTime>>,
+    /// where each mod's cover is, looked up once
+    mod_covers: std::collections::HashMap<String, Option<PathBuf>>,
     upload: Option<UploadForm>,
     /// the newest save, for the Continue button
     last_save: Option<Save>,
@@ -271,8 +302,10 @@ impl App {
             focus_playset_filter: false,
             dev_popup: false,
             make: None,
+            config: None,
             pick_upload: false,
             mod_times: std::collections::HashMap::new(),
+            mod_covers: std::collections::HashMap::new(),
             upload: None,
             last_save: None,
             shown_page: Page::Play,
@@ -307,6 +340,8 @@ impl App {
                 app.dev_slow = v.parse().unwrap_or(1.0);
             } else if let Some(v) = a.strip_prefix("--then=") {
                 app.dev_then = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied();
+            } else if let Some(v) = a.strip_prefix("--config=") {
+                app.acts.push(Act::EditConfig(v.to_string()));
             } else if a == "--pick" {
                 app.pick_upload = true;
             } else if a == "--make" {
@@ -480,7 +515,7 @@ impl App {
         let up = workshop::Upload {
             title: f.m.name.clone(),
             description: String::new(),
-            preview: ["thumbnail.png", "thumbnail.jpg"].iter().map(|n| content.join(n)).find(|p| p.is_file()),
+            preview: mods::own_thumbnail(&f.m),
             content,
             tags: f.m.tags.clone(),
             visibility,
@@ -776,6 +811,12 @@ impl App {
                     self.mods = mods::scan(&g.data_dir);
                 }
                 self.mod_times.clear();
+                self.mod_covers.clear();
+            }
+            Act::EditConfig(id) => {
+                if let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id) {
+                    self.config = Some(ConfigEditor::open(p.clone()));
+                }
             }
             Act::RescanPlugins => match plugins::list() {
                 Ok((p, problems)) => {
@@ -1498,7 +1539,7 @@ impl App {
                 });
             });
             theme::divider(ui);
-            let row_h = if compact { 40.0 } else { 58.0 };
+            let row_h = if compact { 40.0 } else { 64.0 };
             plain_rows(ui, "mods-library", row_h, total, |ui, range| {
                 let mut rows = Rows::starting_at(range.start);
                 for k in range {
@@ -1517,7 +1558,19 @@ impl App {
                         }
                     };
                     let name_color = if m.problem.is_some() { RED } else { LABEL };
+                    let cover = if compact { None } else { self.mod_covers.entry(m.id.clone()).or_insert_with(|| mods::thumbnail(m)).clone() };
+                    let cover_tex = cover.as_ref().and_then(|p| self.assets.image(p, 160)).map(|t| (t.handle.id(), t.size));
                     rows.row(ui, row_h, 68.0, false, |ui| {
+                        if !compact {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(row_h - 14.0), Sense::hover());
+                            match cover_tex {
+                                Some((id, size)) => theme::cover_image(ui, r, id, size, 10.0, Color32::WHITE),
+                                None => {
+                                    ui.painter().rect_filled(r, egui::CornerRadius::same(10), theme::white(18));
+                                    Icon::Mods.draw(ui.painter(), r.center(), 22.0, theme::TERTIARY, 1.5);
+                                }
+                            }
+                        }
                         if compact {
                             ui.add(egui::Label::new(RichText::new(&m.name).size(14.5).color(name_color)).truncate());
                             chips(ui);
@@ -1593,7 +1646,8 @@ impl App {
                     let (status, color) = plugin_status(lang, game.as_ref(), p);
                     let has_text = !p.manifest.description.is_empty();
                     let h = if has_text { 84.0 } else { 64.0 };
-                    rows.row(ui, h, 150.0, false, |ui| {
+                    let has_config = !p.manifest.config.is_empty() || p.config_dir().is_dir();
+                    rows.row(ui, h, 200.0, false, |ui| {
                         stack(ui, h, if has_text { 64.0 } else { 44.0 }, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&p.manifest.name).size(15.5).family(bold()));
@@ -1619,6 +1673,9 @@ impl App {
                         ui.add_space(6.0);
                         if pill_button(ui, tr(lang, "pl.remove"), ButtonStyle::Plain(RED), true).clicked() {
                             acts.push(Act::PluginRemove(p.manifest.id.clone()));
+                        }
+                        if has_config && circle_button(ui, Icon::Settings, theme::white(26), LABEL, true).on_hover_text(tr(lang, "cfg.edit")).clicked() {
+                            acts.push(Act::EditConfig(p.manifest.id.clone()));
                         }
                     });
                 }
@@ -1662,7 +1719,7 @@ impl App {
                         let mut rows = Rows::new();
                         let cur = self.store.alternative.filter(|&i| i < g.settings.alternative_executables.len());
                         let mut names = vec![(None, tr(lang, "play.standard").to_string())];
-                        names.extend(g.settings.alternative_executables.iter().enumerate().map(|(i, a)| (Some(i), a.label.get("en").cloned().unwrap_or_else(|| format!("#{}", i + 1)))));
+                        names.extend(g.settings.alternative_executables.iter().enumerate().map(|(i, a)| (Some(i), alt_label(lang, a, i))));
                         for (which, name) in names {
                             let r = rows.row(ui, 44.0, 24.0, true, |ui| {
                                 ui.add(egui::Label::new(RichText::new(&name).color(if cur == which { LABEL } else { SECONDARY })).truncate());
@@ -1831,6 +1888,19 @@ impl App {
     }
 }
 
+/// The name of an alternative executable: the known one in the window's language, else the game's own label.
+fn alt_label(lang: Lang, a: &stl_core::game::AlternativeExecutable, i: usize) -> String {
+    let en = a.label.get("en").cloned().unwrap_or_default();
+    if en.eq_ignore_ascii_case("Cross-Store Multiplayer") {
+        return tr(lang, "play.cross_store").to_string();
+    }
+    let code = match lang {
+        Lang::ZhHans => "zh",
+        _ => lang.code(),
+    };
+    a.label.get(code).cloned().filter(|s| !s.is_empty()).unwrap_or(if en.is_empty() { format!("#{}", i + 1) } else { en })
+}
+
 fn plugin_status(lang: Lang, game: Option<&Game>, p: &Plugin) -> (String, Color32) {
     match game.map(|g| p.compat(g)) {
         Some(Compat::Ok) => (tr(lang, "pl.build_ok").to_string(), GREEN),
@@ -1929,6 +1999,7 @@ impl eframe::App for App {
             self.render_page(&mut page, self.page);
         });
         self.pick_sheet(ctx);
+        self.config_sheet(ctx);
         self.make_sheet(ctx);
         self.upload_sheet(ctx);
         self.window_frame(ctx);
@@ -1941,6 +2012,95 @@ impl eframe::App for App {
 impl App {
     fn sheet_frame() -> egui::Frame {
         egui::Frame::new().fill(Color32::from_rgb(30, 30, 34)).stroke(egui::Stroke::new(1.0, theme::white(30))).corner_radius(theme::RADIUS as u8).inner_margin(egui::Margin::same(24))
+    }
+
+    /// A plugin's settings: its files in `config/`, edited as text and saved in place.
+    fn config_sheet(&mut self, ctx: &egui::Context) {
+        let Some(e) = self.config.as_mut() else { return };
+        let lang = self.lang;
+        let running = !self.running.is_empty();
+        let mut close = false;
+        let mut switch_to = None;
+        let resp = egui::Modal::new(egui::Id::new("plugin-config")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            let w = (ctx.screen_rect().width() - 160.0).clamp(480.0, 860.0);
+            ui.set_width(w);
+            ui.label(RichText::new(tr_args(lang, "cfg.title", &[&e.plugin.manifest.name])).size(22.0).family(bold()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(e.plugin.config_dir().display().to_string()).size(12.0).color(SECONDARY));
+            ui.add_space(12.0);
+            if e.files.is_empty() {
+                ui.label(RichText::new(tr(lang, "cfg.none")).size(14.0).color(SECONDARY));
+            } else {
+                if e.files.len() > 1 {
+                    let names: Vec<String> = e.files.iter().map(|f| f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect();
+                    if let Some(i) = segmented(ui, &names, e.index, (names.len() as f32 * 150.0).min(w)) {
+                        if i != e.index {
+                            switch_to = Some(i);
+                        }
+                    }
+                    ui.add_space(10.0);
+                }
+                let h = (ctx.screen_rect().height() - 360.0).clamp(160.0, 520.0);
+                egui::Frame::new().fill(Color32::from_black_alpha(90)).corner_radius(12).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("config-text").max_height(h).auto_shrink([false, false]).show(ui, |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut e.text).code_editor().frame(false).desired_width(f32::INFINITY).desired_rows(12));
+                    });
+                });
+                ui.add_space(8.0);
+                if running {
+                    ui.label(RichText::new(tr(lang, "cfg.running")).size(12.5).color(ORANGE));
+                }
+                if let Some((msg, ok)) = &e.status {
+                    ui.label(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED }));
+                }
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if pill_button(ui, tr(lang, "cfg.folder"), ButtonStyle::Plain(BLUE), true).clicked() {
+                    let dir = e.plugin.config_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                }
+                let default = e.files.get(e.index).and_then(|f| e.plugin.config_default(f)).filter(|d| d.is_file());
+                if let Some(d) = default {
+                    if pill_button(ui, tr(lang, "cfg.revert"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        if let Ok(t) = std::fs::read_to_string(&d) {
+                            let substitute = e.plugin.manifest.config.iter().any(|c| c.substitute && e.files.get(e.index).and_then(|f| f.file_name()).is_some_and(|n| n.to_string_lossy() == c.file));
+                            e.text = if substitute {
+                                t.replace("{plugin_dir}", &e.plugin.dir.to_string_lossy()).replace("{config_dir}", &e.plugin.config_dir().to_string_lossy())
+                            } else {
+                                t
+                            };
+                        }
+                    }
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let dirty = e.text != e.saved;
+                    if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), dirty && !e.files.is_empty()).clicked() {
+                        if let Some(f) = e.files.get(e.index) {
+                            match std::fs::write(f, &e.text) {
+                                Ok(()) => {
+                                    e.saved = e.text.clone();
+                                    e.status = Some((tr(lang, "cfg.saved").to_string(), true));
+                                }
+                                Err(err) => e.status = Some((format!("{err}"), false)),
+                            }
+                        }
+                    }
+                    let label = if dirty { tr(lang, "cfg.discard") } else { tr(lang, "up.close") };
+                    if pill_button(ui, label, ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if let Some(i) = switch_to {
+            e.load(i);
+        }
+        // a click outside does not throw away unsaved text
+        if close || (resp.should_close() && e.text == e.saved) {
+            self.config = None;
+        }
     }
 
     /// "Upload mod": the list of your own mods, each saying whether it is on the Workshop already; choosing one opens the upload sheet.
@@ -2100,9 +2260,12 @@ impl App {
                     ui.label(RichText::new(tr(lang, "up.new")).size(13.0).color(SECONDARY));
                 }
             }
-            let has_preview = f.m.path.as_ref().is_some_and(|p| p.join("thumbnail.png").is_file() || p.join("thumbnail.jpg").is_file());
-            if !has_preview {
-                ui.label(RichText::new(tr(lang, "up.no_preview")).size(12.5).color(ORANGE));
+            if mods::own_thumbnail(&f.m).is_none() {
+                if existing.is_some() || !f.item_id.trim().is_empty() {
+                    ui.label(RichText::new(tr(lang, "up.keep_preview")).size(12.5).color(SECONDARY));
+                } else {
+                    ui.label(RichText::new(tr(lang, "up.no_preview")).size(12.5).color(ORANGE));
+                }
             }
             ui.add_space(14.0);
             ui.label(RichText::new(tr(lang, "up.visibility")).size(12.5).color(SECONDARY));

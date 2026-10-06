@@ -442,7 +442,7 @@ fn run() -> Result<()> {
                         Some(v) => Some(stl_core::workshop::Visibility::parse(v).with_context(|| format!("unknown visibility {v:?}"))?),
                         None => None,
                     };
-                    let preview = ["thumbnail.png", "thumbnail.jpg"].iter().map(|f| content.join(f)).find(|p| p.is_file());
+                    let preview = mods::own_thumbnail(&m);
                     let existing = m.remote_file_id.as_deref().and_then(|v| v.parse::<u64>().ok());
                     let up = stl_core::workshop::Upload {
                         title: m.name.clone(),

@@ -55,6 +55,22 @@ fn yes() -> bool {
     true
 }
 
+/// A settings file of the plugin, in its `config` folder. The launcher makes it from `default` when it is missing, and lets the user edit it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigFile {
+    /// the file name inside `config/`
+    pub file: String,
+    /// a file in the plugin folder to start from (`defaults/<name>`); with none the file is only listed when it exists
+    #[serde(default)]
+    pub default: Option<String>,
+    /// what the editor calls it; the file name when empty
+    #[serde(default)]
+    pub title: String,
+    /// replace `{plugin_dir}` and `{config_dir}` in the default's text
+    #[serde(default)]
+    pub substitute: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     #[serde(default)]
@@ -71,9 +87,15 @@ pub struct Manifest {
     pub game: GameReq,
     #[serde(default)]
     pub load: LoadSpec,
+    /// deprecated (schema 1): files written into the game folder. Settings belong in `config` now
     #[serde(default)]
     pub seed_files: Vec<SeedFile>,
+    #[serde(default)]
+    pub config: Vec<ConfigFile>,
 }
+
+/// The folder of a plugin's settings, inside its own folder.
+pub const CONFIG_DIR: &str = "config";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Compat {
@@ -94,6 +116,51 @@ pub struct Plugin {
 impl Plugin {
     pub fn dll_path(&self) -> PathBuf {
         self.dir.join(&self.manifest.dll)
+    }
+
+    pub fn config_dir(&self) -> PathBuf {
+        self.dir.join(CONFIG_DIR)
+    }
+
+    /// Makes the declared settings files that are missing from their defaults. Returns what it made. An existing file is never touched.
+    pub fn ensure_config(&self) -> Result<Vec<PathBuf>> {
+        let mut made = Vec::new();
+        for c in &self.manifest.config {
+            let Some(default) = &c.default else { continue };
+            let to = self.config_dir().join(&c.file);
+            if to.exists() {
+                continue;
+            }
+            let from = self.dir.join(default);
+            std::fs::create_dir_all(self.config_dir())?;
+            if c.substitute {
+                let text = std::fs::read_to_string(&from).with_context(|| format!("cannot read {}", from.display()))?;
+                let text = text.replace("{plugin_dir}", &self.dir.to_string_lossy()).replace("{config_dir}", &self.config_dir().to_string_lossy());
+                std::fs::write(&to, text)?;
+            } else {
+                std::fs::copy(&from, &to).with_context(|| format!("cannot copy {}", from.display()))?;
+            }
+            made.push(to);
+        }
+        Ok(made)
+    }
+
+    /// The settings files to offer for editing: the declared ones that exist, then any other file in `config/`.
+    pub fn config_files(&self) -> Vec<PathBuf> {
+        let dir = self.config_dir();
+        let mut out: Vec<PathBuf> = self.manifest.config.iter().map(|c| dir.join(&c.file)).filter(|p| p.is_file()).collect();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut extra: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && !out.contains(p)).collect();
+            extra.sort();
+            out.extend(extra);
+        }
+        out
+    }
+
+    /// The default a settings file was made from, if the manifest names one.
+    pub fn config_default(&self, file: &Path) -> Option<PathBuf> {
+        let name = file.file_name()?.to_string_lossy().to_string();
+        self.manifest.config.iter().find(|c| c.file == name).and_then(|c| c.default.as_ref()).map(|d| self.dir.join(d))
     }
 
     pub fn compat(&self, game: &Game) -> Compat {
@@ -130,15 +197,48 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
             bail!("seed file paths must stay inside the plugin folder and the game folder");
         }
     }
+    for c in &m.config {
+        let bad = |p: &str| p.is_empty() || p.contains("..") || Path::new(p).is_absolute();
+        if bad(&c.file) || c.file.contains('/') || c.file.contains('\\') || c.default.as_deref().is_some_and(bad) {
+            bail!("config entries name a file in config/ and a default inside the plugin folder");
+        }
+    }
     Ok(m)
 }
 
+/// Where plugins live: `Documents\Paradox Interactive\Stellaris\plugins\<id>\`, next to the game's own `mod` folder, so that a plugin (or its
+/// loader) finds itself and its settings without the launcher.
 pub fn plugins_dir() -> Result<PathBuf> {
-    Ok(paths::app_data_dir()?.join("plugins"))
+    Ok(paths::documents_dir()?.join("Paradox Interactive").join("Stellaris").join("plugins"))
 }
 
+/// The launcher's list of plugins that are used where they are (linked, for development); this is the launcher's own state.
 fn links_path() -> Result<PathBuf> {
-    Ok(plugins_dir()?.join("links.json"))
+    Ok(paths::app_data_dir()?.join("plugin-links.json"))
+}
+
+/// Moves what an earlier version kept in `%APPDATA%\stellaris-launcher\plugins` to the plugins folder (once; a plugin already there wins).
+fn migrate_legacy() {
+    let (Ok(old), Ok(new)) = (paths::app_data_dir().map(|d| d.join("plugins")), plugins_dir()) else { return };
+    if !old.is_dir() {
+        return;
+    }
+    if let Ok(links) = std::fs::read_to_string(old.join("links.json")) {
+        if let Ok(to) = links_path() {
+            if !to.exists() {
+                let _ = std::fs::write(to, links);
+            }
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(&old) {
+        for e in rd.flatten() {
+            let to = new.join(e.file_name());
+            if e.path().is_dir() && !to.exists() {
+                let _ = copy_dir(&e.path(), &to);
+            }
+        }
+    }
+    let _ = std::fs::rename(&old, old.with_file_name("plugins.migrated"));
 }
 
 fn read_links() -> Vec<PathBuf> {
@@ -167,6 +267,7 @@ fn load_dir(dir: &Path, linked: bool) -> Result<Plugin> {
 
 /// Installed and linked plugins; a folder that cannot be read is reported in the second list.
 pub fn list() -> Result<(Vec<Plugin>, Vec<String>)> {
+    migrate_legacy();
     let mut plugins = Vec::new();
     let mut problems = Vec::new();
     let dir = plugins_dir()?;
@@ -230,11 +331,30 @@ pub fn install(src: &Path, link: bool) -> Result<Plugin> {
         return Ok(probe);
     }
     let dst = plugins_dir()?.join(&probe.manifest.id);
+    // an update keeps the user's settings: config/ is set aside, the new version copied, and the old files put back over the new defaults
+    let mut kept: Vec<(std::ffi::OsString, Vec<u8>)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dst.join(CONFIG_DIR)) {
+        for e in rd.flatten() {
+            if e.path().is_file() {
+                if let Ok(bytes) = std::fs::read(e.path()) {
+                    kept.push((e.file_name(), bytes));
+                }
+            }
+        }
+    }
     if dst.exists() {
         std::fs::remove_dir_all(&dst).with_context(|| format!("cannot replace {} (is the game running with it loaded?)", dst.display()))?;
     }
     copy_dir(&src, &dst)?;
-    load_dir(&dst, false)
+    if !kept.is_empty() {
+        std::fs::create_dir_all(dst.join(CONFIG_DIR))?;
+        for (name, bytes) in kept {
+            std::fs::write(dst.join(CONFIG_DIR).join(name), bytes)?;
+        }
+    }
+    let p = load_dir(&dst, false)?;
+    p.ensure_config()?;
+    Ok(p)
 }
 
 pub fn remove(id: &str) -> Result<()> {
@@ -286,6 +406,27 @@ mod tests {
         assert_eq!(m.load.delay_ms, 3000);
         assert!(m.seed_files[0].if_missing, "if_missing defaults to true");
         assert_eq!(parse_manifest(r#"{"id":"x","name":"x","dll":"x.dll"}"#).unwrap().load.wait, "window");
+    }
+
+    #[test]
+    fn config_files_are_made_from_defaults_and_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("stl-test-plugin-config-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("defaults")).unwrap();
+        std::fs::write(dir.join("defaults/p.ini"), "path={plugin_dir}\n").unwrap();
+        std::fs::write(dir.join("p.dll"), b"x").unwrap();
+        let m = parse_manifest(r#"{"schema":2,"id":"p","name":"P","dll":"p.dll","config":[{"file":"p.ini","default":"defaults/p.ini","substitute":true}]}"#).unwrap();
+        let p = Plugin { manifest: m, dir: dir.clone(), linked: false };
+        assert_eq!(p.ensure_config().unwrap(), vec![dir.join("config/p.ini")]);
+        assert!(std::fs::read_to_string(dir.join("config/p.ini")).unwrap().contains(&dir.to_string_lossy().to_string()));
+        std::fs::write(dir.join("config/p.ini"), "mine").unwrap();
+        std::fs::write(dir.join("config/extra.json"), "{}").unwrap();
+        assert!(p.ensure_config().unwrap().is_empty(), "an existing file is kept");
+        assert_eq!(std::fs::read_to_string(dir.join("config/p.ini")).unwrap(), "mine");
+        assert_eq!(p.config_files(), vec![dir.join("config/p.ini"), dir.join("config/extra.json")]);
+        assert_eq!(p.config_default(&dir.join("config/p.ini")), Some(dir.join("defaults/p.ini")));
+        assert!(parse_manifest(r#"{"id":"p","name":"P","dll":"p.dll","config":[{"file":"../x.ini"}]}"#).is_err());
+        assert!(parse_manifest(r#"{"id":"p","name":"P","dll":"p.dll","config":[{"file":"sub/x.ini"}]}"#).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

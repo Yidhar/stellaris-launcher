@@ -1,13 +1,13 @@
 {
-  "schema": 1,
+  "schema": 2,
   "id": "stellaris-live2d",
   "name": "Live2D portraits",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Draws Live2D models into Stellaris' portraits (portrait mods declare them).",
   "dll": "stellaris_live2d.dll",
   "game": { "exe_timestamps": ["0x6AB5181D"] },
   "load": { "wait": "window", "delay_ms": 1500 },
-  "seed_files": [
-    { "from": "stellaris_live2d.default.ini", "to": "stellaris_live2d.ini", "if_missing": true, "substitute": true }
+  "config": [
+    { "file": "stellaris_live2d.ini", "default": "defaults/stellaris_live2d.ini", "title": "Live2D", "substitute": true }
   ]
 }

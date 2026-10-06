@@ -175,7 +175,7 @@ pub fn launch(game: &Game, store: &Store, opts: &Options, say: &mut dyn FnMut(&s
         return Ok(report);
     }
     for p in &to_load {
-        for created in plugins::seed(p, game)? {
+        for created in p.ensure_config()?.into_iter().chain(plugins::seed(p, game)?) {
             say(&format!("  {}: created {}", p.manifest.id, created.display()));
         }
     }
