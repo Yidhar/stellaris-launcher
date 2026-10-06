@@ -22,6 +22,25 @@ struct Cli {
 enum Cmd {
     /// the game, the active playset, the plugins
     Status,
+    /// what is wrong with a playset's mods, and what they override (files, and definitions by the game's rule for each folder)
+    Check {
+        /// the playset (name or start of its id); the active one by default
+        #[arg(long, short)]
+        playset: Option<String>,
+        /// list every overlap of this mod (name or descriptor id)
+        #[arg(long = "mod")]
+        of_mod: Option<String>,
+        /// how many overlaps to list per kind
+        #[arg(long, default_value_t = 15)]
+        limit: usize,
+    },
+    /// put a playset's mods in an order where each comes after what it needs and what it patches (shows the change; --apply saves it)
+    Sort {
+        #[arg(long, short)]
+        playset: Option<String>,
+        #[arg(long)]
+        apply: bool,
+    },
     /// the mods the game can load (the descriptors in the mod folder)
     Mods {
         /// also list the ones with a problem
@@ -510,6 +529,91 @@ fn run() -> Result<()> {
                         println!("the Workshop agreement is not accepted yet: the item stays hidden until you accept it on its page");
                     }
                 }
+            }
+        }
+        Cmd::Check { playset, of_mod, limit } => {
+            use stl_core::conflicts as cf;
+            let game = open_game(&cli, &store)?;
+            let idx = match playset {
+                Some(p) => store.find(p).with_context(|| format!("no playset {p}"))?,
+                None => store.active_index(),
+            };
+            let installed = mods::scan(&game.data_dir);
+            let (list, missing) = cf::playset_mods(&store.playsets[idx], &installed);
+            println!("{}: {} mods on, reading…", store.playsets[idx].name, list.len());
+            let input = cf::Input { game_dir: &game.dir, game_version: game.version(), mods: list.clone(), installed: &installed, missing };
+            let r = cf::analyze(&input, &|_| {});
+            println!("{} files, {} definitions read in {:.1} s", r.files_scanned, r.definitions_read, r.millis as f64 / 1000.0);
+            let name = |src: usize| r.sources.get(src).cloned().unwrap_or_default();
+            println!("\nproblems ({}):", r.issues.len());
+            for i in &r.issues {
+                let who = i.mod_index.map(|m| format!("{}: ", list[m].name)).unwrap_or_default();
+                println!("  [{:?}] {who}{}", i.severity, cf::describe(i));
+            }
+            let focus = match of_mod {
+                Some(q) => Some(list.iter().position(|m| m.id == *q || m.name.to_lowercase().contains(&q.to_lowercase())).with_context(|| format!("{q} is not on in this playset"))?),
+                None => None,
+            };
+            let real_files: Vec<_> = r.files.iter().filter(|f| !f.intended && focus.map_or(true, |m| f.sources.contains(&(m + 1)))).collect();
+            let real_keys: Vec<_> = r.keys.iter().filter(|k| k.severity > cf::Severity::Info && focus.map_or(true, |m| k.defs.iter().any(|d| d.source == m + 1))).collect();
+            let shown = if focus.is_some() { usize::MAX } else { *limit };
+            println!("\nfiles several mods have, not as a patch ({} of {}):", real_files.len(), r.files.len());
+            for f in real_files.iter().take(shown) {
+                let who: Vec<String> = f.sources.iter().filter(|&&s| s > 0).map(|&s| name(s)).collect();
+                println!("  {}  →  {} (of {})", f.path, who.last().cloned().unwrap_or_default(), who.join(", "));
+            }
+            println!("\ndefinitions several mods have ({} of {}):", real_keys.len(), r.keys.len());
+            for k in real_keys.iter().take(shown) {
+                let who: Vec<String> = k.defs.iter().map(|d| format!("{} ({}:{})", name(d.source), d.file.rsplit('/').next().unwrap_or(""), d.line)).collect();
+                let win = k.winner.map(|w| name(k.defs[w].source)).unwrap_or_else(|| "all kept".into());
+                println!("  [{:?}] {}: {} [{:?}]  →  {}  of {}", k.severity, k.folder, k.key, k.rule, win, who.join(", "));
+            }
+            println!("\nper mod (overrides others / overridden / game files replaced / game definitions overridden):");
+            for (i, m) in list.iter().enumerate() {
+                let s = &r.per_mod[i];
+                if s.wins + s.loses + s.replaces_vanilla_files + s.overrides_vanilla_keys == 0 {
+                    continue;
+                }
+                let patches: Vec<String> = s.patches.iter().map(|&t| list[t].name.clone()).collect();
+                let p = if patches.is_empty() { String::new() } else { format!("  patches: {}", patches.join(", ")) };
+                println!("  {:>5} {:>5} {:>5} {:>5}  {}{p}", s.wins, s.loses, s.replaces_vanilla_files, s.overrides_vanilla_keys, m.name);
+            }
+        }
+        Cmd::Sort { playset, apply } => {
+            use stl_core::conflicts as cf;
+            let game = open_game(&cli, &store)?;
+            let idx = match playset {
+                Some(p) => store.find(p).with_context(|| format!("no playset {p}"))?,
+                None => store.active_index(),
+            };
+            let installed = mods::scan(&game.data_dir);
+            let (list, missing) = cf::playset_mods(&store.playsets[idx], &installed);
+            let input = cf::Input { game_dir: &game.dir, game_version: game.version(), mods: list.clone(), installed: &installed, missing };
+            let r = cf::analyze(&input, &|_| {});
+            let plan = cf::suggest_order(&list, &r);
+            for (a, b, why) in &plan.edges {
+                println!("  {:?}: \"{}\" before \"{}\"", why, list[*a].name, list[*b].name);
+            }
+            if !plan.cycle.is_empty() {
+                let names: Vec<&str> = plan.cycle.iter().map(|&i| list[i].name.as_str()).collect();
+                println!("these need each other, left as they are: {}", names.join(", "));
+            }
+            if !plan.changes() {
+                println!("the order is fine");
+                return Ok(());
+            }
+            for (to, &from) in plan.order.iter().enumerate() {
+                if to != from {
+                    println!("  {:>3} → {:>3}  {}", from + 1, to + 1, list[from].name);
+                }
+            }
+            if *apply {
+                let ids: Vec<String> = plan.order.iter().map(|&i| list[i].id.clone()).collect();
+                cf::apply_order(&mut store.playsets[idx], &ids);
+                store.save()?;
+                println!("saved");
+            } else {
+                println!("(--apply to save it)");
             }
         }
         Cmd::SelfUpdate { check } => {

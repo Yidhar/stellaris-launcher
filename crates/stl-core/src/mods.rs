@@ -27,6 +27,10 @@ pub struct Mod {
     /// the cover picture's file name (`picture=`), when the descriptor names one
     pub picture: Option<String>,
     pub tags: Vec<String>,
+    /// the mods it needs, by name (`dependencies = { "UI Overhaul Dynamic" }`)
+    pub dependencies: Vec<String>,
+    /// folders it replaces whole (`replace_path = "common/x"`): what was loaded before it there is not read
+    pub replace_paths: Vec<String>,
     pub kind: Kind,
     /// Why the game cannot load it, if so.
     pub problem: Option<String>,
@@ -70,6 +74,8 @@ pub fn parse_descriptor(file: &Path, text: &str, data_dir: &Path) -> Mod {
         remote_file_id: script::get(&s, "remote_file_id").map(str::to_string),
         picture: script::get(&s, "picture").map(str::to_string),
         tags: script::get_list(&s, "tags").into_iter().map(str::to_string).collect(),
+        dependencies: script::get_list(&s, "dependencies").into_iter().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect(),
+        replace_paths: script::get_list(&s, "replace_path").into_iter().map(|p| p.replace('\\', "/").trim_matches('/').to_lowercase()).filter(|p| !p.is_empty()).collect(),
         kind,
         problem,
     }

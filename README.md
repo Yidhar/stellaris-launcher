@@ -25,6 +25,8 @@ stl news [--refresh]                    the news cards of the official launcher'
 stl plugin install <folder> [--link]    DLL plugins (see docs/PLUGINS.md); stl plugin enable <id>
 stl launch [--continue] [--playset X]   write dlc_load.json, start the game, load the plugins
 stl stop                                close the game
+stl check [--playset X] [--mod Y]       problems of a playset's mods, and what overrides what (docs/CONFLICTS.md)
+stl sort [--playset X] [--apply]        a load order where each mod comes after what it needs and what it patches
 stl self-update [--check]               update the launcher from its GitHub releases (with the window closed)
 ```
 

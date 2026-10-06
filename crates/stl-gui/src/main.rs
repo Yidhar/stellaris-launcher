@@ -170,6 +170,9 @@ enum Act {
     SetNewsOnline(bool),
     FoldNews(bool),
     CheckSelfUpdate,
+    RunCheck,
+    OpenModCheck(usize),
+    ApplySort,
     InstallSelfUpdate,
     SetAutoUpdate(bool),
     ChangeGameDir,
@@ -243,6 +246,47 @@ fn news_card_height(_ui: &Ui) -> f32 {
     128.0
 }
 
+/// The check of a playset's mods (problems, overrides, a better order), run on a worker thread.
+#[derive(Default)]
+struct CheckState {
+    rx: Option<Receiver<CheckResult>>,
+    /// 0..1, as f32 bits
+    progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    result: Option<CheckResult>,
+    sheet: CheckSheet,
+    /// groups of the mod sheet shown in full
+    expanded: std::collections::HashSet<usize>,
+}
+
+#[derive(Clone)]
+struct CheckResult {
+    playset: String,
+    /// the enabled mods checked, in load order
+    ids: Vec<String>,
+    report: std::sync::Arc<stl_core::conflicts::Report>,
+    plan: stl_core::conflicts::SortPlan,
+}
+
+#[derive(Default, Clone)]
+enum CheckSheet {
+    #[default]
+    None,
+    All,
+    /// a mod (position in the checked order) and what it overlaps with, by the other mod
+    Mod(usize, std::sync::Arc<Vec<OverlapGroup>>),
+    Sort,
+}
+
+/// What one mod and another override of each other.
+struct OverlapGroup {
+    /// the other source (0: the game)
+    other: usize,
+    mine: usize,
+    theirs: usize,
+    /// (what, who wins, how)
+    items: Vec<(String, String, &'static str)>,
+}
+
 /// The launcher's own update: looked for on start (and every few hours), downloaded in the background, installed on a restart.
 #[derive(Default)]
 struct SelfUpdate {
@@ -307,10 +351,13 @@ struct App {
     focus_playset_filter: bool,
     /// development: open the playset drop-down on the first frame
     dev_popup: Option<String>,
+    /// development: run the check on start, then open this sheet (`all`, `sort`, or a mod's position)
+    dev_check: Option<String>,
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
     self_update: SelfUpdate,
+    check: CheckState,
     /// the game's graphics settings, and the monitors (read when the Settings page is first shown)
     gfx: Option<Graphics>,
     displays: Vec<gamesettings::Display>,
@@ -415,10 +462,12 @@ impl App {
             ps_filter: String::new(),
             focus_playset_filter: false,
             dev_popup: None,
+            dev_check: None,
             make: None,
             config: None,
             updates: PluginUpdates::default(),
             self_update: SelfUpdate::default(),
+            check: CheckState::default(),
             gfx: None,
             displays: Vec::new(),
             gfx_status: None,
@@ -474,6 +523,15 @@ impl App {
                 if let Some(m) = app.mods.iter().find(|m| m.name.contains(v)) {
                     app.acts.push(Act::OpenUpload(m.id.clone()));
                 }
+            } else if let Some(v) = a.strip_prefix("--playset=") {
+                // shown only: not saved unless something else is changed
+                if let Some(i) = app.store.find(v) {
+                    app.store.active = Some(app.store.playsets[i].id.clone());
+                }
+            } else if a == "--check" {
+                app.dev_check = Some(String::new());
+            } else if let Some(v) = a.strip_prefix("--check-sheet=") {
+                app.dev_check = Some(v.to_string());
             } else if a == "--update-sheet" {
                 app.self_update.sheet = true;
             } else if a == "--popup" {
@@ -803,6 +861,98 @@ impl App {
         }
     }
 
+    /// The enabled mods of the active playset that are installed, in load order (what a check covers).
+    fn checked_ids(&self) -> Vec<String> {
+        let p = self.store.active_playset();
+        p.mods.iter().filter(|m| m.enabled && self.mods.iter().any(|x| x.id == m.id)).map(|m| m.id.clone()).collect()
+    }
+
+    /// The last check, if it is of the active playset as it is now.
+    fn current_check(&self) -> Option<&CheckResult> {
+        let r = self.check.result.as_ref()?;
+        (r.playset == self.store.active_playset().id && r.ids == self.checked_ids()).then_some(r)
+    }
+
+    fn run_check(&mut self) {
+        let Ok(g) = &self.game else { return };
+        if self.check.rx.is_some() {
+            return;
+        }
+        let (game_dir, version) = (g.dir.clone(), g.version().to_string());
+        let installed = self.mods.clone();
+        let playset = self.store.active_playset().clone();
+        let progress = self.check.progress.clone();
+        progress.store(0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = channel();
+        self.check.rx = Some(rx);
+        std::thread::spawn(move || {
+            use stl_core::conflicts as cf;
+            let (list, missing) = cf::playset_mods(&playset, &installed);
+            let input = cf::Input { game_dir: &game_dir, game_version: &version, mods: list.clone(), installed: &installed, missing };
+            let report = cf::analyze(&input, &|p| progress.store(p.to_bits(), std::sync::atomic::Ordering::Relaxed));
+            let plan = cf::suggest_order(&list, &report);
+            let ids = list.iter().map(|m| m.id.clone()).collect();
+            let _ = tx.send(CheckResult { playset: playset.id.clone(), ids, report: std::sync::Arc::new(report), plan });
+        });
+    }
+
+    fn drain_check(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.check.rx else { return };
+        match rx.try_recv() {
+            Ok(r) => {
+                self.say(format!("checked {}: {} problems, {} file and {} definition overlaps in {} ms", r.playset, r.report.issues.len(), r.report.files.len(), r.report.keys.len(), r.report.millis));
+                self.check.result = Some(r);
+                self.check.rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.check.rx = None,
+        }
+    }
+
+    /// What a mod (position in the checked order) overlaps with, grouped by the other mod, the most first.
+    fn overlap_groups(r: &CheckResult, m: usize) -> Vec<OverlapGroup> {
+        use stl_core::conflicts::Rule;
+        let me = m + 1;
+        let rep = &r.report;
+        let mut by: std::collections::HashMap<usize, OverlapGroup> = std::collections::HashMap::new();
+        let name = |s: usize| rep.sources.get(s).cloned().unwrap_or_default();
+        for f in rep.files_of(m) {
+            let winner = *f.sources.last().unwrap_or(&0);
+            for &o in f.sources.iter().filter(|&&o| o != me && o > 0) {
+                let g = by.entry(o).or_insert_with(|| OverlapGroup { other: o, mine: 0, theirs: 0, items: Vec::new() });
+                if winner == me {
+                    g.mine += 1;
+                } else if winner == o {
+                    g.theirs += 1;
+                }
+                g.items.push((f.path.clone(), name(winner), if f.intended { "chk.how_patch" } else { "chk.how_file" }));
+            }
+        }
+        for k in rep.keys_of(m) {
+            let winner = k.winner.map(|w| k.defs[w].source);
+            let how = match k.rule {
+                Rule::Lios => "chk.how_lios",
+                Rule::Fios => "chk.how_fios",
+                Rule::Duplicates => "chk.how_dupl",
+                _ => "chk.how_unknown",
+            };
+            let others: std::collections::HashSet<usize> = k.defs.iter().map(|d| d.source).filter(|&s| s != me).collect();
+            for o in others {
+                let g = by.entry(o).or_insert_with(|| OverlapGroup { other: o, mine: 0, theirs: 0, items: Vec::new() });
+                if winner == Some(me) {
+                    g.mine += 1;
+                } else if winner == Some(o) {
+                    g.theirs += 1;
+                }
+                g.items.push((format!("{}: {}", k.folder, k.key), winner.map(&name).unwrap_or_else(|| "—".into()), how));
+            }
+        }
+        let mut v: Vec<OverlapGroup> = by.into_values().collect();
+        // the game last: overriding it is what mods are for
+        v.sort_by_key(|g| (g.other == 0, std::cmp::Reverse(g.items.len())));
+        v
+    }
+
     /// Looks for a newer launcher and, when there is one, downloads and unpacks it beside (never over) the running one.
     fn check_self_update(&mut self, manual: bool) {
         if self.self_update.rx.is_some() || matches!(self.self_update.phase, SelfPhase::Ready(_)) {
@@ -1080,6 +1230,23 @@ impl App {
                 self.save();
             }
             Act::CheckSelfUpdate => self.check_self_update(true),
+            Act::RunCheck => self.run_check(),
+            Act::OpenModCheck(pos) => {
+                if let Some(r) = self.check.result.clone() {
+                    self.check.expanded.clear();
+                    self.check.sheet = CheckSheet::Mod(pos, std::sync::Arc::new(Self::overlap_groups(&r, pos)));
+                }
+            }
+            Act::ApplySort => {
+                if let Some(r) = self.check.result.clone() {
+                    let ids: Vec<String> = r.plan.order.iter().filter_map(|&i| r.ids.get(i).cloned()).collect();
+                    let active = self.store.active_index();
+                    stl_core::conflicts::apply_order(&mut self.store.playsets[active], &ids);
+                    self.save();
+                    self.check.sheet = CheckSheet::None;
+                    self.run_check();
+                }
+            }
             Act::InstallSelfUpdate => self.install_self_update(ctx_of_acts()),
             Act::SetAutoUpdate(on) => {
                 self.store.auto_update = Some(on);
@@ -1702,19 +1869,16 @@ impl App {
 
     fn mod_sub_line(&self, ui: &mut Ui, info: Option<&Mod>, problem: Option<&str>, version: &str) {
         let lang = self.lang;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if let Some(x) = info {
-                let (t, c) = Self::kind_chip(lang, x.kind);
-                chip(ui, t, c);
-                if let Some(sv) = x.supported_version.as_ref().filter(|sv| !mods::supports(sv, version)) {
-                    chip(ui, &tr_args(lang, "mods.for_version", &[sv]), ORANGE).on_hover_text(tr(lang, "mods.mismatch"));
-                }
+        if let Some(x) = info {
+            let (t, c) = Self::kind_chip(lang, x.kind);
+            chip(ui, t, c);
+            if let Some(sv) = x.supported_version.as_ref().filter(|sv| !mods::supports(sv, version)) {
+                chip(ui, &tr_args(lang, "mods.for_version", &[sv]), ORANGE).on_hover_text(tr(lang, "mods.mismatch"));
             }
-            if let Some(p) = problem {
-                chip(ui, tr(lang, "mods.left_out"), RED).on_hover_text(p);
-            }
-        });
+        }
+        if let Some(p) = problem {
+            chip(ui, tr(lang, "mods.left_out"), RED).on_hover_text(p);
+        }
     }
 
     fn playset_mods(&mut self, ui: &mut Ui, acts: &Acts) {
@@ -1730,8 +1894,45 @@ impl App {
             });
             return;
         }
-        ui.label(RichText::new(tr(lang, "ps.order_hint")).size(12.5).color(SECONDARY));
+        // the check: a button, its progress, then what it found (counts that open the list, and the order it suggests)
+        let current = self.current_check().cloned();
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 30.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if self.check.rx.is_some() {
+                let p = f32::from_bits(self.check.progress.load(std::sync::atomic::Ordering::Relaxed));
+                ui.label(RichText::new(tr_args(lang, "chk.running", &[&format!("{:.0}", p * 100.0)])).size(12.5).color(SECONDARY));
+                let time = ui.input(|i| i.time);
+                ui.allocate_ui(vec2(140.0, 8.0), |ui| theme::progress_bar(ui, Some(p), time));
+            } else if let Some(r) = &current {
+                use stl_core::conflicts::Severity;
+                let errors = r.report.issues.iter().filter(|i| i.severity == Severity::Error).count();
+                let warnings = r.report.issues.iter().filter(|i| i.severity == Severity::Warning).count();
+                if errors + warnings == 0 {
+                    chip(ui, tr(lang, "chk.ok"), GREEN);
+                }
+                if errors > 0 && theme::chip_button(ui, &tr_args(lang, "chk.errors", &[&errors.to_string()]), RED).clicked() {
+                    self.check.sheet = CheckSheet::All;
+                }
+                if warnings > 0 && theme::chip_button(ui, &tr_args(lang, "chk.warnings", &[&warnings.to_string()]), ORANGE).clicked() {
+                    self.check.sheet = CheckSheet::All;
+                }
+                let overlaps = r.report.files.iter().filter(|f| !f.intended).count() + r.report.keys.iter().filter(|k| k.severity > Severity::Info).count();
+                chip(ui, &tr_args(lang, "chk.overlaps", &[&overlaps.to_string()]), SECONDARY).on_hover_text(tr(lang, "chk.overlaps_hint"));
+                if r.plan.changes() && pill_button(ui, tr(lang, "chk.sort"), ButtonStyle::Tinted(BLUE), true).clicked() {
+                    self.check.sheet = CheckSheet::Sort;
+                }
+            } else {
+                ui.label(RichText::new(tr(lang, "ps.order_hint")).size(12.5).color(SECONDARY));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if self.check.result.is_some() && current.is_none() { tr(lang, "chk.stale") } else { tr(lang, "chk.run") };
+                if pill_button(ui, label, ButtonStyle::Tinted(BLUE), self.check.rx.is_none() && self.game.is_ok()).on_hover_text(tr(lang, "chk.run_hint")).clicked() {
+                    acts.push(Act::RunCheck);
+                }
+            });
+        });
         ui.add_space(6.0);
+        let position: std::collections::HashMap<String, usize> = current.as_ref().map(|r| r.ids.iter().enumerate().map(|(i, id)| (id.clone(), i)).collect()).unwrap_or_default();
         plain_rows(ui, "ps-mods", 58.0, total, |ui, range| {
             let mut rows = Rows::starting_at(range.start);
             for i in range {
@@ -1743,7 +1944,15 @@ impl App {
                     None => Some(tr(lang, "mods.unusable").to_string()),
                 };
                 let enabled = m.enabled;
-                rows.row(ui, 58.0, 108.0, false, |ui| {
+                // what the check found about this mod: its worst problem and how much it overrides / is overridden
+                let found = current.as_ref().zip(position.get(&m.id)).map(|(r, &pos)| {
+                    use stl_core::conflicts::Severity;
+                    let mine: Vec<&stl_core::conflicts::Issue> = r.report.issues.iter().filter(|x| x.mod_index == Some(pos)).collect();
+                    let worst = mine.iter().map(|x| x.severity).max();
+                    let s = &r.report.per_mod[pos];
+                    (pos, mine.len(), worst == Some(Severity::Error), s.wins, s.loses)
+                });
+                rows.row(ui, 58.0, 146.0, false, |ui| {
                     let mut on = enabled;
                     if switch(ui, &mut on).changed() {
                         acts.push(Act::ModFlag(i, on));
@@ -1752,10 +1961,26 @@ impl App {
                     stack(ui, 58.0, 42.0, |ui| {
                         let color = if problem.is_some() { RED } else if enabled { LABEL } else { SECONDARY };
                         ui.add(egui::Label::new(RichText::new(&name).size(15.0).color(color)).truncate());
-                        self.mod_sub_line(ui, info, problem.as_deref(), &version);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            self.mod_sub_line(ui, info, problem.as_deref(), &version);
+                            if let Some((_, n, error, wins, loses)) = found {
+                                if n > 0 {
+                                    chip(ui, &tr_args(lang, "chk.mod_issues", &[&n.to_string()]), if error { RED } else { ORANGE });
+                                }
+                                if wins + loses > 0 {
+                                    chip(ui, &tr_args(lang, "chk.wins_loses", &[&wins.to_string(), &loses.to_string()]), SECONDARY);
+                                }
+                            }
+                        });
                     });
                 }, |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
+                    if let Some((pos, n, _, wins, loses)) = found {
+                        if n + wins + loses > 0 && circle_button(ui, Icon::Info, theme::white(24), LABEL, true).on_hover_text(tr(lang, "chk.details")).clicked() {
+                            acts.push(Act::OpenModCheck(pos));
+                        }
+                    }
                     if circle_button(ui, Icon::Close, theme::white(24), SECONDARY, true).on_hover_text(tr(lang, "mods.remove")).clicked() {
                         acts.push(Act::ModRemove(i));
                     }
@@ -2441,6 +2666,7 @@ impl eframe::App for App {
         self.drain_launch();
         self.drain_news();
         self.drain_self_update(ctx);
+        self.drain_check(ctx);
         self.drain_upload();
         self.drain_updates();
         self.drain_ironman();
@@ -2459,6 +2685,22 @@ impl eframe::App for App {
         }
         if self.launching.is_some() || !self.running.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        if let Some(want) = self.dev_check.clone() {
+            if self.check.result.is_none() && self.check.rx.is_none() {
+                self.run_check();
+            } else if self.check.result.is_some() {
+                self.dev_check = None;
+                match want.as_str() {
+                    "all" => self.check.sheet = CheckSheet::All,
+                    "sort" => self.check.sheet = CheckSheet::Sort,
+                    n => {
+                        if let Ok(pos) = n.parse::<usize>() {
+                            self.acts.push(Act::OpenModCheck(pos));
+                        }
+                    }
+                }
+            }
         }
         if let Some(id) = self.dev_popup.take() {
             ctx.memory_mut(|m| m.open_popup(egui::Id::new(id.as_str())));
@@ -2526,6 +2768,7 @@ impl eframe::App for App {
         self.config_sheet(ctx);
         self.make_sheet(ctx);
         self.self_update_sheet(ctx);
+        self.check_sheet(ctx);
         self.upload_sheet(ctx);
         self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
@@ -2719,6 +2962,171 @@ impl App {
             self.make = Some(MakeForm { name: String::new(), version: "1.0.0".into(), tags: Vec::new(), add_to_playset: true, error: None });
         } else if close || resp.should_close() {
             self.pick_upload = false;
+        }
+    }
+
+    /// One problem in the window's words.
+    fn issue_text(lang: Lang, i: &stl_core::conflicts::Issue) -> String {
+        use stl_core::conflicts::IssueKind as K;
+        let key = match i.kind {
+            K::MissingMod => "iss.missing_mod",
+            K::Unloadable => "iss.unloadable",
+            K::MissingDependency => "iss.missing_dep",
+            K::DisabledDependency => "iss.disabled_dep",
+            K::DependencyAfter => "iss.dep_after",
+            K::Duplicate => "iss.duplicate",
+            K::OutdatedReplacesVanilla => "iss.outdated",
+            K::BomFirstKey => "iss.bom",
+            K::IneffectiveOverride => "iss.ineffective",
+            K::DuplicateDefinitions => "iss.dupl_defs",
+            K::PatchBeforeTarget => "iss.patch_before",
+        };
+        let args: Vec<&str> = i.args.iter().map(|s| s.as_str()).collect();
+        tr_args(lang, key, &args)
+    }
+
+    /// The check's sheets: every problem; one mod's overlaps; the suggested order.
+    fn check_sheet(&mut self, ctx: &egui::Context) {
+        let sheet = self.check.sheet.clone();
+        if matches!(sheet, CheckSheet::None) {
+            return;
+        }
+        let Some(r) = self.check.result.clone() else {
+            self.check.sheet = CheckSheet::None;
+            return;
+        };
+        let lang = self.lang;
+        let mut close = false;
+        let mut next: Option<CheckSheet> = None;
+        let resp = egui::Modal::new(egui::Id::new("check-sheet")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            ui.set_width(640.0);
+            let name = |s: usize| r.report.sources.get(s).cloned().unwrap_or_default();
+            match &sheet {
+                CheckSheet::All => {
+                    ui.label(RichText::new(tr(lang, "chk.all_title")).size(22.0).family(bold()));
+                    let secs = format!("{:.1}", r.report.millis as f64 / 1000.0);
+                    ui.label(RichText::new(tr_args(lang, "chk.done", &[&r.report.files_scanned.to_string(), &r.report.definitions_read.to_string(), &secs])).size(12.5).color(SECONDARY));
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let mut rows = Rows::new();
+                        for i in &r.report.issues {
+                            use stl_core::conflicts::Severity;
+                            let color = match i.severity { Severity::Error => RED, Severity::Warning => ORANGE, Severity::Info => SECONDARY };
+                            let who = i.mod_index.map(|m| name(m + 1)).unwrap_or_else(|| tr(lang, "chk.playset").to_string());
+                            let resp = rows.row(ui, 50.0, 30.0, i.mod_index.is_some(), |ui| {
+                                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                                ui.painter().circle_filled(dot.center(), 4.0, color);
+                                stack(ui, 50.0, 38.0, |ui| {
+                                    ui.add(egui::Label::new(RichText::new(&who).size(14.0).family(bold())).truncate());
+                                    ui.add(egui::Label::new(RichText::new(Self::issue_text(lang, i)).size(12.5).color(SECONDARY)).truncate());
+                                });
+                            }, |_| {});
+                            if let (true, Some(m)) = (resp.clicked(), i.mod_index) {
+                                next = Some(CheckSheet::Mod(m, std::sync::Arc::new(Self::overlap_groups(&r, m))));
+                            }
+                        }
+                    });
+                }
+                CheckSheet::Mod(m, groups) => {
+                    let s = &r.report.per_mod[*m];
+                    ui.label(RichText::new(name(m + 1)).size(22.0).family(bold()));
+                    ui.label(RichText::new(tr_args(lang, "chk.mod_sub", &[&s.wins.to_string(), &s.loses.to_string(), &s.replaces_vanilla_files.to_string(), &s.overrides_vanilla_keys.to_string()])).size(12.5).color(SECONDARY));
+                    if !s.patches.is_empty() {
+                        let names: Vec<String> = s.patches.iter().map(|&t| name(t + 1)).collect();
+                        ui.label(RichText::new(tr_args(lang, "chk.patches", &[&names.join(", ")])).size(12.5).color(theme::TEAL_TEXT));
+                    }
+                    ui.add_space(8.0);
+                    for i in r.report.issues.iter().filter(|i| i.mod_index == Some(*m)) {
+                        use stl_core::conflicts::Severity;
+                        let color = if i.severity == Severity::Error { RED } else { ORANGE };
+                        ui.label(RichText::new(format!("●  {}", Self::issue_text(lang, i))).size(13.0).color(color));
+                    }
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                        for (gi, g) in groups.iter().enumerate() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(tr_args(lang, "chk.with", &[&name(g.other)])).size(14.5).family(bold()));
+                                ui.label(RichText::new(tr_args(lang, "chk.group", &[&g.mine.to_string(), &g.theirs.to_string()])).size(12.5).color(SECONDARY));
+                            });
+                            let all = self.check.expanded.contains(&gi);
+                            let shown = if all { g.items.len() } else { g.items.len().min(6) };
+                            for (what, wins, how) in &g.items[..shown] {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(10.0);
+                                    ui.add(egui::Label::new(RichText::new(what).size(12.5).monospace()).truncate());
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.add_space(24.0);
+                                    ui.label(RichText::new(format!("{} · {}", tr_args(lang, "chk.wins", &[wins]), tr(lang, how))).size(11.5).color(SECONDARY));
+                                });
+                            }
+                            if g.items.len() > shown && ui.add(egui::Label::new(RichText::new(tr_args(lang, "chk.show_all", &[&g.items.len().to_string()])).size(12.5).color(BLUE)).sense(Sense::click())).clicked() {
+                                self.check.expanded.insert(gi);
+                            }
+                        }
+                        if groups.is_empty() {
+                            ui.label(RichText::new(tr(lang, "chk.no_overlaps")).size(13.0).color(SECONDARY));
+                        }
+                    });
+                }
+                CheckSheet::Sort => {
+                    ui.label(RichText::new(tr(lang, "chk.sort_title")).size(22.0).family(bold()));
+                    ui.label(RichText::new(tr(lang, "chk.sort_hint")).size(12.5).color(SECONDARY));
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                        for (to, &from) in r.plan.order.iter().enumerate() {
+                            if to == from {
+                                continue;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("{:>3} → {:>3}", from + 1, to + 1)).size(12.5).monospace().color(SECONDARY));
+                                ui.add(egui::Label::new(RichText::new(name(from + 1)).size(14.0)).truncate());
+                            });
+                        }
+                        ui.add_space(8.0);
+                        // why: only the requirements of the mods that move
+                        let moved: std::collections::HashSet<usize> = r.plan.order.iter().enumerate().filter(|(to, from)| *to != **from).map(|(_, &from)| from).collect();
+                        for (a, b, why) in r.plan.edges.iter().filter(|(a, b, _)| moved.contains(a) || moved.contains(b)) {
+                            let key = match why {
+                                stl_core::conflicts::Reason::Dependency => "chk.reason_dep",
+                                stl_core::conflicts::Reason::Patch => "chk.reason_patch",
+                            };
+                            ui.label(RichText::new(tr_args(lang, key, &[&name(a + 1), &name(b + 1)])).size(12.0).color(SECONDARY));
+                        }
+                        if !r.plan.cycle.is_empty() {
+                            let names: Vec<String> = r.plan.cycle.iter().map(|&i| name(i + 1)).collect();
+                            ui.label(RichText::new(tr_args(lang, "chk.cycle", &[&names.join(", ")])).size(12.5).color(ORANGE));
+                        }
+                    });
+                }
+                CheckSheet::None => {}
+            }
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if matches!(sheet, CheckSheet::Sort) {
+                    if pill_button(ui, tr(lang, "chk.sort_apply"), ButtonStyle::Filled(BLUE), true).clicked() {
+                        self.acts.push(Act::ApplySort);
+                    }
+                    if pill_button(ui, tr(lang, "common.cancel"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        close = true;
+                    }
+                } else {
+                    if pill_button(ui, tr(lang, "common.close"), ButtonStyle::Tinted(Color32::WHITE), true).clicked() {
+                        close = true;
+                    }
+                    if matches!(sheet, CheckSheet::Mod(..)) && pill_button(ui, tr(lang, "chk.all_title"), ButtonStyle::Plain(BLUE), true).clicked() {
+                        next = Some(CheckSheet::All);
+                    }
+                }
+            });
+        });
+        if let Some(n) = next {
+            self.check.expanded.clear();
+            self.check.sheet = n;
+        } else if close || resp.should_close() {
+            self.check.sheet = CheckSheet::None;
         }
     }
 

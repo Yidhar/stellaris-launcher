@@ -35,6 +35,7 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
 | `dlc` | the installed DLC (`dlc/*/*.dlc`): name, category, Steam id, thumbnail; the playset's `disabled_dlcs` goes into `dlc_load.json` at launch |
 | `news`, `net` | the public news-card feed (Braze content cards, anonymous GET over WinHTTP) and the official launcher's cache of it; pictures cached under `%APPDATA%\stellaris-launcher\cache` |
 | `artwork` | background and logo pictures found in the Paradox Launcher's theme cache and Steam's library cache (read only) |
+| `conflicts` | a playset's problems (missing mods and dependencies, outdated whole-file overrides, BOM-renamed definitions, ineffective or duplicated definitions, patches before their target), whole-file and per-definition overrides by each folder's measured rule, and the minimal load order fix — see CONFLICTS.md |
 | `selfupdate` | the launcher's own updates: latest GitHub release → download + SHA-256 check → staged in `%APPDATA%\stellaris-launcher\update\<version>` → installed next to the exe (running files renamed to `.old`, rolled back on failure) |
 | `leveldb` | a read-only LevelDB reader (tables, journal, snappy) for the official launcher's Local Storage, where it keeps the signed-in account's news cards |
 | `launch` | the sequence: playset → mods → plugin checks → seed files → spawn → wait for the window → load plugins |
@@ -75,6 +76,6 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
 
 1. **Done:** the core, the CLI, plugin loading, playsets and import; tests of every module; a live run against the real game.
 2. **Done:** the window (Play with news, Playsets with Mods | DLC | Plugins, Mods library, Plugins, Settings); drag-to-reorder mods is still up/down buttons.
-3. Mod conflict report (files two mods both provide, with the load-order winner) — the feature the official launcher hides behind a flag.
+3. **Done:** mod conflict report and load order (CONFLICTS.md) — the feature the official launcher keeps behind a flag (an external checker Stellaris does not ship).
 4. **Done:** release builds in CI, a zip with `stl.exe` and the window; the launcher updates itself from those releases.
 5. Plugin dependencies and update checks.

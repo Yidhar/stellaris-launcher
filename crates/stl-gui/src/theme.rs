@@ -600,6 +600,16 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp
 }
 
+/// A chip that can be clicked (a count that opens its list).
+pub fn chip_button(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let font = FontId::new(11.5, FontFamily::Proportional);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 14.0, 20.0), Sense::click());
+    ui.painter().rect_filled(rect, cr(10.0), color.gamma_multiply(if resp.hovered() { 0.34 } else { 0.22 }));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A round button with one glyph (add / added / remove / move).
 pub fn circle_button(ui: &mut Ui, icon: Icon, fill: Color32, fg: Color32, enabled: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), if enabled { Sense::click() } else { Sense::hover() });
@@ -714,6 +724,7 @@ pub enum Icon {
     Right,
     Upload,
     Download,
+    Info,
     ViewList,
     ViewCompact,
     Globe,
@@ -780,6 +791,11 @@ impl Icon {
                 }
                 closed(pts);
                 p.circle_stroke(c, 0.14 * s, st);
+            }
+            Icon::Info => {
+                p.circle_stroke(c, 0.4 * s, st);
+                line(vec![at(0.0, -0.04), at(0.0, 0.22)]);
+                p.circle_filled(at(0.0, -0.2), width * 0.7, color);
             }
             Icon::Search => {
                 p.circle_stroke(at(-0.08, -0.08), 0.3 * s, st);
