@@ -4,3 +4,4 @@ work/
 *.sqlite
 *.sqlite-*
 __pycache__/
+target/

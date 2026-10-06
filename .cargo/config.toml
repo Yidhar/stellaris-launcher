@@ -1,0 +1,7 @@
+# on the machine this was written on, crates.io over HTTP/2 multiplexing times out; plain connections work
+[http]
+multiplexing = false
+timeout = 180
+
+[net]
+retry = 5

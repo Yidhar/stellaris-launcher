@@ -1,0 +1,15 @@
+[package]
+name = "stl-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "stellaris-launcher"
+path = "src/main.rs"
+
+[dependencies]
+stl-core = { path = "../stl-core" }
+anyhow = "1"
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+rfd = "0.15"

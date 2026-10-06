@@ -102,3 +102,18 @@ Files flagged `unpacked` in the asar header are not in the archive; `tools/asar_
 ### D4. Tools used on this machine need care
 Git Bash `cygpath`/heredocs mangle backslashes in Windows paths — write Python helpers to files instead of inline; `pip install jsbeautifier` is
 the only dependency.
+
+### D5. `cargo` cannot reach crates.io with HTTP/2 multiplexing
+`index.crates.io` answers `curl` (6 s) but cargo times out ("Failed to connect … after 21042 ms"); `[http] multiplexing = false` and a longer timeout in
+`.cargo/config.toml` fix it. The same machine also fails CMake's FetchContent downloads of GitHub release assets ("Error in the HTTP2 framing
+layer") and `gh run download` from the artifact blob store: anything that speaks HTTP/2 to those hosts is unreliable here; `curl --http1.1` works.
+
+### D6. A started game inherited our pipes (found by the first live run)
+`stl launch` did not return when its output was captured by a script: the game, started detached, had inherited the parent's inheritable
+standard handles (Windows gives a child every inheritable handle when `bInheritHandles` is true), so the pipe's write end stayed open for as long as the
+game ran. The official launcher cannot have this problem (it passes its own stdio). Fixed in `process::spawn` by clearing the inherit flag of
+our standard handles around the spawn; `crates/stl-core/tests/spawn_pipes.rs` checks it, and by running the old behaviour as a negative control.
+
+### D7. The idle gate can starve a test
+The live tests close and restart the game, which is only polite when the user is away (`desktop_guard`, 45 s idle). A test that needs the machine
+for minutes will simply wait: keep every step that does not need the game (unit tests, dry runs) independent of it.
