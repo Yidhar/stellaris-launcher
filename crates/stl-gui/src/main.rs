@@ -20,6 +20,7 @@ use stl_core::news::{self, Card};
 use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::saves::{self, Save};
+use stl_core::gamesettings::{self, Graphics};
 use stl_core::{modmake, workshop};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
 use theme::{bold, chip, circle_button, glass, glass_pane, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
@@ -175,6 +176,7 @@ enum Act {
     RescanPlugins,
     EditConfig(String),
     CheckUpdates,
+    SetGraphics(Graphics),
     UpdatePlugin(String),
     SetModsSort(&'static str),
     SetModsView(&'static str),
@@ -234,6 +236,10 @@ struct App {
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
+    /// the game's graphics settings, and the monitors (read when the Settings page is first shown)
+    gfx: Option<Graphics>,
+    displays: Vec<gamesettings::Display>,
+    gfx_status: Option<(String, bool)>,
     /// the "Upload mod" picker is open
     pick_upload: bool,
     /// when each mod was last changed (for the sort by date), filled when needed
@@ -332,6 +338,9 @@ impl App {
             make: None,
             config: None,
             updates: PluginUpdates::default(),
+            gfx: None,
+            displays: Vec::new(),
+            gfx_status: None,
             pick_upload: false,
             mod_times: std::collections::HashMap::new(),
             mod_covers: std::collections::HashMap::new(),
@@ -845,6 +854,7 @@ impl App {
             }
             Act::RefreshNews => self.refresh_news(),
             Act::Reload => {
+                self.gfx = None;
                 self.reload();
                 self.load_news_local();
             }
@@ -924,6 +934,17 @@ impl App {
                 self.mod_covers.clear();
             }
             Act::CheckUpdates => self.check_updates(),
+            Act::SetGraphics(g) => {
+                if let Ok(game) = &self.game {
+                    match gamesettings::write(&game.data_dir, &g) {
+                        Ok(()) => {
+                            self.gfx = Some(g);
+                            self.gfx_status = Some((tr(self.lang, "gfx.saved").to_string(), true));
+                        }
+                        Err(e) => self.gfx_status = Some((format!("{e:#}"), false)),
+                    }
+                }
+            }
             Act::UpdatePlugin(id) => self.update_plugin(&id),
             Act::EditConfig(id) => {
                 if let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id) {
@@ -1883,6 +1904,8 @@ impl App {
                     });
                 }
             }
+            // graphics
+            self.graphics_section(ui, &acts);
             // language
             theme::section(ui, tr(lang, "set.language"));
             glass(ui, 16.0, 0.0, |ui| {
@@ -2540,6 +2563,165 @@ impl App {
             self.upload = None;
         } else if start {
             self.acts.push(Act::StartUpload);
+        }
+    }
+
+    /// The game's graphics settings: display mode, monitor, resolution, refresh rate, interface scale, vsync and anti-aliasing.
+    fn graphics_section(&mut self, ui: &mut Ui, acts: &Acts) {
+        let lang = self.lang;
+        let Ok(game) = &self.game else { return };
+        if self.gfx.is_none() {
+            self.gfx = Some(gamesettings::read(&game.data_dir));
+            self.displays = gamesettings::displays();
+        }
+        let Some(cur) = self.gfx.clone() else { return };
+        let mut g = cur.clone();
+        let mut commit = false;
+        let running = !self.running.is_empty();
+        theme::section(ui, tr(lang, "set.graphics"));
+        glass(ui, 16.0, 0.0, |ui| {
+            let mut rows = Rows::new();
+            // display mode
+            let modes = [("fullscreen", "gfx.fullscreen"), ("borderless_fullscreen", "gfx.borderless"), ("windowed", "gfx.windowed")];
+            let labels: Vec<String> = modes.iter().map(|(_, k)| tr(lang, k).to_string()).collect();
+            let at = modes.iter().position(|(v, _)| *v == g.display_mode).unwrap_or(1);
+            rows.row(ui, 52.0, 420.0, false, |ui| { ui.label(tr(lang, "gfx.mode")); }, |ui| {
+                if let Some(i) = segmented(ui, &labels, at, 420.0) {
+                    g.display_mode = modes[i].0.to_string();
+                    commit = true;
+                }
+            });
+            // monitor
+            if self.displays.len() > 1 {
+                let names: Vec<String> = self.displays.iter().enumerate().map(|(i, d)| format!("{} · {}×{}", i + 1, d.current.0, d.current.1)).collect();
+                let at = (g.display_index as usize).min(names.len() - 1);
+                rows.row(ui, 52.0, 420.0, false, |ui| { ui.label(tr(lang, "gfx.display")); }, |ui| {
+                    if let Some(i) = segmented(ui, &names, at, 420.0) {
+                        g.display_index = i as u32;
+                        commit = true;
+                    }
+                });
+            }
+            let display = self.displays.get(g.display_index as usize).or(self.displays.first());
+            // resolution: the one of the current mode
+            let windowed = g.display_mode == "windowed";
+            let res = if windowed { g.windowed_resolution } else { g.fullscreen_resolution };
+            let mut sizes: Vec<(u32, u32)> = Vec::new();
+            if let Some(d) = display {
+                for (w, h, _) in &d.modes {
+                    if !sizes.contains(&(*w, *h)) {
+                        sizes.push((*w, *h));
+                    }
+                }
+            }
+            if !sizes.contains(&res) {
+                sizes.insert(0, res);
+            }
+            rows.row(ui, 52.0, 200.0, false, |ui| { ui.label(tr(lang, "gfx.resolution")); }, |ui| {
+                let popup = egui::Id::new("gfx-resolution");
+                let open = ui.memory(|m| m.is_popup_open(popup));
+                let r = pill_button(ui, &format!("{} × {}", res.0, res.1), ButtonStyle::Tinted(Color32::WHITE), true);
+                if r.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(popup));
+                }
+                let _ = open;
+                egui::popup::popup_below_widget(ui, popup, &r, egui::popup::PopupCloseBehavior::CloseOnClick, |ui| {
+                    ui.set_min_width(180.0);
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                        for (w, h) in &sizes {
+                            let chosen = (*w, *h) == res;
+                            if ui.selectable_label(chosen, RichText::new(format!("{w} × {h}")).size(14.0)).clicked() {
+                                if windowed {
+                                    g.windowed_resolution = (*w, *h);
+                                } else {
+                                    g.fullscreen_resolution = (*w, *h);
+                                }
+                                commit = true;
+                            }
+                        }
+                    });
+                });
+            });
+            // refresh rate (full screen only)
+            if !windowed {
+                let mut rates: Vec<u32> = display.map(|d| d.modes.iter().filter(|m| (m.0, m.1) == res).map(|m| m.2).collect()).unwrap_or_default();
+                rates.sort_unstable_by(|a, b| b.cmp(a));
+                rates.dedup();
+                rates.truncate(5);
+                if !rates.contains(&g.refresh_rate) && !rates.is_empty() {
+                    // the stored rate is not offered at this size: show the best one as the choice
+                    g.refresh_rate = rates[0];
+                }
+                if !rates.is_empty() {
+                    let labels: Vec<String> = rates.iter().map(|r| format!("{r} Hz")).collect();
+                    let at = rates.iter().position(|r| *r == g.refresh_rate).unwrap_or(0);
+                    let w = (labels.len() as f32 * 84.0).min(420.0);
+                    rows.row(ui, 52.0, w, false, |ui| { ui.label(tr(lang, "gfx.refresh")); }, |ui| {
+                        if let Some(i) = segmented(ui, &labels, at, w) {
+                            g.refresh_rate = rates[i];
+                            commit = true;
+                        }
+                    });
+                }
+            }
+            // interface scale
+            let recommended = ((res.1 as f32 / 1080.0) * 4.0).round() / 4.0;
+            let recommended = recommended.clamp(0.5, 2.0);
+            rows.row(ui, 64.0, 420.0, false, |ui| {
+                stack(ui, 64.0, 38.0, |ui| {
+                    ui.label(tr(lang, "gfx.scale"));
+                    ui.label(RichText::new(tr_args(lang, "gfx.scale_hint", &[&format!("{:.0}%", recommended * 100.0), &format!("{}", res.1)])).size(12.0).color(SECONDARY));
+                });
+            }, |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for v in [2.0f32, 1.5, 1.25, 1.0] {
+                    let on = (g.gui_scale - v).abs() < 0.001;
+                    if theme::toggle_chip(ui, &format!("{:.0}%", v * 100.0), on).clicked() {
+                        g.gui_scale = v;
+                        commit = true;
+                    }
+                }
+                ui.label(RichText::new(format!("{:.0}%", g.gui_scale * 100.0)).size(15.0).family(bold()));
+                ui.spacing_mut().slider_width = 120.0;
+                let r = ui.add(egui::Slider::new(&mut g.gui_scale, 0.5..=2.0).step_by(0.05).show_value(false));
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    commit = true;
+                }
+            });
+            // vsync
+            rows.row(ui, 48.0, 46.0, false, |ui| { ui.label(tr(lang, "gfx.vsync")); }, |ui| {
+                if switch(ui, &mut g.vsync).changed() {
+                    commit = true;
+                }
+            });
+            // anti-aliasing
+            let levels = [0u32, 2, 4, 8];
+            let labels: Vec<String> = levels.iter().map(|l| if *l == 0 { tr(lang, "gfx.off").to_string() } else { format!("{l}×") }).collect();
+            let at = levels.iter().position(|l| *l == g.multi_sampling).unwrap_or(2);
+            rows.row(ui, 52.0, 300.0, false, |ui| { ui.label(tr(lang, "gfx.msaa")); }, |ui| {
+                if let Some(i) = segmented(ui, &labels, at, 300.0) {
+                    g.multi_sampling = levels[i];
+                    commit = true;
+                }
+            });
+        });
+        if running {
+            theme::footnote(ui, tr(lang, "gfx.running"));
+        } else {
+            theme::footnote(ui, tr(lang, "gfx.note"));
+        }
+        if let Some((msg, ok)) = &self.gfx_status {
+            if !ok {
+                theme::footnote(ui, msg);
+            }
+        }
+        // the slider moves the value while dragging; it is written once let go
+        if g != cur {
+            if commit {
+                acts.push(Act::SetGraphics(g));
+            } else {
+                self.gfx = Some(g);
+            }
         }
     }
 

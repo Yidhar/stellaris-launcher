@@ -5,6 +5,7 @@ pub mod artwork;
 pub mod dlc;
 pub mod dlcload;
 pub mod game;
+pub mod gamesettings;
 pub mod import;
 pub mod launch;
 pub mod modmake;
