@@ -13,3 +13,4 @@ stl-core = { path = "../stl-core" }
 anyhow = "1"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
 rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }

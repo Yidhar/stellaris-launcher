@@ -48,6 +48,9 @@ pub struct Store {
     /// `auto`, `launcher`, `steam` or `none`
     #[serde(default)]
     pub background: Option<String>,
+    /// fetch the public news feed; None = yes
+    #[serde(default)]
+    pub news_online: Option<bool>,
     #[serde(skip)]
     path: PathBuf,
 }

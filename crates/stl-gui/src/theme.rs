@@ -1,34 +1,47 @@
-//! The look of the window: colours, fonts and the few widgets egui does not have (switch, chip, card, buttons).
+//! The look of the window, in the manner of iOS: a picture behind everything, frosted-glass cards (the blurred picture seen through them), large
+//! titles, inset grouped lists with hairline separators, green switches, segmented controls, capsule buttons and a tab bar at the bottom.
+//! egui has none of these, so they are drawn here. Icons are drawn as strokes, so no icon font is needed.
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use crate::i18n::Lang;
+use eframe::egui::{
+    self,
+    epaint::{RectShape, Shadow},
+    pos2, vec2, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Layout, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, TextureId, Ui, UiBuilder, Vec2,
+};
+use std::f32::consts::TAU;
 
-pub const BG: Color32 = Color32::from_rgb(14, 16, 21);
-pub const SIDEBAR: Color32 = Color32::from_rgb(18, 21, 28);
-pub const CARD: Color32 = Color32::from_rgb(25, 29, 39);
-pub const CARD_HOVER: Color32 = Color32::from_rgb(32, 37, 50);
-pub const LINE: Color32 = Color32::from_rgb(40, 46, 62);
-pub const TEXT: Color32 = Color32::from_rgb(232, 235, 242);
-pub const MUTED: Color32 = Color32::from_rgb(141, 150, 170);
-pub const FAINT: Color32 = Color32::from_rgb(93, 102, 122);
-pub const ACCENT: Color32 = Color32::from_rgb(88, 140, 255);
-pub const OK: Color32 = Color32::from_rgb(61, 220, 151);
-pub const WARN: Color32 = Color32::from_rgb(232, 176, 74);
-pub const DANGER: Color32 = Color32::from_rgb(240, 113, 107);
-pub const PURPLE: Color32 = Color32::from_rgb(170, 140, 255);
+// iOS dark system colours
+pub const BLUE: Color32 = Color32::from_rgb(10, 132, 255);
+pub const GREEN: Color32 = Color32::from_rgb(48, 209, 88);
+pub const RED: Color32 = Color32::from_rgb(255, 69, 58);
+pub const ORANGE: Color32 = Color32::from_rgb(255, 159, 10);
+pub const PURPLE: Color32 = Color32::from_rgb(191, 90, 242);
+pub const LABEL: Color32 = Color32::WHITE;
+/// white at 60 %, 30 %, 18 % (premultiplied)
+pub const SECONDARY: Color32 = Color32::from_rgba_premultiplied(141, 141, 147, 153);
+pub const TERTIARY: Color32 = Color32::from_rgba_premultiplied(71, 71, 74, 77);
+pub const SEGMENT_ON: Color32 = Color32::from_rgb(99, 99, 102);
+
+pub fn white(alpha: u8) -> Color32 {
+    Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha)
+}
 
 pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-fn cr(r: u8) -> CornerRadius {
-    CornerRadius::same(r)
+fn cr(r: f32) -> CornerRadius {
+    CornerRadius::same(r.round().clamp(0.0, 255.0) as u8)
 }
 
-pub fn install(ctx: &egui::Context) {
-    // Segoe UI for Latin text, Microsoft YaHei behind it for Chinese mod names (egui's own fonts have no CJK glyphs)
+// ------------------------------------------------------------------ fonts and style
+
+/// Segoe UI for Latin and Cyrillic; behind it a CJK font, the one of the language first (Han characters differ between Chinese and Japanese).
+pub fn install_fonts(ctx: &egui::Context, lang: Lang) {
     let mut fonts = egui::FontDefinitions::default();
-    let load = |fonts: &mut egui::FontDefinitions, name: &str, path: &str| -> bool {
-        match std::fs::read(path) {
+    let dir = r"C:\Windows\Fonts";
+    let mut load = |name: &str, file: &str| -> bool {
+        match std::fs::read(format!(r"{dir}\{file}")) {
             Ok(bytes) => {
                 fonts.font_data.insert(name.to_string(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
                 true
@@ -36,226 +49,555 @@ pub fn install(ctx: &egui::Context) {
             Err(_) => false,
         }
     };
-    let regular = load(&mut fonts, "segoe", r"C:\Windows\Fonts\segoeui.ttf");
-    let semibold = load(&mut fonts, "segoe-bold", r"C:\Windows\Fonts\segoeuib.ttf");
-    let cjk = ["msyh.ttc", "simhei.ttf", "simsun.ttc"].iter().any(|f| load(&mut fonts, "cjk", &format!(r"C:\Windows\Fonts\{f}")));
+    let regular = load("segoe", "segoeui.ttf");
+    let semibold = load("segoe-semibold", "seguisb.ttf") || load("segoe-semibold", "segoeuib.ttf");
+    // (name, candidate files); the first that exists is used
+    let cjk_of = |lang: Lang| -> Vec<(&'static str, &'static [&'static str])> {
+        let yahei: (&str, &[&str]) = ("cjk-yahei", &["msyh.ttc", "simhei.ttf"]);
+        let jheng: (&str, &[&str]) = ("cjk-jheng", &["msjh.ttc"]);
+        let yugo: (&str, &[&str]) = ("cjk-yugo", &["YuGothR.ttc", "meiryo.ttc"]);
+        let malgun: (&str, &[&str]) = ("cjk-malgun", &["malgun.ttf"]);
+        match lang {
+            Lang::ZhHans => vec![yahei],
+            Lang::ZhHant => vec![jheng, yahei],
+            Lang::Ja => vec![yugo, yahei],
+            Lang::Ko => vec![malgun, yahei],
+            _ => vec![yahei],
+        }
+    };
+    let mut wanted = cjk_of(lang);
+    for extra in [("cjk-yahei", &["msyh.ttc", "simhei.ttf"][..]), ("cjk-malgun", &["malgun.ttf"][..])] {
+        if !wanted.iter().any(|w| w.0 == extra.0) {
+            wanted.push(extra);
+        }
+    }
+    let mut cjk_names = Vec::new();
+    for (name, files) in wanted {
+        if files.iter().any(|f| load(name, f)) {
+            cjk_names.push(name.to_string());
+        }
+    }
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     if regular {
         proportional.insert(0, "segoe".into());
     }
-    if cjk {
-        proportional.push("cjk".into());
+    for (i, n) in cjk_names.iter().enumerate() {
+        proportional.insert(if regular { 1 + i } else { i }, n.clone());
     }
     let mut bold_family: Vec<String> = Vec::new();
     if semibold {
-        bold_family.push("segoe-bold".into());
+        bold_family.push("segoe-semibold".into());
     } else if regular {
         bold_family.push("segoe".into());
     }
+    bold_family.extend(cjk_names.iter().cloned());
     bold_family.push("Ubuntu-Light".into());
-    if cjk {
-        bold_family.push("cjk".into());
-    }
     fonts.families.insert(bold(), bold_family);
-    if cjk {
-        fonts.families.entry(FontFamily::Monospace).or_default().push("cjk".into());
-    }
+    fonts.families.entry(FontFamily::Monospace).or_default().extend(cjk_names);
     ctx.set_fonts(fonts);
+}
 
+pub fn install_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     use egui::TextStyle::*;
     style.text_styles = [
-        (Heading, FontId::new(24.0, bold())),
-        (Body, FontId::new(14.5, FontFamily::Proportional)),
-        (Button, FontId::new(14.0, FontFamily::Proportional)),
+        (Heading, FontId::new(28.0, bold())),
+        (Body, FontId::new(15.0, FontFamily::Proportional)),
+        (Button, FontId::new(15.0, FontFamily::Proportional)),
         (Small, FontId::new(12.0, FontFamily::Proportional)),
         (Monospace, FontId::new(12.5, FontFamily::Monospace)),
     ]
     .into();
-    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-    style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    style.spacing.interact_size.y = 28.0;
-    style.spacing.scroll.bar_width = 8.0;
+    style.spacing.item_spacing = vec2(10.0, 8.0);
+    style.spacing.button_padding = vec2(12.0, 6.0);
+    style.spacing.scroll.bar_width = 6.0;
     style.spacing.scroll.floating = true;
+    style.spacing.scroll.floating_allocated_width = 0.0;
+    style.interaction.selectable_labels = false;
 
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
-    v.override_text_color = Some(TEXT);
-    v.panel_fill = BG;
-    v.window_fill = CARD;
-    v.window_stroke = Stroke::new(1.0, LINE);
-    v.window_corner_radius = cr(12);
-    v.menu_corner_radius = cr(10);
-    v.extreme_bg_color = Color32::from_rgb(11, 13, 17);
-    v.faint_bg_color = CARD;
-    v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.45);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
-    v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(120) };
-    v.widgets.noninteractive.bg_fill = CARD;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
-    v.widgets.noninteractive.corner_radius = cr(8);
-    for (w, fill) in [(&mut v.widgets.inactive, CARD_HOVER), (&mut v.widgets.hovered, Color32::from_rgb(40, 46, 64)), (&mut v.widgets.active, Color32::from_rgb(48, 56, 78))] {
-        w.bg_fill = fill;
-        w.weak_bg_fill = fill;
-        w.bg_stroke = Stroke::new(1.0, LINE);
-        w.fg_stroke = Stroke::new(1.0, TEXT);
-        w.corner_radius = cr(8);
-        w.expansion = 0.0;
-    }
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.6));
-    v.widgets.open = v.widgets.inactive;
+    v.panel_fill = Color32::TRANSPARENT;
+    v.window_fill = Color32::from_rgb(44, 44, 46);
+    v.window_stroke = Stroke::new(1.0, white(30));
+    v.window_corner_radius = cr(14.0);
+    v.extreme_bg_color = Color32::from_rgba_premultiplied(0, 0, 0, 90);
+    v.faint_bg_color = white(10);
+    v.hyperlink_color = BLUE;
+    v.selection.bg_fill = BLUE.gamma_multiply(0.5);
+    v.selection.stroke = Stroke::new(1.0, BLUE);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, LABEL);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, LABEL);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, LABEL);
+    v.widgets.active.fg_stroke = Stroke::new(1.0, LABEL);
+    v.popup_shadow = Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(120) };
     ctx.set_style(style);
 }
 
-/// A rounded panel on the dark background.
-pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    Frame::new().fill(CARD).corner_radius(cr(12)).stroke(Stroke::new(1.0, LINE)).inner_margin(Margin::same(14)).show(ui, add).inner
+// ------------------------------------------------------------------ the picture behind, and the glass in front of it
+
+/// What a glass card needs to show the blurred picture "through" it: the texture, and where the window sits in it.
+#[derive(Clone, Copy)]
+pub struct GlassCtx {
+    pub tex: Option<TextureId>,
+    pub window: Rect,
+    /// the part of the texture the whole window shows (cover fit)
+    pub uv: Rect,
 }
 
-/// A small coloured label ("Steam", "for v3.14.*", "made for this build").
-pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    Frame::new()
-        .fill(color.gamma_multiply(0.16))
-        .corner_radius(cr(9))
-        .inner_margin(Margin::symmetric(8, 2))
-        .show(ui, |ui| ui.label(RichText::new(text).size(11.5).color(color)))
-        .response
+fn glass_id() -> Id {
+    Id::new("stl-glass")
 }
 
-/// An on/off switch.
+pub fn set_glass(ctx: &egui::Context, g: GlassCtx) {
+    ctx.data_mut(|d| d.insert_temp(glass_id(), g));
+}
+
+/// The uv rectangle of an image that covers `target` (crops, keeps the aspect), with `anchor` 0..1 horizontally/vertically.
+pub fn cover_uv(target: Vec2, image: Vec2, anchor: Vec2) -> Rect {
+    let (ta, ia) = (target.x / target.y.max(1.0), image.x / image.y.max(1.0));
+    let (w, h) = if ta > ia { (1.0, ia / ta) } else { (ta / ia, 1.0) };
+    let (x, y) = ((1.0 - w) * anchor.x, (1.0 - h) * anchor.y);
+    Rect::from_min_max(pos2(x, y), pos2(x + w, y + h))
+}
+
+/// An image filling a rounded rectangle, cropped to cover it.
+pub fn cover_image(ui: &Ui, rect: Rect, tex: TextureId, size: Vec2, radius: f32, tint: Color32) {
+    let uv = cover_uv(rect.size(), size, vec2(0.5, 0.5));
+    ui.painter().add(Shape::Rect(RectShape::filled(rect, cr(radius), tint).with_texture(tex, uv)));
+}
+
+/// The frosted look of a rectangle: the blurred picture, a light veil, a hairline.
+pub fn glass_shapes(ctx: &egui::Context, rect: Rect, radius: f32) -> Shape {
+    let g = ctx.data(|d| d.get_temp::<GlassCtx>(glass_id()));
+    let mut shapes = Vec::new();
+    match g {
+        Some(GlassCtx { tex: Some(tex), window, uv }) => {
+            let map = |p: Pos2| {
+                let t = vec2((p.x - window.left()) / window.width().max(1.0), (p.y - window.top()) / window.height().max(1.0));
+                pos2(uv.left() + uv.width() * t.x, uv.top() + uv.height() * t.y)
+            };
+            let card_uv = Rect::from_min_max(map(rect.min), map(rect.max));
+            shapes.push(Shape::Rect(RectShape::filled(rect, cr(radius), Color32::WHITE).with_texture(tex, card_uv)));
+        }
+        _ => shapes.push(Shape::rect_filled(rect, cr(radius), Color32::from_rgb(34, 34, 40))),
+    }
+    shapes.push(Shape::rect_filled(rect, cr(radius), white(15)));
+    shapes.push(Shape::rect_stroke(rect, cr(radius), Stroke::new(1.0, white(26)), StrokeKind::Inside));
+    Shape::Vec(shapes)
+}
+
+/// A glass card around whatever `add` puts in it.
+pub fn glass<R>(ui: &mut Ui, radius: f32, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let slot = ui.painter().add(Shape::Noop);
+    let out = egui::Frame::new().inner_margin(egui::Margin::same(margin as i8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui)
+    });
+    ui.painter().set(slot, glass_shapes(ui.ctx(), out.response.rect, radius));
+    out.inner
+}
+
+/// A glass card that fills the rest of the page and scrolls its content.
+pub fn glass_scroll<R>(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().add(glass_shapes(ui.ctx(), rect, 16.0));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(0.0, 6.0))).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
+    let out = egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(&mut child, add).inner;
+    ui.advance_cursor_after_rect(rect);
+    out
+}
+
+/// A long list of rows of one height that fills the rest of the space and scrolls: only the rows in view are built.
+pub fn plain_rows(ui: &mut Ui, id: &str, row_height: f32, total: usize, add: impl FnOnce(&mut Ui, std::ops::Range<usize>)) {
+    let rect = ui.available_rect_before_wrap();
+    let mut child = ui.new_child(UiBuilder::new().id_salt(id).max_rect(rect).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    child.spacing_mut().item_spacing.y = 0.0;
+    egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows(&mut child, row_height, total, add);
+    ui.advance_cursor_after_rect(rect);
+}
+
+/// `plain_rows` on a glass card.
+pub fn glass_rows(ui: &mut Ui, id: &str, row_height: f32, total: usize, add: impl FnOnce(&mut Ui, std::ops::Range<usize>)) {
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().add(glass_shapes(ui.ctx(), rect, 16.0));
+    let mut child = ui.new_child(UiBuilder::new().id_salt(("glass-rows", id)).max_rect(rect.shrink2(vec2(0.0, 6.0))).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
+    plain_rows(&mut child, id, row_height, total, add);
+    ui.advance_cursor_after_rect(rect);
+}
+
+/// A glass card over a given rectangle, with a margin, whose content is laid out by `add`.
+pub fn glass_pane(ui: &mut Ui, rect: Rect, radius: f32, margin: f32, add: impl FnOnce(&mut Ui)) {
+    ui.painter().add(glass_shapes(ui.ctx(), rect, radius));
+    let mut child = ui.new_child(UiBuilder::new().id_salt(("glass-pane", rect.min.x as i32, rect.min.y as i32)).max_rect(rect.shrink(margin)).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
+    add(&mut child);
+}
+
+/// Lines stacked and centred in a row of `row_h`, given that they are `content_h` tall together.
+pub fn stack(ui: &mut Ui, row_h: f32, content_h: f32, add: impl FnOnce(&mut Ui)) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(((row_h - content_h) / 2.0).max(0.0));
+        add(ui);
+    });
+}
+
+// ------------------------------------------------------------------ lists
+
+/// The rows of an inset grouped list: each row has a hairline above it, except the first.
+pub struct Rows {
+    first: bool,
+    mark: bool,
+}
+
+impl Rows {
+    pub fn new() -> Rows {
+        Rows { first: true, mark: false }
+    }
+
+    /// The next row is the chosen one: it gets a blue wash.
+    pub fn highlight_next(&mut self) {
+        self.mark = true;
+    }
+
+    /// For lists that show only a window of their rows: say whether the first one shown is the list's first.
+    pub fn starting_at(index: usize) -> Rows {
+        Rows { first: index == 0, mark: false }
+    }
+
+    /// One row: `left` fills the row up to a trailing area `trail_w` wide, in which `right` is laid out right to left.
+    pub fn row(&mut self, ui: &mut Ui, height: f32, trail_w: f32, clickable: bool, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) -> Response {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), if clickable { Sense::click() } else { Sense::hover() });
+        if std::mem::take(&mut self.mark) {
+            ui.painter().rect_filled(rect.shrink2(vec2(6.0, 2.0)), cr(10.0), BLUE.gamma_multiply(0.38));
+        } else if clickable && resp.hovered() {
+            let a = if resp.is_pointer_button_down_on() { 30 } else { 16 };
+            ui.painter().rect_filled(rect.shrink2(vec2(6.0, 2.0)), cr(10.0), white(a));
+        }
+        if !self.first {
+            ui.painter().line_segment([pos2(rect.left() + 16.0, rect.top()), pos2(rect.right(), rect.top())], Stroke::new(1.0, white(22)));
+        }
+        self.first = false;
+        // children are made with `new_child`, not `scope`: a scope would move the parent's cursor to the end of its own content, up inside the row
+        let inner = rect.shrink2(vec2(16.0, 0.0));
+        let gap = if trail_w > 0.0 { 10.0 } else { 0.0 };
+        let left_rect = Rect::from_min_max(inner.min, pos2(inner.right() - trail_w - gap, inner.bottom()));
+        let mut left_ui = ui.new_child(UiBuilder::new().id_salt((resp.id, "left")).max_rect(left_rect).layout(Layout::left_to_right(Align::Center)));
+        left(&mut left_ui);
+        if trail_w > 0.0 {
+            let right_rect = Rect::from_min_max(pos2(inner.right() - trail_w, inner.top()), inner.max);
+            let mut right_ui = ui.new_child(UiBuilder::new().id_salt((resp.id, "right")).max_rect(right_rect).layout(Layout::right_to_left(Align::Center)));
+            right(&mut right_ui);
+        }
+        resp
+    }
+}
+
+/// Small spaced capitals over a group.
+pub fn section(ui: &mut Ui, text: &str) {
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.label(RichText::new(text.to_uppercase()).size(12.0).color(SECONDARY));
+    });
+    ui.add_space(2.0);
+}
+
+/// A line of small explanation under a group.
+pub fn footnote(ui: &mut Ui, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(16.0);
+        ui.label(RichText::new(text).size(12.5).color(SECONDARY));
+    });
+}
+
+pub fn large_title(ui: &mut Ui, title: &str, subtitle: Option<&str>, trailing: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(RichText::new(title).size(34.0).family(bold()).color(LABEL));
+            if let Some(s) = subtitle {
+                ui.label(RichText::new(s).size(14.0).color(SECONDARY));
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), trailing);
+    });
+    ui.add_space(12.0);
+}
+
+/// A smaller heading (22 pt) with something at its right end.
+pub fn large_title_small(ui: &mut Ui, title: &str, trailing: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(22.0).family(bold()).color(LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), trailing);
+    });
+    ui.add_space(8.0);
+}
+
+// ------------------------------------------------------------------ controls
+
+/// The iOS switch: a green capsule with a white knob.
 pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
-    let size = Vec2::new(38.0, 22.0);
-    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, mut response) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
     }
-    let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.12);
-    let track = if *on { ACCENT } else { Color32::from_rgb(52, 59, 78) };
-    let track = if response.hovered() { track.gamma_multiply(1.12) } else { track };
-    ui.painter().rect_filled(rect, cr(11), track);
-    let x = egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t);
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, Color32::WHITE);
+    let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.14);
+    let off = Color32::from_rgb(78, 78, 84);
+    let track = Color32::from_rgb(
+        egui::lerp(off.r() as f32..=GREEN.r() as f32, t) as u8,
+        egui::lerp(off.g() as f32..=GREEN.g() as f32, t) as u8,
+        egui::lerp(off.b() as f32..=GREEN.b() as f32, t) as u8,
+    );
+    ui.painter().rect_filled(rect, cr(14.0), track);
+    let x = egui::lerp((rect.left() + 14.0)..=(rect.right() - 14.0), t);
+    let knob = Rect::from_center_size(pos2(x, rect.center().y), Vec2::splat(24.0));
+    ui.painter().add(Shadow { offset: [0, 1], blur: 4, spread: 0, color: Color32::from_black_alpha(80) }.as_shape(knob, cr(12.0)));
+    ui.painter().circle_filled(knob.center(), 12.0, Color32::WHITE);
     response
 }
 
-/// The main button: filled with the accent colour.
-pub fn primary_button(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
-    let fill = if !enabled {
-        Color32::from_rgb(38, 44, 60)
-    } else if response.is_pointer_button_down_on() {
-        ACCENT.gamma_multiply(0.8)
-    } else if response.hovered() {
-        ACCENT.gamma_multiply(1.12)
-    } else {
-        ACCENT
-    };
-    ui.painter().rect_filled(rect, cr(10), fill);
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::new(17.0, bold()), if enabled { Color32::WHITE } else { FAINT });
-    response
-}
-
-/// A flat button that shows its shape on hover.
-pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
-    ghost_button_colored(ui, text, MUTED, TEXT)
-}
-
-pub fn ghost_button_colored(ui: &mut Ui, text: &str, color: Color32, hover_color: Color32) -> Response {
-    let font = FontId::new(13.5, FontFamily::Proportional);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), color);
-    let size = Vec2::new(galley.size().x + 22.0, 28.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, cr(8), Color32::from_rgb(34, 40, 55));
-    }
-    let c = if response.hovered() { hover_color } else { color };
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, c);
-    response
-}
-
-/// A square button for one glyph (↑ ↓ × +).
-pub fn icon_button(ui: &mut Ui, glyph: &str, enabled: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), if enabled { Sense::click() } else { Sense::hover() });
-    if enabled && response.hovered() {
-        ui.painter().rect_filled(rect, cr(7), Color32::from_rgb(44, 51, 70));
-    }
-    let color = if !enabled {
-        Color32::from_rgb(60, 67, 84)
-    } else if response.hovered() {
-        TEXT
-    } else {
-        MUTED
-    };
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::new(15.0, FontFamily::Proportional), color);
-    response
-}
-
-/// Tabs: text with an accent underline under the chosen one. Returns the index clicked.
-pub fn tabs(ui: &mut Ui, labels: &[String], current: usize) -> Option<usize> {
+/// A segmented control; returns the index chosen this frame.
+pub fn segmented(ui: &mut Ui, labels: &[String], current: usize, width: f32) -> Option<usize> {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(10.0), white(30));
+    let n = labels.len().max(1);
+    let seg_w = (rect.width() - 4.0) / n as f32;
+    let pill_x = ui.ctx().animate_value_with_time(ui.id().with("seg-pill").with(rect.min.x as i32), current as f32, 0.16);
+    let pill = Rect::from_min_size(pos2(rect.left() + 2.0 + pill_x * seg_w, rect.top() + 2.0), vec2(seg_w, rect.height() - 4.0));
+    ui.painter().add(Shadow { offset: [0, 1], blur: 3, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(pill, cr(8.0)));
+    ui.painter().rect_filled(pill, cr(8.0), SEGMENT_ON);
     let mut clicked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 22.0;
-        for (i, l) in labels.iter().enumerate() {
-            let font = FontId::new(15.0, if i == current { bold() } else { FontFamily::Proportional });
-            let galley = ui.painter().layout_no_wrap(l.clone(), font.clone(), TEXT);
-            let (rect, response) = ui.allocate_exact_size(Vec2::new(galley.size().x, 30.0), Sense::click());
-            let color = if i == current {
-                TEXT
-            } else if response.hovered() {
-                Color32::from_rgb(190, 197, 214)
-            } else {
-                MUTED
-            };
-            ui.painter().text(egui::pos2(rect.left(), rect.center().y - 1.0), Align2::LEFT_CENTER, l, font, color);
-            if i == current {
-                ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(rect.left(), rect.bottom() - 2.0), Vec2::new(rect.width(), 2.0)), cr(1), ACCENT);
-            }
-            if response.clicked() {
-                clicked = Some(i);
-            }
+    for (i, l) in labels.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(rect.left() + 2.0 + i as f32 * seg_w, rect.top() + 2.0), vec2(seg_w, rect.height() - 4.0));
+        let resp = ui.interact(r, ui.id().with(("seg", i, rect.min.x as i32)), Sense::click());
+        let font = FontId::new(13.5, if i == current { bold() } else { FontFamily::Proportional });
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, l, font, if i == current || resp.hovered() { LABEL } else { SECONDARY });
+        if resp.clicked() {
+            clicked = Some(i);
         }
-    });
+    }
     clicked
 }
 
-/// Small spaced capitals above a group ("PLAYSETS").
-pub fn caption(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text.to_uppercase()).size(11.5).color(FAINT).family(bold()));
+#[derive(Clone, Copy, PartialEq)]
+pub enum ButtonStyle {
+    /// solid colour, white text
+    Filled(Color32),
+    /// the colour at low strength behind text in that colour
+    Tinted(Color32),
+    /// text only
+    Plain(Color32),
 }
 
-/// A text field with the dark rounded look.
-pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
-    Frame::new()
-        .fill(Color32::from_rgb(11, 13, 17))
-        .corner_radius(cr(8))
-        .stroke(Stroke::new(1.0, LINE))
-        .inner_margin(Margin::symmetric(10, 2))
-        .show(ui, |ui| ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(width).frame(false).margin(Margin::symmetric(0, 5))))
-        .inner
-}
-
-/// A row background that lights up when the pointer is over it; call before drawing the row's content.
-pub fn row_background(ui: &Ui, rect: egui::Rect, hovered: bool, selected: bool) {
-    if selected {
-        ui.painter().rect_filled(rect, cr(9), ACCENT.gamma_multiply(0.14));
-        ui.painter().rect_stroke(rect, cr(9), Stroke::new(1.0, ACCENT.gamma_multiply(0.5)), StrokeKind::Inside);
-    } else if hovered {
-        ui.painter().rect_filled(rect, cr(9), CARD_HOVER);
-    }
-}
-
-/// A button that looks like a row of the sidebar: full width, text at the left.
-pub fn nav_button(ui: &mut Ui, text: &str) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, cr(8), Color32::from_rgb(30, 35, 48));
-    }
-    let c = if response.hovered() { TEXT } else { MUTED };
-    ui.painter().text(egui::pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, text, FontId::new(13.5, FontFamily::Proportional), c);
+/// A capsule button of a given size.
+pub fn capsule_button(ui: &mut Ui, text: &str, size: Vec2, style: ButtonStyle, enabled: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    let down = enabled && response.is_pointer_button_down_on();
+    let hot = enabled && response.hovered();
+    let (fill, fg) = match style {
+        ButtonStyle::Filled(c) => (if !enabled { white(30) } else if down { c.gamma_multiply(0.75) } else if hot { c.gamma_multiply(1.1) } else { c }, if enabled { Color32::WHITE } else { TERTIARY }),
+        ButtonStyle::Tinted(c) => (if !enabled { white(14) } else if down { c.gamma_multiply(0.4) } else if hot { c.gamma_multiply(0.3) } else { c.gamma_multiply(0.22) }, if enabled { c } else { TERTIARY }),
+        ButtonStyle::Plain(c) => (if down { white(26) } else if hot { white(14) } else { Color32::TRANSPARENT }, if enabled { c } else { TERTIARY }),
+    };
+    ui.painter().rect_filled(rect, cr(size.y / 2.0), fill);
+    let font = FontId::new(if size.y >= 44.0 { 17.0 } else { 14.5 }, bold());
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, fg);
     response
+}
+
+/// A button as wide as its text needs.
+pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.5, bold()), Color32::WHITE);
+    capsule_button(ui, text, vec2(galley.size().x + 28.0, 32.0), style, enabled)
+}
+
+/// A selectable capsule (a playset in the playset picker).
+pub fn choice_pill(ui: &mut Ui, text: &str, selected: bool) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(14.0, bold()), Color32::WHITE);
+    let (rect, response) = ui.allocate_exact_size(vec2((galley.size().x + 26.0).min(220.0), 32.0), Sense::click());
+    let fill = if selected { BLUE } else if response.hovered() { white(40) } else { white(26) };
+    ui.painter().rect_filled(rect, cr(16.0), fill);
+    let mut shown = text.to_string();
+    if galley.size().x + 26.0 > 220.0 {
+        shown = text.chars().take(14).collect::<String>() + "…";
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, shown, FontId::new(14.0, if selected { bold() } else { FontFamily::Proportional }), if selected { Color32::WHITE } else { LABEL });
+    response
+}
+
+/// A small coloured capsule label.
+pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let font = FontId::new(11.5, FontFamily::Proportional);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 14.0, 20.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(10.0), color.gamma_multiply(0.22));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
+    resp
+}
+
+/// A round button with one glyph (add / added / remove / move).
+pub fn circle_button(ui: &mut Ui, icon: Icon, fill: Color32, fg: Color32, enabled: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), if enabled { Sense::click() } else { Sense::hover() });
+    let mut fill = if enabled { fill } else { white(10) };
+    if enabled && response.hovered() {
+        fill = fill.gamma_multiply(1.35);
+    }
+    if enabled && response.is_pointer_button_down_on() {
+        fill = fill.gamma_multiply(0.7);
+    }
+    ui.painter().circle_filled(rect.center(), 13.0, fill);
+    icon.draw(ui.painter(), rect.center(), 15.0, if enabled { fg } else { TERTIARY }, 1.8);
+    response
+}
+
+/// The search field: a rounded gray capsule with a magnifier.
+pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(18.0), white(30));
+    Icon::Search.draw(ui.painter(), pos2(rect.left() + 20.0, rect.center().y), 16.0, SECONDARY, 1.6);
+    let inner = Rect::from_min_max(pos2(rect.left() + 36.0, rect.top()), pos2(rect.right() - 12.0, rect.bottom()));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+    child.add(egui::TextEdit::singleline(text).hint_text(RichText::new(hint).color(SECONDARY)).frame(false).desired_width(inner.width()).margin(egui::Margin::symmetric(0, 8)))
+}
+
+/// A text field in a grouped list.
+pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(10.0), white(30));
+    let inner = rect.shrink2(vec2(12.0, 0.0));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+    child.add(egui::TextEdit::singleline(text).hint_text(RichText::new(hint).color(SECONDARY)).frame(false).desired_width(inner.width()).margin(egui::Margin::symmetric(0, 8)))
+}
+
+// ------------------------------------------------------------------ the tab bar
+
+/// The bar at the bottom: glass, with the pages as icon over label. Returns the page clicked.
+pub fn tab_bar(ui: &mut Ui, items: &[(Icon, String)], current: usize) -> Option<usize> {
+    let rect = ui.max_rect();
+    ui.painter().add(glass_shapes(ui.ctx(), rect, 0.0));
+    ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, white(34)));
+    let n = items.len();
+    let item_w = (rect.width() / n as f32).min(116.0);
+    let left = rect.center().x - item_w * n as f32 / 2.0;
+    let mut clicked = None;
+    for (i, (icon, label)) in items.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(left + i as f32 * item_w, rect.top() + 4.0), vec2(item_w, rect.height() - 8.0));
+        let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
+        let selected = i == current;
+        let color = if selected { BLUE } else if resp.hovered() { white(190) } else { SECONDARY };
+        if resp.hovered() && !selected {
+            ui.painter().rect_filled(r.shrink2(vec2(8.0, 2.0)), cr(12.0), white(12));
+        }
+        icon.draw(ui.painter(), pos2(r.center().x, r.top() + 20.0), 26.0, color, if selected { 2.0 } else { 1.6 });
+        ui.painter().text(pos2(r.center().x, r.bottom() - 12.0), Align2::CENTER_CENTER, label, FontId::new(11.5, if selected { bold() } else { FontFamily::Proportional }), color);
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+    }
+    clicked
+}
+
+// ------------------------------------------------------------------ icons, drawn as strokes
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Icon {
+    Play,
+    Playsets,
+    Mods,
+    Plugins,
+    Settings,
+    Search,
+    Plus,
+    Check,
+    Close,
+    Up,
+    Down,
+    Refresh,
+}
+
+impl Icon {
+    /// Draws the icon in a square of side `size` around `c`.
+    pub fn draw(self, p: &egui::Painter, c: Pos2, size: f32, color: Color32, width: f32) {
+        let s = size;
+        let st = Stroke::new(width, color);
+        let at = |x: f32, y: f32| pos2(c.x + x * s, c.y + y * s);
+        let line = |pts: Vec<Pos2>| {
+            p.add(Shape::line(pts, st));
+        };
+        let closed = |pts: Vec<Pos2>| {
+            p.add(Shape::closed_line(pts, st));
+        };
+        match self {
+            Icon::Play => closed(vec![at(-0.26, -0.4), at(0.42, 0.0), at(-0.26, 0.4)]),
+            Icon::Playsets => {
+                for y in [-0.3, 0.0, 0.3] {
+                    p.circle_filled(at(-0.4, y), width * 0.7, color);
+                    line(vec![at(-0.2, y), at(0.44, y)]);
+                }
+            }
+            Icon::Mods => {
+                let v: Vec<Pos2> = (0..6).map(|k| {
+                    let a = (-90.0 + 60.0 * k as f32).to_radians();
+                    at(a.cos() * 0.46, a.sin() * 0.46)
+                }).collect();
+                closed(v.clone());
+                for k in [1usize, 3, 5] {
+                    line(vec![at(0.0, 0.0), v[k]]);
+                }
+            }
+            Icon::Plugins => {
+                closed(vec![at(-0.24, -0.24), at(0.24, -0.24), at(0.24, 0.24), at(-0.24, 0.24)]);
+                for t in [-0.1, 0.1] {
+                    line(vec![at(t, -0.24), at(t, -0.42)]);
+                    line(vec![at(t, 0.24), at(t, 0.42)]);
+                    line(vec![at(-0.24, t), at(-0.42, t)]);
+                    line(vec![at(0.24, t), at(0.42, t)]);
+                }
+            }
+            Icon::Settings => {
+                let mut pts = Vec::new();
+                for i in 0..8 {
+                    let a = i as f32 * TAU / 8.0;
+                    for (da, r) in [(-0.30f32, 0.34f32), (-0.2, 0.47), (0.2, 0.47), (0.30, 0.34)] {
+                        let ang = a + da;
+                        pts.push(at(ang.cos() * r, ang.sin() * r));
+                    }
+                }
+                closed(pts);
+                p.circle_stroke(c, 0.14 * s, st);
+            }
+            Icon::Search => {
+                p.circle_stroke(at(-0.08, -0.08), 0.3 * s, st);
+                line(vec![at(0.14, 0.14), at(0.42, 0.42)]);
+            }
+            Icon::Plus => {
+                line(vec![at(-0.34, 0.0), at(0.34, 0.0)]);
+                line(vec![at(0.0, -0.34), at(0.0, 0.34)]);
+            }
+            Icon::Check => line(vec![at(-0.34, 0.02), at(-0.1, 0.26), at(0.36, -0.24)]),
+            Icon::Close => {
+                line(vec![at(-0.28, -0.28), at(0.28, 0.28)]);
+                line(vec![at(0.28, -0.28), at(-0.28, 0.28)]);
+            }
+            Icon::Up => line(vec![at(-0.3, 0.14), at(0.0, -0.16), at(0.3, 0.14)]),
+            Icon::Down => line(vec![at(-0.3, -0.14), at(0.0, 0.16), at(0.3, -0.14)]),
+            Icon::Refresh => {
+                let pts: Vec<Pos2> = (0..=18).map(|k| {
+                    let a = (40.0 + 270.0 * k as f32 / 18.0).to_radians();
+                    at(a.cos() * 0.34, a.sin() * 0.34)
+                }).collect();
+                let end = *pts.last().unwrap();
+                line(pts);
+                line(vec![pos2(end.x - 0.2 * s, end.y - 0.02 * s), end, pos2(end.x + 0.04 * s, end.y - 0.2 * s)]);
+            }
+        }
+    }
 }
 
 /// The window icon: a four-pointed star on a rounded blue square, drawn pixel by pixel.
@@ -265,7 +607,6 @@ pub fn icon() -> egui::IconData {
     for y in 0..n {
         for x in 0..n {
             let (fx, fy) = ((x as f32 + 0.5) / n as f32 * 2.0 - 1.0, (y as f32 + 0.5) / n as f32 * 2.0 - 1.0);
-            // rounded square
             let q = (fx.abs() - 0.78, fy.abs() - 0.78);
             let outside = (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt() + q.0.max(q.1).min(0.0) - 0.2;
             if outside > 0.0 {
@@ -273,7 +614,6 @@ pub fn icon() -> egui::IconData {
             }
             let t = (fy + 1.0) / 2.0;
             let (mut r, mut g, mut b) = (egui::lerp(70.0..=40.0, t), egui::lerp(120.0..=70.0, t), egui::lerp(255.0..=190.0, t));
-            // the star: |x|^(2/3) + |y|^(2/3) <= 0.62^(2/3)
             let star = fx.abs().powf(2.0 / 3.0) + fy.abs().powf(2.0 / 3.0);
             if star <= 0.62f32.powf(2.0 / 3.0) {
                 (r, g, b) = (255.0, 255.0, 255.0);

@@ -9,7 +9,8 @@ official launcher does and where it falls short is in FINDINGS.md and PROBLEMS.m
 - **Is:** playsets (ordered mod lists), the mod folder and the Steam workshop mods in it, DLL plugins per playset, a launch button that writes
   what the game reads, starts `stellaris.exe` the way the official launcher does, and loads the plugins once the game is up.
 - **Is not:** an account client (no Paradox login, so no Paradox Mods browsing and no session token for the game), a mod downloader (Steam
-  keeps downloading workshop mods), a DLC manager (DLC state and `dlc_signature` stay as they are), a multiplayer matchmaker.
+  keeps downloading workshop mods), a DLC *store* (which DLC you own is Steam's; the launcher only switches installed ones on or off per playset,
+  and never touches `dlc_signature`), a multiplayer matchmaker.
 - **Does not touch** the official launcher's database, `userSettings.json` or `session.js`. It only *reads* the database (a copy of it) to import
   playsets. Both launchers can coexist; whichever last wrote `dlc_load.json` wins, and our `launch` writes it every time.
 
@@ -18,7 +19,7 @@ official launcher does and where it falls short is in FINDINGS.md and PROBLEMS.m
 ```
 crates/stl-core    the library: everything below
 crates/stl-cli     `stl`, the command line over it
-crates/stl-gui     the window (egui) over it                                  (planned)
+crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 languages), picture loader
 ```
 
 | Module | Does |
@@ -31,6 +32,9 @@ crates/stl-gui     the window (egui) over it                                  (p
 | `dlcload` | `dlc_load.json`: writes `enabled_mods`, keeps `disabled_dlcs` and any other key, backs the original up once |
 | `plugins` | manifests (`stl-plugin.json`), install / link / remove, build compatibility, seed files — see PLUGINS.md |
 | `process` | find the game, window and modules, spawn, `CreateRemoteThread` + `LoadLibraryW`, terminate |
+| `dlc` | the installed DLC (`dlc/*/*.dlc`): name, category, Steam id, thumbnail; the playset's `disabled_dlcs` goes into `dlc_load.json` at launch |
+| `news`, `net` | the public news-card feed (Braze content cards, anonymous GET over WinHTTP) and the official launcher's cache of it; pictures cached under `%APPDATA%\stellaris-launcher\cache` |
+| `artwork` | background and logo pictures found in the Paradox Launcher's theme cache and Steam's library cache (read only) |
 | `launch` | the sequence: playset → mods → plugin checks → seed files → spawn → wait for the window → load plugins |
 
 ## Decisions
@@ -49,12 +53,20 @@ crates/stl-gui     the window (egui) over it                                  (p
    proxy-DLL host mode, for starting from Steam directly, can be added later without changing the manifest.
 5. **A plugin states which game builds it is for** (`exe_timestamps`), and the launcher refuses to load it into another. The plugins of this
    project already refuse for themselves; the launcher says why *before* the game is running, and says it in one place for all of them.
-6. **Rust, `windows-sys`, `rusqlite` (bundled), `serde`**: one static exe of a few MB. The same crate serves the CLI and the window.
+6. **No account login.** The official launcher signs in to a Paradox account to give the game a session token. Reproducing that means handling
+   account passwords and the official protocol, which a replacement launcher should not do; Settings says so and sends the user to the official
+   launcher for it. Everything else (news, DLC, mods, plugins, language, background) needs no account.
+7. **The window is drawn like iOS, not assembled from widgets**: the sharp artwork behind everything, and every card shows the *blurred, darkened*
+   copy of it at its own position (a textured rounded rectangle whose UV is the card's place in the window), so it reads as frosted glass without
+   a blur shader. Lists are inset groups with hairlines, switches are green capsules, pages are a bottom tab bar. Icons are strokes, so no icon
+   font is needed. Texts come from `i18n.rs` (English, 简体, 繁體, 日本語, 한국어, Deutsch, Français, Español, Русский); a test checks every language
+   has every key and the same placeholders.
+8. **Rust, `windows-sys`, `rusqlite` (bundled), `serde`**: one static exe of a few MB. The same crate serves the CLI and the window.
 
 ## Roadmap
 
 1. **Done:** the core, the CLI, plugin loading, playsets and import; tests of every module; a live run against the real game.
-2. The window: playset picker, mod list with check boxes and drag order, plugins with switches, Play, a log line.
+2. **Done:** the window (Play with news, Playsets with Mods | DLC | Plugins, Mods library, Plugins, Settings); drag-to-reorder mods is still up/down buttons.
 3. Mod conflict report (files two mods both provide, with the load-order winner) — the feature the official launcher hides behind a flag.
 4. Release builds in CI, a zip with `stl.exe` and the window.
 5. Proxy-DLL host (launch from Steam), per-plugin settings, plugin dependencies and update checks.
