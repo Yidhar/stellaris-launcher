@@ -622,6 +622,7 @@ pub enum Icon {
     Left,
     Right,
     Upload,
+    Globe,
     Refresh,
     Minimize,
     Maximize,
@@ -701,6 +702,13 @@ impl Icon {
             }
             Icon::Left => line(vec![at(0.14, -0.3), at(-0.14, 0.0), at(0.14, 0.3)]),
             Icon::Right => line(vec![at(-0.14, -0.3), at(0.14, 0.0), at(-0.14, 0.3)]),
+            Icon::Globe => {
+                p.circle_stroke(c, 0.4 * s, st);
+                line(vec![at(-0.4, 0.0), at(0.4, 0.0)]);
+                let arc = |k: f32| -> Vec<Pos2> { (0..=12).map(|i| { let a = (-90.0 + 180.0 * i as f32 / 12.0).to_radians(); at(k * a.cos() * 0.4, a.sin() * 0.4) }).collect() };
+                line(arc(0.45));
+                line(arc(-0.45));
+            }
             Icon::Upload => {
                 line(vec![at(0.0, 0.2), at(0.0, -0.36)]);
                 line(vec![at(-0.2, -0.16), at(0.0, -0.36), at(0.2, -0.16)]);

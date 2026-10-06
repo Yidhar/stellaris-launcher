@@ -5,9 +5,26 @@
   "version": "0.2.0",
   "description": "Draws Live2D models into Stellaris' portraits (portrait mods declare them).",
   "dll": "stellaris_live2d.dll",
-  "game": { "exe_timestamps": ["0x6AB5181D"] },
-  "load": { "wait": "window", "delay_ms": 1500 },
+  "game": {
+    "exe_timestamps": [
+      "0x6AB5181D"
+    ]
+  },
+  "load": {
+    "wait": "window",
+    "delay_ms": 1500
+  },
   "config": [
-    { "file": "stellaris_live2d.ini", "default": "defaults/stellaris_live2d.ini", "title": "Live2D", "substitute": true }
-  ]
+    {
+      "file": "stellaris_live2d.ini",
+      "default": "defaults/stellaris_live2d.ini",
+      "title": "Live2D",
+      "substitute": true
+    }
+  ],
+  "update": {
+    "github": "Yidhar/stellaris-live2d",
+    "asset": "stellaris-live2d-*.zip"
+  },
+  "homepage": "https://github.com/Yidhar/stellaris-live2d"
 }

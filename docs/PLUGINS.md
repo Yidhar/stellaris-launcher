@@ -50,7 +50,9 @@ Rules for the plugin:
   "load": { "wait": "window", "delay_ms": 1500 },
   "config": [
     { "file": "stellaris_live2d.ini", "default": "defaults/stellaris_live2d.ini", "title": "Live2D", "substitute": true }
-  ]
+  ],
+  "update": { "github": "Yidhar/stellaris-live2d", "asset": "stellaris-live2d-*.zip" },
+  "homepage": "https://github.com/Yidhar/stellaris-live2d"
 }
 ```
 
@@ -64,6 +66,9 @@ Rules for the plugin:
 | `load.wait` | `window` (default): load when the game has a visible window; `none`: as soon as the process exists |
 | `load.delay_ms` | extra wait after that |
 | `config[]` | the settings files: `file` (a name in `config/`, no sub-folders), `default` (a file in the plugin folder to make it from when missing), `title` (what the editor calls it), `substitute` (fill `{plugin_dir}`, `{config_dir}` in the default). Files in `config/` that are not declared are edited too |
+| `update.github` | `owner/repo` on GitHub. The launcher reads the repository's **latest release** (public API, no account), and offers it when its tag (`v0.3.0` or `0.3.0`) is a higher version than `version` |
+| `update.asset` | the release asset to install, `*` as a wildcard (default `*.zip`). The zip holds the plugin folder (its files at the root, or in one folder). When the release also has `<asset>.sha256` (the hex digest first), the download must match it |
+| `homepage` | a page for people; the Plugins page links it (the GitHub repository when this is empty) |
 | `seed_files` | schema 1, deprecated: files written into the game folder. Kept working for old plugins; new ones use `config` |
 
 ## What the launcher does
@@ -74,6 +79,9 @@ Rules for the plugin:
 - **Launch**: skips (and says why) a plugin that is not installed, whose DLL is missing, or that lists builds not including this one; makes
   missing settings files; starts the game; waits for its window and `delay_ms`; loads each plugin with `LoadLibraryW` in a remote thread. A
   plugin already in the process is not loaded twice. The launcher never calls `FreeLibrary` in the game.
+- **Updates**: the Plugins page checks every plugin that has `update` once per session (and on *Check for updates*); a newer release shows
+  a badge and an *Update* button, which downloads the zip, checks its SHA-256, and installs it like any plugin folder (the user's `config\`
+  is kept). The game must be closed (its DLL is in use). A linked plugin is not updated. `stl plugin update [<id>] [--check]` does the same.
 - **Settings**: the gear button of a plugin opens its `config\` files as text, with *Save*, *Restore default* and *Open folder*.
 - An earlier version kept plugins in `%APPDATA%\stellaris-launcher\plugins`; they are moved here once (that folder becomes
   `plugins.migrated`).
@@ -95,6 +103,7 @@ the game looks for):
 stl plugins                            what is installed, and whether each fits the installed game build
 stl plugin install <folder> [--link]   install (or link) a plugin
 stl plugin info <id>                   manifest, folder, SHA-256 of the DLL
+stl plugin update [<id>] [--check]     newer GitHub releases, installed unless --check
 stl plugin enable|disable <id>         in the active playset
 stl plugin remove <id>
 stl launch                             writes dlc_load.json, starts the game, loads the active playset's enabled plugins

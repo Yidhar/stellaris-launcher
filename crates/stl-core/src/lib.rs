@@ -19,6 +19,7 @@ pub mod process;
 pub mod saves;
 pub mod script;
 pub mod store;
+pub mod updates;
 pub mod workshop;
 
 pub use anyhow::{anyhow, bail, Context, Result};

@@ -92,6 +92,21 @@ pub struct Manifest {
     pub seed_files: Vec<SeedFile>,
     #[serde(default)]
     pub config: Vec<ConfigFile>,
+    /// where updates come from: GitHub releases of a repository
+    #[serde(default)]
+    pub update: Option<UpdateSpec>,
+    /// a page for people (the repository, a forum thread); the GitHub repository is used when this is empty
+    #[serde(default)]
+    pub homepage: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdateSpec {
+    /// `owner/repo` (or its github.com URL)
+    pub github: String,
+    /// the release asset to install, `*` as a wildcard (default `*.zip`); a `<asset>.sha256` beside it is checked when present
+    #[serde(default)]
+    pub asset: Option<String>,
 }
 
 /// The folder of a plugin's settings, inside its own folder.

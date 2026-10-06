@@ -61,6 +61,16 @@ impl ConfigEditor {
     }
 }
 
+/// Update checks of the plugins, and an update being installed.
+#[derive(Default)]
+struct PluginUpdates {
+    /// per plugin id: the newer release, or nothing when up to date, or why the check failed
+    found: std::collections::HashMap<String, Result<Option<stl_core::updates::Available>, String>>,
+    checking: Option<Receiver<(String, Result<Option<stl_core::updates::Available>, String>)>>,
+    installing: Option<(String, Receiver<Result<String, String>>)>,
+    message: Option<(String, bool)>,
+}
+
 enum UpMsg {
     Progress(workshop::Stage, u64, u64),
     Done(Result<workshop::Outcome, String>),
@@ -149,6 +159,8 @@ enum Act {
     RescanMods,
     RescanPlugins,
     EditConfig(String),
+    CheckUpdates,
+    UpdatePlugin(String),
     SetModsSort(&'static str),
     SetModsView(&'static str),
     OpenUpload(String),
@@ -206,6 +218,7 @@ struct App {
     dev_popup: bool,
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
+    updates: PluginUpdates,
     /// the "Upload mod" picker is open
     pick_upload: bool,
     /// when each mod was last changed (for the sort by date), filled when needed
@@ -303,6 +316,7 @@ impl App {
             dev_popup: false,
             make: None,
             config: None,
+            updates: PluginUpdates::default(),
             pick_upload: false,
             mod_times: std::collections::HashMap::new(),
             mod_covers: std::collections::HashMap::new(),
@@ -552,6 +566,87 @@ impl App {
             };
             let _ = tx.send(UpMsg::Done(r.map_err(|e| format!("{e:#}"))));
         });
+    }
+
+    /// Asks GitHub about every plugin that names a repository, on a worker thread.
+    fn check_updates(&mut self) {
+        if self.updates.checking.is_some() {
+            return;
+        }
+        let list: Vec<Plugin> = self.plugins.iter().filter(|p| p.manifest.update.is_some()).cloned().collect();
+        if list.is_empty() {
+            return;
+        }
+        let (tx, rx) = channel();
+        self.updates.checking = Some(rx);
+        std::thread::spawn(move || {
+            for p in list {
+                let r = stl_core::updates::check(&p).map_err(|e| format!("{e:#}"));
+                let _ = tx.send((p.manifest.id.clone(), r));
+            }
+        });
+    }
+
+    fn update_plugin(&mut self, id: &str) {
+        if self.updates.installing.is_some() {
+            return;
+        }
+        if !self.running.is_empty() {
+            self.updates.message = Some((tr(self.lang, "pl.close_game").to_string(), false));
+            return;
+        }
+        let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id).cloned() else { return };
+        let Some(Ok(Some(a))) = self.updates.found.get(id).cloned() else { return };
+        let (tx, rx) = channel();
+        self.updates.installing = Some((id.to_string(), rx));
+        self.updates.message = None;
+        std::thread::spawn(move || {
+            let r = stl_core::updates::apply(&p, &a).map(|n| n.manifest.version).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(r);
+        });
+    }
+
+    fn drain_updates(&mut self) {
+        let mut done = Vec::new();
+        if let Some(rx) = &self.updates.checking {
+            loop {
+                match rx.try_recv() {
+                    Ok(x) => done.push(x),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.updates.checking = None;
+                        break;
+                    }
+                }
+            }
+        }
+        for (id, r) in done {
+            self.updates.found.insert(id, r);
+        }
+        let mut finished = None;
+        if let Some((id, rx)) = &self.updates.installing {
+            if let Ok(r) = rx.try_recv() {
+                finished = Some((id.clone(), r));
+            }
+        }
+        if let Some((id, r)) = finished {
+            self.updates.installing = None;
+            match r {
+                Ok(v) => {
+                    self.updates.found.insert(id.clone(), Ok(None));
+                    self.updates.message = Some((tr_args(self.lang, "pl.updated", &[&id, &v]), true));
+                    self.say(format!("updated {id} to {v}"));
+                }
+                Err(e) => {
+                    self.updates.message = Some((e.clone(), false));
+                    self.say(format!("could not update {id}: {e}"));
+                }
+            }
+            if let Ok((p, problems)) = plugins::list() {
+                self.plugins = p;
+                self.plugin_problems = problems;
+            }
+        }
     }
 
     fn drain_upload(&mut self) {
@@ -813,6 +908,8 @@ impl App {
                 self.mod_times.clear();
                 self.mod_covers.clear();
             }
+            Act::CheckUpdates => self.check_updates(),
+            Act::UpdatePlugin(id) => self.update_plugin(&id),
             Act::EditConfig(id) => {
                 if let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id) {
                     self.config = Some(ConfigEditor::open(p.clone()));
@@ -1618,6 +1715,14 @@ impl App {
                 if circle_button(ui, Icon::Refresh, theme::white(22), LABEL, true).on_hover_text(tr(lang, "mods.refresh")).clicked() {
                     acts.push(Act::RescanPlugins);
                 }
+                let checking = self.updates.checking.is_some();
+                if pill_button(ui, if checking { tr(lang, "pl.checking") } else { tr(lang, "pl.check") }, ButtonStyle::Plain(BLUE), !checking).clicked() {
+                    self.updates.found.clear();
+                    acts.push(Act::CheckUpdates);
+                }
+                if let Some((msg, ok)) = &self.updates.message {
+                    ui.label(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED }));
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if pill_button(ui, tr(lang, "pl.install"), ButtonStyle::Tinted(Color32::WHITE), true).clicked() {
                         acts.push(Act::PluginInstall(false));
@@ -1647,7 +1752,10 @@ impl App {
                     let has_text = !p.manifest.description.is_empty();
                     let h = if has_text { 84.0 } else { 64.0 };
                     let has_config = !p.manifest.config.is_empty() || p.config_dir().is_dir();
-                    rows.row(ui, h, 200.0, false, |ui| {
+                    let page = p.manifest.homepage.clone().filter(|h| h.starts_with("http")).or_else(|| p.manifest.update.as_ref().and_then(|u| stl_core::updates::repo_of(&u.github)).map(|r| format!("https://github.com/{r}")));
+                    let update_ready = matches!(self.updates.found.get(&p.manifest.id), Some(Ok(Some(_)))) && !p.linked;
+                    let installing = self.updates.installing.as_ref().is_some_and(|(i, _)| i == &p.manifest.id);
+                    rows.row(ui, h, 300.0, false, |ui| {
                         stack(ui, h, if has_text { 64.0 } else { 44.0 }, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&p.manifest.name).size(15.5).family(bold()));
@@ -1661,6 +1769,18 @@ impl App {
                                 chip(ui, &status, color);
                                 if p.linked {
                                     chip(ui, tr(lang, "pl.linked"), PURPLE);
+                                }
+                                match self.updates.found.get(&p.manifest.id) {
+                                    Some(Ok(Some(a))) => {
+                                        chip(ui, &tr_args(lang, "pl.update_available", &[&a.release.version]), BLUE);
+                                    }
+                                    Some(Ok(None)) => {
+                                        chip(ui, tr(lang, "pl.up_to_date"), SECONDARY);
+                                    }
+                                    Some(Err(e)) => {
+                                        chip(ui, tr(lang, "pl.check_failed"), ORANGE).on_hover_text(e);
+                                    }
+                                    None => {}
                                 }
                                 ui.label(RichText::new(&p.manifest.id).size(11.5).color(theme::TERTIARY));
                             });
@@ -1676,6 +1796,18 @@ impl App {
                         }
                         if has_config && circle_button(ui, Icon::Settings, theme::white(26), LABEL, true).on_hover_text(tr(lang, "cfg.edit")).clicked() {
                             acts.push(Act::EditConfig(p.manifest.id.clone()));
+                        }
+                        if let Some(url) = &page {
+                            if circle_button(ui, Icon::Globe, theme::white(26), LABEL, true).on_hover_text(url).clicked() {
+                                acts.push(Act::Open(url.clone()));
+                            }
+                        }
+                        if update_ready || installing {
+                            ui.add_space(4.0);
+                            let label = if installing { tr(lang, "pl.updating") } else { tr(lang, "pl.update") };
+                            if pill_button(ui, label, ButtonStyle::Filled(BLUE), !installing).clicked() {
+                                acts.push(Act::UpdatePlugin(p.manifest.id.clone()));
+                            }
                         }
                     });
                 }
@@ -1930,6 +2062,14 @@ impl eframe::App for App {
         self.drain_launch();
         self.drain_news();
         self.drain_upload();
+        self.drain_updates();
+        if self.updates.checking.is_some() || self.updates.installing.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        // the plugins are checked for updates once, the first time their page is shown
+        if self.page == Page::Plugins && self.updates.found.is_empty() && self.updates.checking.is_none() && self.store.news_online != Some(false) {
+            self.check_updates();
+        }
         if self.upload.as_ref().is_some_and(|f| f.rx.is_some()) {
             ctx.request_repaint_after(Duration::from_millis(200));
         }

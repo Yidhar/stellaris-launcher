@@ -171,6 +171,12 @@ enum PluginCmd {
     Remove { id: String },
     /// details of an installed plugin
     Info { id: String },
+    /// check GitHub for newer releases (of one plugin, or all), and install them unless --check
+    Update {
+        id: Option<String>,
+        #[arg(long)]
+        check: bool,
+    },
     /// load the plugin in the active playset
     Enable { id: String },
     Disable { id: String },
@@ -529,6 +535,33 @@ fn run() -> Result<()> {
                 plugins::remove(id)?;
                 println!("removed {id}");
             }
+            PluginCmd::Update { id, check } => {
+                let (installed, _) = plugins::list()?;
+                let chosen: Vec<_> = installed.iter().filter(|p| id.as_ref().map_or(true, |i| p.manifest.id.eq_ignore_ascii_case(i))).collect();
+                if chosen.is_empty() {
+                    bail!("no such plugin installed");
+                }
+                for p in chosen {
+                    if p.manifest.update.is_none() {
+                        println!("{}: names no repository to update from", p.manifest.id);
+                        continue;
+                    }
+                    match stl_core::updates::check(p) {
+                        Ok(None) => println!("{} {}: up to date", p.manifest.id, p.manifest.version),
+                        Ok(Some(a)) => {
+                            println!("{} {} -> {}  ({})", p.manifest.id, p.manifest.version, a.release.version, a.release.page);
+                            if !*check {
+                                if !process::find_processes("stellaris.exe").is_empty() {
+                                    bail!("close the game first: its DLL is in use");
+                                }
+                                let n = stl_core::updates::apply(p, &a)?;
+                                println!("  installed {} {}", n.manifest.id, n.manifest.version);
+                            }
+                        }
+                        Err(e) => println!("{}: {e:#}", p.manifest.id),
+                    }
+                }
+            }
             PluginCmd::Info { id } => {
                 let p = plugins::find(id)?;
                 let m = &p.manifest;
@@ -542,6 +575,12 @@ fn run() -> Result<()> {
                 println!("  loaded   {} after {} ms", if m.load.wait == "none" { "when the process starts" } else { "when the game window exists" }, m.load.delay_ms);
                 for s in &m.seed_files {
                     println!("  seeds    {} -> game folder/{}", s.from, s.to);
+                }
+                for c in &m.config {
+                    println!("  config   config/{}{}", c.file, c.default.as_ref().map(|d| format!("  (default {d})")).unwrap_or_default());
+                }
+                if let Some(u) = &m.update {
+                    println!("  updates  github.com/{}  {}", u.github, u.asset.as_deref().unwrap_or("*.zip"));
                 }
             }
             PluginCmd::Enable { id } | PluginCmd::Disable { id } => {
