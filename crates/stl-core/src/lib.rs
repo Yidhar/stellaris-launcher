@@ -7,6 +7,7 @@ pub mod dlcload;
 pub mod game;
 pub mod import;
 pub mod launch;
+pub mod modmake;
 pub mod mods;
 pub mod net;
 pub mod news;
@@ -18,5 +19,6 @@ pub mod process;
 pub mod saves;
 pub mod script;
 pub mod store;
+pub mod workshop;
 
 pub use anyhow::{anyhow, bail, Context, Result};

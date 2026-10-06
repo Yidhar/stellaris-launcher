@@ -10,7 +10,7 @@ the last save continued, and a DLL plugin loaded into it by the launcher.
 - `stellaris-launcher.exe` — the window, in the manner of iOS: the game's artwork behind frosted-glass cards and a tab bar. **Play** (the playset
   and two large buttons, Play and Continue; the news cards of the Paradox Launcher's home page as a small strip you page through),
   **Playsets** (mods in load order, DLC on/off, plugins), **Mods** (the whole
-  mod folder, add/remove with one tap), **Plugins** (install, link, remove), **Settings** (launch options, nine languages, background, game folder, log).
+  mod folder, add/remove with one tap, make a new mod, upload your own to the Steam Workshop), **Plugins** (install, link, remove), **Settings** (launch options, nine languages, background, game folder, log).
 - `stl.exe` — the same on the command line (`stl --help`).
 
 ```
@@ -18,6 +18,8 @@ stl status                              the game, the active playset, the plugin
 stl import-official                     copy the playsets of the Paradox Launcher into ours (its database is only read)
 stl playsets / stl playset show|new|use|remove|add|rm|enable|disable|move
 stl mods                                the mods the game can load
+stl mod new <name> [--tags a,b]         make a local mod (folder + both descriptors)
+stl mod upload <mod> [--yes]            upload a local mod to the Steam Workshop (through the running Steam client)
 stl dlc [enable|disable <name>…]        the installed DLC, switched on/off in the active playset
 stl news [--refresh]                    the news cards of the official launcher's home page
 stl plugin install <folder> [--link]    DLL plugins (see docs/PLUGINS.md); stl plugin enable <id>

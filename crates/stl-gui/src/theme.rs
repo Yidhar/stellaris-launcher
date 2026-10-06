@@ -471,6 +471,37 @@ pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -
     capsule_button(ui, text, vec2(galley.size().x + 28.0, 32.0), style, enabled)
 }
 
+/// A capsule that is on or off (a tag in a list of tags).
+pub fn toggle_chip(ui: &mut Ui, text: &str, on: bool) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, FontFamily::Proportional), LABEL);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 22.0, 28.0), Sense::click());
+    let fill = if on { white(64) } else if resp.hovered() { white(30) } else { white(16) };
+    ui.painter().rect_filled(rect, cr(14.0), fill);
+    if on {
+        ui.painter().rect_stroke(rect, cr(14.0), Stroke::new(1.0, white(110)), StrokeKind::Inside);
+    }
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, if on { LABEL } else { SECONDARY });
+    resp
+}
+
+/// A thin capsule bar: `Some(fraction)` fills it, None shows a moving segment (the amount is not known yet).
+pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, time: f64) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(3.0), white(26));
+    let fill = match fraction {
+        Some(f) => Rect::from_min_size(rect.min, vec2(rect.width() * f.clamp(0.0, 1.0), rect.height())),
+        None => {
+            let w = rect.width() * 0.3;
+            let x = ((time * 0.8).fract() as f32) * (rect.width() + w) - w;
+            Rect::from_min_max(pos2((rect.left() + x).max(rect.left()), rect.top()), pos2((rect.left() + x + w).min(rect.right()), rect.bottom()))
+        }
+    };
+    if fill.width() > 0.0 {
+        ui.painter().rect_filled(fill, cr(3.0), LABEL);
+    }
+    ui.ctx().request_repaint();
+}
+
 /// A small coloured capsule label.
 pub fn chip(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = FontId::new(11.5, FontFamily::Proportional);
@@ -580,6 +611,7 @@ pub enum Icon {
     Down,
     Left,
     Right,
+    Upload,
     Refresh,
     Minimize,
     Maximize,
@@ -659,6 +691,11 @@ impl Icon {
             }
             Icon::Left => line(vec![at(0.14, -0.3), at(-0.14, 0.0), at(0.14, 0.3)]),
             Icon::Right => line(vec![at(-0.14, -0.3), at(0.14, 0.0), at(-0.14, 0.3)]),
+            Icon::Upload => {
+                line(vec![at(0.0, 0.2), at(0.0, -0.36)]);
+                line(vec![at(-0.2, -0.16), at(0.0, -0.36), at(0.2, -0.16)]);
+                line(vec![at(-0.36, 0.12), at(-0.36, 0.36), at(0.36, 0.36), at(0.36, 0.12)]);
+            }
             Icon::Up => line(vec![at(-0.3, 0.14), at(0.0, -0.16), at(0.3, 0.14)]),
             Icon::Down => line(vec![at(-0.3, -0.14), at(0.0, 0.16), at(0.3, -0.14)]),
             Icon::Minimize => line(vec![at(-0.34, 0.0), at(0.34, 0.0)]),

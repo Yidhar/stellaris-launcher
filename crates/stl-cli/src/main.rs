@@ -28,6 +28,13 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// make a new local mod, or upload one to the Steam Workshop
+    Mod {
+        #[command(subcommand)]
+        command: ModCmd,
+    },
+    /// start the Steam API, say which game and account it sees, stop it (changes nothing)
+    WorkshopCheck,
     /// list the playsets
     Playsets,
     /// work with a playset
@@ -116,6 +123,33 @@ enum PlaysetCmd {
     Disable { mods: Vec<String> },
     /// move a mod to a position (1 = loaded first)
     Move { r#mod: String, position: usize },
+}
+
+#[derive(Subcommand)]
+enum ModCmd {
+    /// make a mod folder with its descriptors in the mod folder
+    New {
+        name: String,
+        #[arg(long, default_value = "1.0.0")]
+        version: String,
+        /// comma-separated Workshop tags (Gameplay, Graphics, …)
+        #[arg(long, default_value = "")]
+        tags: String,
+    },
+    /// upload a local mod to the Steam Workshop (a new item is private until you change it on its page)
+    Upload {
+        /// the mod's name or descriptor id
+        name: String,
+        /// public, friends, private or unlisted (default: private for a new item, unchanged for an update)
+        #[arg(long)]
+        visibility: Option<String>,
+        /// the change note shown on the item's page
+        #[arg(long, default_value = "")]
+        note: String,
+        /// really upload (without it, only say what would be sent)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -382,6 +416,75 @@ fn run() -> Result<()> {
                 }
                 println!("{} installed, {} switched off in the playset {}{}", all.len(), all.iter().filter(|d| off.contains(&d.id)).count(), p.name, if p.disabled_dlcs.is_none() { " (it has no list of its own: dlc_load.json's is used)" } else { "" });
             }
+        }
+        Cmd::Mod { command } => {
+            let game = open_game(&cli, &store)?;
+            match command {
+                ModCmd::New { name, version, tags } => {
+                    let compat = &game.settings.mods_compatibility_version;
+                    let new = stl_core::modmake::NewMod {
+                        name: name.clone(),
+                        version: version.clone(),
+                        supported_version: format!("v{compat}.*"),
+                        tags: tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+                    };
+                    let m = stl_core::modmake::create(&game.data_dir, &new)?;
+                    println!("made {} ({})\n  content: {}", m.name, m.id, m.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
+                }
+                ModCmd::Upload { name, visibility, note, yes } => {
+                    let known = mods::scan(&game.data_dir);
+                    let m = pick_mod(&known, name)?.clone();
+                    if m.kind != mods::Kind::Local {
+                        bail!("{} is not a local mod (only mods you made can be uploaded)", m.name);
+                    }
+                    let content = m.path.clone().with_context(|| format!("{} has no content folder (path=)", m.name))?;
+                    let visibility = match visibility {
+                        Some(v) => Some(stl_core::workshop::Visibility::parse(v).with_context(|| format!("unknown visibility {v:?}"))?),
+                        None => None,
+                    };
+                    let preview = ["thumbnail.png", "thumbnail.jpg"].iter().map(|f| content.join(f)).find(|p| p.is_file());
+                    let existing = m.remote_file_id.as_deref().and_then(|v| v.parse::<u64>().ok());
+                    let up = stl_core::workshop::Upload {
+                        title: m.name.clone(),
+                        description: String::new(),
+                        content: content.clone(),
+                        preview: preview.clone(),
+                        tags: m.tags.clone(),
+                        visibility,
+                        change_note: note.clone(),
+                        existing,
+                    };
+                    println!("{} {} to the Steam Workshop", if existing.is_some() { "update" } else { "new item" }, m.name);
+                    println!("  content: {}\n  preview: {}\n  tags: {}", content.display(), preview.as_ref().map(|p| p.display().to_string()).unwrap_or("(none)".into()), m.tags.join(", "));
+                    if let Some(id) = existing {
+                        println!("  item: {}", stl_core::workshop::item_url(id));
+                    }
+                    if !*yes {
+                        println!("nothing sent; add --yes to upload");
+                        return Ok(());
+                    }
+                    let mut last = String::new();
+                    let outcome = stl_core::workshop::upload(&game.dir, &up, &mut |id| stl_core::modmake::set_remote_file_id(&m, id), &mut |stage, done, total| {
+                        let line = match stage {
+                            stl_core::workshop::Stage::Uploading(_) if total > 0 => format!("{stage:?} {}%", done * 100 / total),
+                            _ => format!("{stage:?}"),
+                        };
+                        if line != last {
+                            println!("  {line}");
+                            last = line;
+                        }
+                    })?;
+                    println!("{} {}", if outcome.created { "created" } else { "updated" }, stl_core::workshop::item_url(outcome.id));
+                    if outcome.needs_agreement {
+                        println!("the Workshop agreement is not accepted yet: the item stays hidden until you accept it on its page");
+                    }
+                }
+            }
+        }
+        Cmd::WorkshopCheck => {
+            let game = open_game(&cli, &store)?;
+            let (app, user) = stl_core::workshop::check(&game.dir)?;
+            println!("Steam API ok: app {app}, account {user}");
         }
         Cmd::News { refresh } => {
             let game = open_game(&cli, &store)?;

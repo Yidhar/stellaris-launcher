@@ -19,10 +19,36 @@ use stl_core::news::{self, Card};
 use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::saves::{self, Save};
+use stl_core::{modmake, workshop};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
 use theme::{bold, chip, circle_button, glass, glass_pane, glass_rows, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
 const STEAM_APP_ID: u32 = 281990;
+
+/// The "new mod" sheet.
+struct MakeForm {
+    name: String,
+    version: String,
+    tags: Vec<String>,
+    add_to_playset: bool,
+    error: Option<String>,
+}
+
+enum UpMsg {
+    Progress(workshop::Stage, u64, u64),
+    Done(Result<workshop::Outcome, String>),
+}
+
+/// The "upload to the Workshop" sheet, and the upload once it runs.
+struct UploadForm {
+    m: Mod,
+    /// 0 unchanged, 1 private, 2 friends, 3 unlisted, 4 public
+    visibility: usize,
+    note: String,
+    rx: Option<Receiver<UpMsg>>,
+    stage: Option<(workshop::Stage, u64, u64)>,
+    result: Option<Result<workshop::Outcome, String>>,
+}
 
 enum Msg {
     Line(String),
@@ -90,6 +116,9 @@ enum Act {
     ChangeGameDir,
     UseGameDir(String),
     Open(String),
+    CreateMod,
+    OpenUpload(String),
+    StartUpload,
 }
 
 /// The requests of a page; shared by the closures that build one row, so it uses a cell.
@@ -141,6 +170,8 @@ struct App {
     focus_playset_filter: bool,
     /// development: open the playset drop-down on the first frame
     dev_popup: bool,
+    make: Option<MakeForm>,
+    upload: Option<UploadForm>,
     /// the newest save, for the Continue button
     last_save: Option<Save>,
     /// page transition: the page on show, when it came, and from which side
@@ -227,6 +258,8 @@ impl App {
             ps_filter: String::new(),
             focus_playset_filter: false,
             dev_popup: false,
+            make: None,
+            upload: None,
             last_save: None,
             shown_page: Page::Play,
             page_t0: -10.0,
@@ -247,7 +280,7 @@ impl App {
         };
         app.reload();
         app.lang = resolve_lang(&app.store, &app.game);
-        // for screenshots while developing: --page=1 --seg=1 --lang=ja --popup --many=30
+        // for screenshots while developing: --page=1 --seg=1 --lang=ja --popup --many=30 --make --upload=<part of a mod name>
         for a in std::env::args().skip(1) {
             if let Some(v) = a.strip_prefix("--page=") {
                 app.page = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied().unwrap_or(Page::Play);
@@ -259,6 +292,12 @@ impl App {
                 app.dev_slow = v.parse().unwrap_or(1.0);
             } else if let Some(v) = a.strip_prefix("--then=") {
                 app.dev_then = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied();
+            } else if a == "--make" {
+                app.make = Some(MakeForm { name: "My New Mod".into(), version: "1.0.0".into(), tags: vec!["Gameplay".into()], add_to_playset: true, error: None });
+            } else if let Some(v) = a.strip_prefix("--upload=") {
+                if let Some(m) = app.mods.iter().find(|m| m.name.contains(v)) {
+                    app.acts.push(Act::OpenUpload(m.id.clone()));
+                }
             } else if a == "--popup" {
                 app.dev_popup = true;
             } else if let Some(v) = a.strip_prefix("--many=") {
@@ -403,6 +442,72 @@ impl App {
             });
             let _ = tx.send(Msg::Done(result.map_err(|e| format!("{e:#}"))));
         });
+    }
+
+    fn start_upload(&mut self) {
+        let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
+        if f.rx.is_some() {
+            return;
+        }
+        let Some(content) = f.m.path.clone() else {
+            f.result = Some(Err("the mod has no content folder (path=)".into()));
+            return;
+        };
+        let visibility = match f.visibility {
+            1 => Some(workshop::Visibility::Private),
+            2 => Some(workshop::Visibility::FriendsOnly),
+            3 => Some(workshop::Visibility::Unlisted),
+            4 => Some(workshop::Visibility::Public),
+            _ => None,
+        };
+        let up = workshop::Upload {
+            title: f.m.name.clone(),
+            description: String::new(),
+            preview: ["thumbnail.png", "thumbnail.jpg"].iter().map(|n| content.join(n)).find(|p| p.is_file()),
+            content,
+            tags: f.m.tags.clone(),
+            visibility,
+            change_note: f.note.trim().to_string(),
+            existing: f.m.remote_file_id.as_deref().and_then(|v| v.parse().ok()),
+        };
+        let m = f.m.clone();
+        let (tx, rx) = channel();
+        f.rx = Some(rx);
+        f.result = None;
+        std::thread::spawn(move || {
+            let tx_p = tx.clone();
+            let r = workshop::upload(&game.dir, &up, &mut |id| modmake::set_remote_file_id(&m, id), &mut |stage, done, total| {
+                let _ = tx_p.send(UpMsg::Progress(stage, done, total));
+            });
+            let _ = tx.send(UpMsg::Done(r.map_err(|e| format!("{e:#}"))));
+        });
+    }
+
+    fn drain_upload(&mut self) {
+        let mut finished = None;
+        if let Some(f) = self.upload.as_mut() {
+            if let Some(rx) = &f.rx {
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        UpMsg::Progress(stage, done, total) => f.stage = Some((stage, done, total)),
+                        UpMsg::Done(r) => finished = Some(r),
+                    }
+                }
+            }
+            if let Some(r) = finished.take() {
+                f.rx = None;
+                let line = match &r {
+                    Ok(o) => format!("uploaded {} to {}", f.m.name, workshop::item_url(o.id)),
+                    Err(e) => format!("could not upload {}: {e}", f.m.name),
+                };
+                f.result = Some(r);
+                self.log.push(line);
+                // the descriptors may carry the new item's id now
+                if let Ok(g) = &self.game {
+                    self.mods = mods::scan(&g.data_dir);
+                }
+            }
+        }
     }
 
     fn drain_launch(&mut self) {
@@ -596,6 +701,39 @@ impl App {
                 self.load_news_local();
             }
             Act::Open(url) => open_link(&url),
+            Act::CreateMod => {
+                let (Ok(g), Some(f)) = (&self.game, &mut self.make) else { return };
+                let new = modmake::NewMod {
+                    name: f.name.trim().to_string(),
+                    version: if f.version.trim().is_empty() { "1.0.0".into() } else { f.version.trim().to_string() },
+                    supported_version: format!("v{}.*", g.settings.mods_compatibility_version),
+                    tags: f.tags.clone(),
+                };
+                match modmake::create(&g.data_dir, &new) {
+                    Ok(m) => {
+                        let add = f.add_to_playset;
+                        self.make = None;
+                        self.say(format!("made the mod {} ({})", m.name, m.id));
+                        if add {
+                            let active = self.store.active_index();
+                            self.store.playsets[active].set_mod(&m.id, true);
+                            self.save();
+                        }
+                        if let Ok(g) = &self.game {
+                            self.mods = mods::scan(&g.data_dir);
+                        }
+                        self.filter = m.name.clone();
+                    }
+                    Err(e) => f.error = Some(format!("{e:#}")),
+                }
+            }
+            Act::OpenUpload(id) => {
+                if let Some(m) = self.mods.iter().find(|m| m.id == id) {
+                    let existing = m.remote_file_id.is_some();
+                    self.upload = Some(UploadForm { m: m.clone(), visibility: if existing { 0 } else { 1 }, note: String::new(), rx: None, stage: None, result: None });
+                }
+            }
+            Act::StartUpload => self.start_upload(),
         }
     }
 
@@ -1247,6 +1385,10 @@ impl App {
         let count = self.mods.len().to_string();
         large_title(ui, tr(lang, "mods.title"), Some(&tr_args(lang, "mods.count", &[&count])), |ui| {
             theme::search_field(ui, &mut self.filter, tr(lang, "mods.search"), 280.0);
+            ui.add_space(4.0);
+            if pill_button(ui, &format!("+  {}", tr(lang, "mods.create")), ButtonStyle::Tinted(Color32::WHITE), self.game.is_ok()).clicked() {
+                self.make = Some(MakeForm { name: String::new(), version: "1.0.0".into(), tags: Vec::new(), add_to_playset: true, error: None });
+            }
         });
         let active = self.store.active_index();
         let version = self.game.as_ref().ok().map(|g| g.version().to_string()).unwrap_or_default();
@@ -1257,7 +1399,8 @@ impl App {
             for k in range {
                 let m = &self.mods[shown[k]];
                 let inside = self.store.playsets[active].mod_pos(&m.id).is_some();
-                rows.row(ui, 58.0, 30.0, false, |ui| {
+                let own = m.kind == Kind::Local && m.path.is_some() && m.problem.is_none();
+                rows.row(ui, 58.0, 68.0, false, |ui| {
                     stack(ui, 58.0, 42.0, |ui| {
                         ui.add(egui::Label::new(RichText::new(&m.name).size(15.0).color(if m.problem.is_some() { RED } else { LABEL })).truncate());
                         ui.horizontal(|ui| {
@@ -1279,6 +1422,12 @@ impl App {
                         }
                     } else if circle_button(ui, Icon::Plus, BLUE.gamma_multiply(0.35), BLUE, true).on_hover_text(tr(lang, "mods.add")).clicked() {
                         acts.push(Act::ModAdd(m.id.clone()));
+                    }
+                    if own {
+                        ui.add_space(8.0);
+                        if circle_button(ui, Icon::Upload, theme::white(26), LABEL, true).on_hover_text(tr(lang, "mods.upload")).clicked() {
+                            acts.push(Act::OpenUpload(m.id.clone()));
+                        }
                     }
                 });
             }
@@ -1581,6 +1730,10 @@ impl eframe::App for App {
         self.poll_process();
         self.drain_launch();
         self.drain_news();
+        self.drain_upload();
+        if self.upload.as_ref().is_some_and(|f| f.rx.is_some()) {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
         if self.launching.is_some() || !self.running.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -1637,6 +1790,8 @@ impl eframe::App for App {
             page.set_opacity(ease);
             self.render_page(&mut page, self.page);
         });
+        self.make_sheet(ctx);
+        self.upload_sheet(ctx);
         self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
             self.apply(ctx, act);
@@ -1645,6 +1800,179 @@ impl eframe::App for App {
 }
 
 impl App {
+    fn sheet_frame() -> egui::Frame {
+        egui::Frame::new().fill(Color32::from_rgb(30, 30, 34)).stroke(egui::Stroke::new(1.0, theme::white(30))).corner_radius(theme::RADIUS as u8).inner_margin(egui::Margin::same(24))
+    }
+
+    /// The "new mod" sheet: name, version, tags; it shows where the mod will be made.
+    fn make_sheet(&mut self, ctx: &egui::Context) {
+        let Some(f) = self.make.as_mut() else { return };
+        let lang = self.lang;
+        let compat = self.game.as_ref().map(|g| g.settings.mods_compatibility_version.clone()).unwrap_or_default();
+        let mut close = false;
+        let mut create = false;
+        let resp = egui::Modal::new(egui::Id::new("make-mod")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(RichText::new(tr(lang, "mk.title")).size(22.0).family(bold()));
+            ui.add_space(14.0);
+            ui.label(RichText::new(tr(lang, "mk.name")).size(12.5).color(SECONDARY));
+            let r = theme::text_field(ui, &mut f.name, "My Mod", 460.0);
+            if f.name.is_empty() && !r.has_focus() && f.error.is_none() {
+                r.request_focus();
+            }
+            ui.add_space(6.0);
+            let folder = modmake::folder_name(&f.name);
+            ui.label(RichText::new(tr_args(lang, "mk.where", &[&format!("mod/{folder}")])).size(12.0).color(SECONDARY));
+            ui.add_space(12.0);
+            ui.label(RichText::new(tr(lang, "mk.version")).size(12.5).color(SECONDARY));
+            theme::text_field(ui, &mut f.version, "1.0.0", 160.0);
+            ui.label(RichText::new(tr_args(lang, "mk.for", &[&format!("v{compat}.*")])).size(12.0).color(SECONDARY));
+            ui.add_space(12.0);
+            ui.label(RichText::new(tr(lang, "mk.tags")).size(12.5).color(SECONDARY));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for tag in modmake::TAGS {
+                    let on = f.tags.iter().any(|t| t == tag);
+                    if theme::toggle_chip(ui, tag, on).clicked() {
+                        if on {
+                            f.tags.retain(|t| t != tag);
+                        } else {
+                            f.tags.push(tag.to_string());
+                        }
+                    }
+                }
+            });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                switch(ui, &mut f.add_to_playset);
+                ui.label(tr(lang, "mk.add_to_playset"));
+            });
+            if let Some(e) = &f.error {
+                ui.add_space(8.0);
+                ui.label(RichText::new(e).size(12.5).color(RED));
+            }
+            ui.add_space(16.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill_button(ui, tr(lang, "mk.create"), ButtonStyle::Filled(BLUE), !f.name.trim().is_empty()).clicked() {
+                    create = true;
+                }
+                if pill_button(ui, tr(lang, "common.cancel"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || resp.should_close() {
+            self.make = None;
+        } else if create {
+            self.acts.push(Act::CreateMod);
+        }
+    }
+
+    /// The "upload to the Workshop" sheet: what will be sent and where, the visibility, a change note; then the progress and the result.
+    fn upload_sheet(&mut self, ctx: &egui::Context) {
+        let Some(f) = self.upload.as_mut() else { return };
+        let lang = self.lang;
+        let running = f.rx.is_some();
+        let mut close = false;
+        let mut start = false;
+        let mut open: Option<String> = None;
+        let resp = egui::Modal::new(egui::Id::new("upload-mod")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(RichText::new(tr(lang, "up.title")).size(22.0).family(bold()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(&f.m.name).size(15.0).color(LABEL));
+            ui.add_space(10.0);
+            let existing = f.m.remote_file_id.clone();
+            match &existing {
+                Some(id) => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(tr_args(lang, "up.update", &[id])).size(13.0).color(SECONDARY));
+                        if let Ok(n) = id.parse::<u64>() {
+                            if pill_button(ui, tr(lang, "up.open"), ButtonStyle::Plain(BLUE), true).clicked() {
+                                open = Some(workshop::item_url(n));
+                            }
+                        }
+                    });
+                }
+                None => {
+                    ui.label(RichText::new(tr(lang, "up.new")).size(13.0).color(SECONDARY));
+                }
+            }
+            let has_preview = f.m.path.as_ref().is_some_and(|p| p.join("thumbnail.png").is_file() || p.join("thumbnail.jpg").is_file());
+            if !has_preview {
+                ui.label(RichText::new(tr(lang, "up.no_preview")).size(12.5).color(ORANGE));
+            }
+            ui.add_space(14.0);
+            ui.label(RichText::new(tr(lang, "up.visibility")).size(12.5).color(SECONDARY));
+            let mut labels = vec![];
+            if existing.is_some() {
+                labels.push(tr(lang, "up.keep").to_string());
+            }
+            labels.extend(["up.private", "up.friends", "up.unlisted", "up.public"].iter().map(|k| tr(lang, k).to_string()));
+            let offset = if existing.is_some() { 0 } else { 1 };
+            if let Some(i) = segmented(ui, &labels, f.visibility - offset, 480.0) {
+                if !running {
+                    f.visibility = i + offset;
+                }
+            }
+            ui.add_space(12.0);
+            ui.label(RichText::new(tr(lang, "up.note")).size(12.5).color(SECONDARY));
+            theme::text_field(ui, &mut f.note, "", 480.0);
+            ui.add_space(10.0);
+            ui.label(RichText::new(tr(lang, "up.steam_note")).size(12.0).color(SECONDARY));
+            // progress and result
+            if running {
+                ui.add_space(14.0);
+                let (text, frac) = match f.stage {
+                    Some((workshop::Stage::Creating, _, _)) => (tr(lang, "up.creating"), None),
+                    Some((workshop::Stage::Uploading(_), done, total)) if total > 0 => (tr(lang, "up.sending"), Some(done as f32 / total as f32)),
+                    Some((workshop::Stage::Uploading(_), _, _)) => (tr(lang, "up.sending"), None),
+                    _ => (tr(lang, "up.connecting"), None),
+                };
+                ui.label(RichText::new(text).size(13.0).color(LABEL));
+                theme::progress_bar(ui, frac, ui.input(|i| i.time));
+            }
+            match &f.result {
+                Some(Ok(o)) => {
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("✓  {}", tr(lang, "up.done"))).size(14.0).color(GREEN));
+                        if pill_button(ui, tr(lang, "up.open"), ButtonStyle::Plain(BLUE), true).clicked() {
+                            open = Some(workshop::item_url(o.id));
+                        }
+                    });
+                    if o.needs_agreement {
+                        ui.label(RichText::new(tr(lang, "up.agreement")).size(12.5).color(ORANGE));
+                    }
+                }
+                Some(Err(e)) => {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new(e).size(12.5).color(RED));
+                }
+                None => {}
+            }
+            ui.add_space(16.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let finished = matches!(f.result, Some(Ok(_)));
+                if !finished && pill_button(ui, tr(lang, "up.upload"), ButtonStyle::Filled(BLUE), !running).clicked() {
+                    start = true;
+                }
+                let label = if finished { tr(lang, "up.close") } else { tr(lang, "common.cancel") };
+                if pill_button(ui, label, ButtonStyle::Plain(SECONDARY), !running).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if let Some(url) = open {
+            open_link(&url);
+        }
+        if (close || resp.should_close()) && !running {
+            self.upload = None;
+        } else if start {
+            self.acts.push(Act::StartUpload);
+        }
+    }
+
     fn render_page(&mut self, ui: &mut Ui, page: Page) {
         if self.game.is_err() && page != Page::Settings {
             self.page_missing(ui);
