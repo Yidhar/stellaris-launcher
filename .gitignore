@@ -5,3 +5,4 @@ work/
 *.sqlite-*
 __pycache__/
 target/
+package/

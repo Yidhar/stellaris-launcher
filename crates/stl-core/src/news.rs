@@ -9,8 +9,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// The Braze app key the official launcher's cards are stored under.
-const BRAZE_KEY: &str = "0381b29f-827d-4e24-9906-ad99933faa11";
 /// Launcher starts we assume for the cards aimed at a number of them (a returning player).
 const ASSUMED_LAUNCHES: f64 = 100.0;
 
@@ -223,9 +221,10 @@ pub fn parse_braze(json: &str, game_id: &str, platform: &str, now_ms: i64) -> Ve
 pub fn load_account_cards(game_id: &str, platform: &str) -> Vec<Card> {
     let Some(local) = std::env::var_os("LOCALAPPDATA") else { return Vec::new() };
     let dir = PathBuf::from(local).join("Paradox Interactive").join("launcher-v2").join("chromium-data").join("Local Storage").join("leveldb");
-    let key = format!("ab.storage.cc.{BRAZE_KEY}");
-    let values = crate::leveldb::read(&dir, key.as_bytes());
-    let Some(text) = values.iter().find(|(k, _)| k.ends_with(key.as_bytes())).and_then(|(_, v)| crate::leveldb::chromium_string(v)) else { return Vec::new() };
+    // the SDK keeps the cards under `ab.storage.cc.<its app key>` (`ab.storage.ccClicks.…` and the like are other things); the largest
+    // such value is the card list
+    let values = crate::leveldb::read(&dir, b"ab.storage.cc.");
+    let Some(text) = values.iter().max_by_key(|(_, v)| v.len()).and_then(|(_, v)| crate::leveldb::chromium_string(v)) else { return Vec::new() };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
     parse_braze(&text, game_id, platform, now)
 }
