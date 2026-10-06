@@ -27,6 +27,9 @@ enum Cmd {
         /// also list the ones with a problem
         #[arg(long)]
         all: bool,
+        /// say for each whether it keeps Ironman (changes nothing the game checksums)
+        #[arg(long)]
+        ironman: bool,
     },
     /// make a new local mod, or upload one to the Steam Workshop
     Mod {
@@ -268,9 +271,25 @@ fn run() -> Result<()> {
                 println!("  ! {pr}");
             }
         }
-        Cmd::Mods { all } => {
+        Cmd::Mods { all, ironman } => {
             let game = open_game(&cli, &store)?;
             let known = mods::scan(&game.data_dir);
+            if *ironman {
+                let rules = stl_core::ironman::rules(&game.dir);
+                let t0 = std::time::Instant::now();
+                let (mut ok, mut no) = (0, 0);
+                for m in &known {
+                    let r = stl_core::ironman::affects_checksum(m, &rules);
+                    match r {
+                        Some(false) => ok += 1,
+                        Some(true) => no += 1,
+                        None => {}
+                    }
+                    println!("{:<10} {}", match r { Some(false) => "ironman", Some(true) => "checksum", None => "?" }, m.name);
+                }
+                println!("{ok} keep Ironman, {no} change the checksum ({} ms)", t0.elapsed().as_millis());
+                return Ok(());
+            }
             let active = store.active_playset();
             let mut shown = 0;
             for m in &known {

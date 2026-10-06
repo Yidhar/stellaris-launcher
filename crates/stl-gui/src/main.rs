@@ -180,6 +180,7 @@ enum Act {
     UpdatePlugin(String),
     SetModsSort(&'static str),
     SetModsView(&'static str),
+    SetModsFilter(usize),
     OpenUpload(String),
     StartUpload,
 }
@@ -246,6 +247,11 @@ struct App {
     mod_times: std::collections::HashMap<String, Option<std::time::SystemTime>>,
     /// where each mod's cover is, looked up once
     mod_covers: std::collections::HashMap<String, Option<PathBuf>>,
+    /// per mod: does it change the checksum (no Ironman)? Filled on a worker thread; None = its files could not be read
+    ironman: std::collections::HashMap<String, Option<bool>>,
+    ironman_rx: Option<Receiver<(String, Option<bool>)>>,
+    /// the Mods page's filter: 0 all, 1 Ironman-compatible, 2 not
+    mods_filter: usize,
     upload: Option<UploadForm>,
     /// the newest save, for the Continue button
     last_save: Option<Save>,
@@ -344,6 +350,9 @@ impl App {
             pick_upload: false,
             mod_times: std::collections::HashMap::new(),
             mod_covers: std::collections::HashMap::new(),
+            ironman: std::collections::HashMap::new(),
+            ironman_rx: None,
+            mods_filter: 0,
             upload: None,
             last_save: None,
             shown_page: Page::Play,
@@ -380,6 +389,8 @@ impl App {
                 app.dev_then = Page::ALL.get(v.parse::<usize>().unwrap_or(0)).copied();
             } else if let Some(v) = a.strip_prefix("--config=") {
                 app.acts.push(Act::EditConfig(v.to_string()));
+            } else if let Some(v) = a.strip_prefix("--filter=") {
+                app.mods_filter = v.parse().unwrap_or(0);
             } else if a == "--pick" {
                 app.pick_upload = true;
             } else if a == "--make" {
@@ -673,6 +684,42 @@ impl App {
         }
     }
 
+    /// Looks at every mod's files for what the game checksums, on a worker thread (a big mod has thousands of files).
+    fn start_ironman_scan(&mut self) {
+        let Ok(game) = &self.game else { return };
+        if self.ironman_rx.is_some() || !self.ironman.is_empty() {
+            return;
+        }
+        let rules = stl_core::ironman::rules(&game.dir);
+        let list: Vec<Mod> = self.mods.clone();
+        let (tx, rx) = channel();
+        self.ironman_rx = Some(rx);
+        std::thread::spawn(move || {
+            for m in list {
+                let r = stl_core::ironman::affects_checksum(&m, &rules);
+                if tx.send((m.id.clone(), r)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn drain_ironman(&mut self) {
+        let Some(rx) = &self.ironman_rx else { return };
+        loop {
+            match rx.try_recv() {
+                Ok((id, r)) => {
+                    self.ironman.insert(id, r);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.ironman_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     fn drain_upload(&mut self) {
         let mut finished = None;
         if let Some(f) = self.upload.as_mut() {
@@ -932,6 +979,8 @@ impl App {
                 }
                 self.mod_times.clear();
                 self.mod_covers.clear();
+                self.ironman.clear();
+                self.ironman_rx = None;
             }
             Act::CheckUpdates => self.check_updates(),
             Act::SetGraphics(g) => {
@@ -962,6 +1011,7 @@ impl App {
                 self.store.mods_sort = Some(v.to_string());
                 self.save();
             }
+            Act::SetModsFilter(f) => self.mods_filter = f,
             Act::SetModsView(v) => {
                 self.store.mods_view = Some(v.to_string());
                 self.save();
@@ -1619,8 +1669,17 @@ impl App {
         let version = self.game.as_ref().ok().map(|g| g.version().to_string()).unwrap_or_default();
         let sort = self.store.mods_sort.clone().unwrap_or_else(|| "name".into());
         let compact = self.store.mods_view.as_deref() == Some("compact");
+        self.start_ironman_scan();
         let filter = self.filter.to_lowercase();
-        let mut shown: Vec<usize> = (0..self.mods.len()).filter(|&i| filter.is_empty() || self.mods[i].name.to_lowercase().contains(&filter)).collect();
+        let want = self.mods_filter;
+        let mut shown: Vec<usize> = (0..self.mods.len())
+            .filter(|&i| filter.is_empty() || self.mods[i].name.to_lowercase().contains(&filter))
+            .filter(|&i| match want {
+                1 => self.ironman.get(&self.mods[i].id) == Some(&Some(false)),
+                2 => self.ironman.get(&self.mods[i].id) == Some(&Some(true)),
+                _ => true,
+            })
+            .collect();
         match sort.as_str() {
             "updated" => {
                 for m in &self.mods {
@@ -1653,11 +1712,15 @@ impl App {
                 let sorts = [("name", "mods.sort_name"), ("updated", "mods.sort_updated"), ("source", "mods.sort_source")];
                 let labels: Vec<String> = sorts.iter().map(|(_, k)| tr(lang, k).to_string()).collect();
                 let cur = sorts.iter().position(|(v, _)| *v == sort).unwrap_or(0);
-                if let Some(i) = segmented(ui, &labels, cur, 270.0) {
+                if let Some(i) = segmented(ui, &labels, cur, 240.0) {
                     acts.push(Act::SetModsSort(sorts[i].0));
                 }
+                let filters = [tr(lang, "mods.filter_all").to_string(), tr(lang, "mods.filter_ironman").to_string(), tr(lang, "mods.filter_not").to_string()];
+                if let Some(i) = segmented(ui, &filters, want, 250.0) {
+                    acts.push(Act::SetModsFilter(i));
+                }
                 let views = [tr(lang, "mods.view_list").to_string(), tr(lang, "mods.view_compact").to_string()];
-                if let Some(i) = segmented(ui, &views, compact as usize, 160.0) {
+                if let Some(i) = segmented(ui, &views, compact as usize, 140.0) {
                     acts.push(Act::SetModsView(if i == 1 { "compact" } else { "list" }));
                 }
                 if circle_button(ui, Icon::Refresh, theme::white(22), LABEL, true).on_hover_text(tr(lang, "mods.refresh")).clicked() {
@@ -1667,11 +1730,17 @@ impl App {
                     if pill_button(ui, tr(lang, "mods.upload_btn"), ButtonStyle::Tinted(Color32::WHITE), self.game.is_ok()).clicked() {
                         self.pick_upload = true;
                     }
-                    let w = ui.available_width().min(260.0);
+                    let w = ui.available_width().clamp(120.0, 240.0);
                     theme::search_field(ui, &mut self.filter, tr(lang, "mods.search"), w);
                 });
             });
             theme::divider(ui);
+            if self.ironman_rx.is_some() && want != 0 {
+                let done = self.ironman.len().to_string();
+                let all = self.mods.len().to_string();
+                ui.label(RichText::new(tr_args(lang, "mods.checking", &[&done, &all])).size(12.5).color(SECONDARY));
+                ui.add_space(6.0);
+            }
             let row_h = if compact { 40.0 } else { 64.0 };
             plain_rows(ui, "mods-library", row_h, total, |ui, range| {
                 let mut rows = Rows::starting_at(range.start);
@@ -1679,6 +1748,7 @@ impl App {
                     let m = &self.mods[shown[k]];
                     let inside = self.store.playsets[active].mod_pos(&m.id).is_some();
                     let own = m.kind == Kind::Local && m.path.is_some() && m.problem.is_none();
+                    let iron = self.ironman.get(&m.id).cloned();
                     let chips = |ui: &mut Ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let (t, c) = Self::kind_chip(lang, m.kind);
@@ -1688,6 +1758,15 @@ impl App {
                         }
                         if let Some(p) = &m.problem {
                             chip(ui, tr(lang, "mods.unusable"), RED).on_hover_text(p);
+                        }
+                        match iron {
+                            Some(Some(false)) => {
+                                chip(ui, tr(lang, "mods.ironman_ok"), theme::TEAL_TEXT).on_hover_text(tr(lang, "mods.ironman_ok_hint"));
+                            }
+                            Some(Some(true)) => {
+                                chip(ui, tr(lang, "mods.ironman_no"), SECONDARY).on_hover_text(tr(lang, "mods.ironman_no_hint"));
+                            }
+                            _ => {}
                         }
                     };
                     let name_color = if m.problem.is_some() { RED } else { LABEL };
@@ -2117,6 +2196,10 @@ impl eframe::App for App {
         self.drain_news();
         self.drain_upload();
         self.drain_updates();
+        self.drain_ironman();
+        if self.ironman_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
         if self.updates.checking.is_some() || self.updates.installing.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
