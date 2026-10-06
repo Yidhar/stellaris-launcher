@@ -7,6 +7,7 @@ pub mod dlcload;
 pub mod game;
 pub mod gamesettings;
 pub mod import;
+pub mod install;
 pub mod ironman;
 pub mod conflicts;
 pub mod leveldb;

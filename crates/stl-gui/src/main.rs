@@ -3686,9 +3686,46 @@ impl App {
     }
 }
 
+/// `stellaris-launcher.exe --uninstall`, what "Apps & features" runs for a copy unpacked from the zip: asks, removes the registry entries
+/// and the files a release brings, optionally the playsets and settings. A copy the setup installed hands over to the setup's uninstaller.
+fn uninstall() -> eframe::Result<()> {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+    let store = Store::load().ok();
+    let lang = store.as_ref().map(|s| resolve_lang(s, &Game::open(s.game_dir.as_deref().map(std::path::Path::new)).map_err(|e| e.to_string()))).unwrap_or(Lang::En);
+    if stl_core::install::installed_by_setup() {
+        if let Some(u) = stl_core::install::setup_uninstaller() {
+            let _ = std::process::Command::new(u).spawn();
+        }
+        return Ok(());
+    }
+    // --quiet (Windows' QuietUninstallString, scripts): no questions, the playsets and settings are kept
+    if std::env::args().any(|a| a == "--quiet") {
+        let _ = stl_core::install::uninstall_portable(false);
+        return Ok(());
+    }
+    let dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.display().to_string())).unwrap_or_default();
+    let ask = |text: String| MessageDialog::new().set_level(MessageLevel::Warning).set_title("Stellaris Launcher").set_description(text).set_buttons(MessageButtons::YesNo).show() == MessageDialogResult::Yes;
+    if !ask(tr_args(lang, "uninst.confirm", &[&dir])) {
+        return Ok(());
+    }
+    let data = stl_core::paths::app_data_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    let with_data = ask(tr_args(lang, "uninst.data", &[&data]));
+    let text = match stl_core::install::uninstall_portable(with_data) {
+        Ok(()) => tr(lang, "uninst.done").to_string(),
+        Err(e) => format!("{}\n{e:#}", tr(lang, "uninst.failed")),
+    };
+    MessageDialog::new().set_level(MessageLevel::Info).set_title("Stellaris Launcher").set_description(text).set_buttons(MessageButtons::Ok).show();
+    Ok(())
+}
+
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|a| a == "--uninstall") {
+        return uninstall();
+    }
     // after an update: the replaced files; and a release downloaded last time is installed now, before anything is shown
     stl_core::selfupdate::cleanup();
+    // "Apps & features" and App Paths: written on the first start of a copy from the zip, refreshed when its folder or version changes
+    let _ = stl_core::install::register(stl_core::selfupdate::current_version());
     // (--update-sheet, for screenshots while developing, shows the sheet instead)
     let auto = Store::load().map(|s| s.auto_update != Some(false)).unwrap_or(true) && !std::env::args().any(|a| a == "--update-sheet");
     if auto {

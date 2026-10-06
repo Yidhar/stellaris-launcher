@@ -36,6 +36,7 @@ crates/stl-gui     the window (egui, iOS style) over it: theme, i18n (9 language
 | `news`, `net` | the public news-card feed (Braze content cards, anonymous GET over WinHTTP) and the official launcher's cache of it; pictures cached under `%APPDATA%\stellaris-launcher\cache` |
 | `artwork` | background and logo pictures found in the Paradox Launcher's theme cache and Steam's library cache (read only) |
 | `conflicts` | a playset's problems (missing mods and dependencies, outdated whole-file overrides, BOM-renamed definitions, ineffective or duplicated definitions, patches before their target), whole-file and per-definition overrides by each folder's measured rule, and the minimal load order fix — see CONFLICTS.md |
+| `install` | the program's entry in *Apps & features* and App Paths (`HKEY_CURRENT_USER`): written by the setup (`installer/stellaris-launcher.iss`, Inno Setup, per user) or by the first start of a zip copy, whose `--uninstall` removes only the files a release brings |
 | `selfupdate` | the launcher's own updates: latest GitHub release → download + SHA-256 check → staged in `%APPDATA%\stellaris-launcher\update\<version>` → installed next to the exe (running files renamed to `.old`, rolled back on failure) |
 | `leveldb` | a read-only LevelDB reader (tables, journal, snappy) for the official launcher's Local Storage, where it keeps the signed-in account's news cards |
 | `launch` | the sequence: playset → mods → plugin checks → seed files → spawn → wait for the window → load plugins |

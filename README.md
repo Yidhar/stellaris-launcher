@@ -35,6 +35,18 @@ background, checks it against the `.sha256` published beside the zip and keeps i
 bar then shows the release notes and restarts into the new version; or the next start installs it before the window opens. The running exe is
 renamed to `.old` (Windows allows that, not overwriting it) and removed on the following start. Switch it off in Settings → Launcher updates.
 
+## Install
+
+From [the releases](https://github.com/Yidhar/stellaris-launcher/releases):
+
+- **`stellaris-launcher-setup-v….exe`** installs it for your user only (no administrator rights) into
+  `%LOCALAPPDATA%\Programs\Stellaris Launcher`, with a Start menu entry (a desktop one if you tick it) and an uninstaller in
+  *Apps & features*, which asks whether to keep your playsets and settings.
+- **`stellaris-launcher-v….zip`** runs from wherever you unpack it. Its first start adds it to *Apps & features* (and to Win+R as
+  `stellaris-launcher`); uninstalling it there removes only the files the zip brought (`stellaris-launcher.exe --uninstall`).
+
+Either way it then updates itself from the releases (below). Your playsets and settings are in `%APPDATA%\stellaris-launcher`.
+
 ## How it differs from the Paradox Launcher
 
 - Starts `stellaris.exe` directly, as the official launcher does (`-gdpr-compliant`, the game's own `launcher-settings.json`), with the working

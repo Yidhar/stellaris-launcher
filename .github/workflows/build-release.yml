@@ -36,20 +36,39 @@ jobs:
         run: |
           $ver = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
           ./scripts/package_release.ps1 -Version $ver
+      - name: Inno Setup
+        # the same version the setup script is written for (7.1.0), from its own GitHub releases, installed for this user only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download is-7_1_0 -R jrsoftware/issrc -p "innosetup-7.1.0-x64.exe" -D $env:RUNNER_TEMP
+          Start-Process "$env:RUNNER_TEMP\innosetup-7.1.0-x64.exe" -ArgumentList '/VERYSILENT','/CURRENTUSER','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait
+          "ISCC=$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe" >> $env:GITHUB_ENV
+      - name: Setup program
+        shell: pwsh
+        run: ./scripts/package_installer.ps1 -Version ${{ steps.package.outputs.version }}
       - uses: actions/upload-artifact@v4
         with:
           name: stellaris-launcher-${{ steps.package.outputs.version }}
-          path: package/*.zip*
+          path: |
+            package/*.zip*
+            package/*.exe*
       - name: Publish release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: package/*.zip*
+          files: |
+            package/*.zip*
+            package/*.exe*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             A launcher for Stellaris that starts the game itself and manages playsets, mods and DLL plugins. Windows x64, Stellaris 4.5.
-            Unpack and run `stellaris-launcher.exe` (the window) or `stl.exe` (the command line; `stl --help`). `stl import-official` copies your
+            **Setup** (`stellaris-launcher-setup-v….exe`): installs for your user only (no administrator rights) into
+            %LOCALAPPDATA%\Programs\Stellaris Launcher, with a Start menu entry and an uninstaller in Apps & features.
+            **Zip**: unpack and run `stellaris-launcher.exe` (the window) or `stl.exe` (the command line; `stl --help`); its first start
+            adds it to Apps & features too (uninstall removes only its own files). `stl import-official` copies your
             playsets from the Paradox Launcher (its database is only read). Nothing is installed; your data is in `%APPDATA%\stellaris-launcher`.
             The launcher looks for newer releases here, downloads them in the background (checked against the .sha256 beside the zip)
             and installs them when it restarts. See docs/DESIGN.md and docs/PLUGINS.md.
