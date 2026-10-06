@@ -16,6 +16,7 @@ pub const GREEN: Color32 = Color32::from_rgb(48, 209, 88);
 pub const RED: Color32 = Color32::from_rgb(255, 69, 58);
 pub const ORANGE: Color32 = Color32::from_rgb(255, 159, 10);
 pub const PURPLE: Color32 = Color32::from_rgb(191, 90, 242);
+pub const TEAL_TEXT: Color32 = Color32::from_rgb(100, 210, 255);
 pub const LABEL: Color32 = Color32::WHITE;
 /// white at 60 %, 30 %, 18 % (premultiplied)
 pub const SECONDARY: Color32 = Color32::from_rgba_premultiplied(141, 141, 147, 153);

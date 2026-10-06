@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod editor;
 mod i18n;
 mod theme;
 
@@ -41,6 +42,9 @@ struct ConfigEditor {
     index: usize,
     text: String,
     saved: String,
+    /// how the open file is written: its encoding and whether it used CRLF; kept when saving
+    encoding: stl_core::textenc::Encoding,
+    crlf: bool,
     status: Option<(String, bool)>,
 }
 
@@ -48,16 +52,27 @@ impl ConfigEditor {
     fn open(plugin: Plugin) -> ConfigEditor {
         let _ = plugin.ensure_config();
         let files = plugin.config_files();
-        let mut e = ConfigEditor { plugin, files, index: 0, text: String::new(), saved: String::new(), status: None };
+        let mut e = ConfigEditor { plugin, files, index: 0, text: String::new(), saved: String::new(), encoding: stl_core::textenc::Encoding::Utf8, crlf: false, status: None };
         e.load(0);
         e
     }
 
     fn load(&mut self, i: usize) {
         self.index = i;
-        self.text = self.files.get(i).and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+        let t = stl_core::textenc::decode(&self.files.get(i).and_then(|f| std::fs::read(f).ok()).unwrap_or_default());
+        self.text = t.text;
+        self.encoding = t.encoding;
+        self.crlf = t.crlf;
         self.saved = self.text.clone();
         self.status = None;
+    }
+
+    fn save(&mut self) -> Result<(), String> {
+        let f = self.files.get(self.index).ok_or("no file")?;
+        let bytes = stl_core::textenc::encode(&stl_core::textenc::Text { text: self.text.clone(), encoding: self.encoding, crlf: self.crlf }).map_err(|e| format!("{e:#}"))?;
+        std::fs::write(f, bytes).map_err(|e| e.to_string())?;
+        self.saved = self.text.clone();
+        Ok(())
     }
 }
 
@@ -2042,12 +2057,26 @@ fn plugin_status(lang: Lang, game: Option<&Game>, p: &Plugin) -> (String, Color3
     }
 }
 
+struct SlowFrame(Instant, Page);
+
+impl Drop for SlowFrame {
+    fn drop(&mut self) {
+        let ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        if ms > 30.0 && std::env::var_os("STL_FRAME_LOG").is_some() {
+            eprintln!("slow frame: {ms:.0} ms on {:?}", self.1 as usize);
+        }
+    }
+}
+
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 1.0]
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // development: STL_FRAME_LOG=1 prints the frames that took long (with the page on show)
+        let frame_start = Instant::now();
+        let _slow = SlowFrame(frame_start, self.page);
         // a minimised window is 0 x 0: egui asserts on a layout with no height, so there is nothing to build until it is back
         let screen = ctx.screen_rect();
         if screen.width() < 64.0 || screen.height() < 64.0 {
@@ -2180,13 +2209,49 @@ impl App {
                     }
                     ui.add_space(10.0);
                 }
-                let h = (ctx.screen_rect().height() - 360.0).clamp(160.0, 520.0);
+                let name = e.files.get(e.index).and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let syntax = editor::syntax_of(&name);
+                let issues = editor::lint(&e.text, syntax, &editor::LintWords {
+                    json: tr(lang, "cfg.lint_json").into(),
+                    section: tr(lang, "cfg.lint_section").into(),
+                    no_equals: tr(lang, "cfg.lint_no_equals").into(),
+                    no_key: tr(lang, "cfg.lint_no_key").into(),
+                    duplicate: tr(lang, "cfg.lint_duplicate").into(),
+                });
+                let h = (ctx.screen_rect().height() - 420.0).clamp(160.0, 500.0);
+                let font = egui::FontId::monospace(13.5);
+                let mut layouter = |ui: &Ui, text: &str, wrap: f32| {
+                    let job = editor::highlight(text, syntax, &font, wrap);
+                    ui.fonts(|f| f.layout_job(job))
+                };
                 egui::Frame::new().fill(Color32::from_black_alpha(90)).corner_radius(12).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("config-text").max_height(h).auto_shrink([false, false]).show(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(&mut e.text).code_editor().frame(false).desired_width(f32::INFINITY).desired_rows(12));
+                        ui.add(egui::TextEdit::multiline(&mut e.text).code_editor().frame(false).desired_width(f32::INFINITY).desired_rows(12).layouter(&mut layouter));
                     });
                 });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let kind = match syntax {
+                        editor::Syntax::Ini => "INI",
+                        editor::Syntax::Json => "JSON",
+                        editor::Syntax::Plain => "Text",
+                    };
+                    let lines = e.text.lines().count().to_string();
+                    ui.label(RichText::new(format!("{kind}  ·  {}  ·  {}  ·  {}", e.encoding.label(), if e.crlf { "CRLF" } else { "LF" }, tr_args(lang, "cfg.lines", &[&lines]))).size(12.0).color(SECONDARY));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if syntax != editor::Syntax::Plain {
+                            if issues.is_empty() {
+                                ui.label(RichText::new(format!("✓  {}", tr(lang, "cfg.lint_ok"))).size(12.0).color(GREEN));
+                            } else {
+                                ui.label(RichText::new(tr_args(lang, "cfg.lint_count", &[&issues.len().to_string()])).size(12.0).color(ORANGE));
+                            }
+                        }
+                    });
+                });
+                for (line, msg) in issues.iter().take(4) {
+                    ui.label(RichText::new(format!("{}  {msg}", tr_args(lang, "cfg.line", &[&line.to_string()]))).size(12.0).color(ORANGE));
+                }
+                ui.add_space(4.0);
                 if running {
                     ui.label(RichText::new(tr(lang, "cfg.running")).size(12.5).color(ORANGE));
                 }
@@ -2204,7 +2269,7 @@ impl App {
                 let default = e.files.get(e.index).and_then(|f| e.plugin.config_default(f)).filter(|d| d.is_file());
                 if let Some(d) = default {
                     if pill_button(ui, tr(lang, "cfg.revert"), ButtonStyle::Plain(SECONDARY), true).clicked() {
-                        if let Ok(t) = std::fs::read_to_string(&d) {
+                        if let Ok(t) = std::fs::read(&d).map(|b| stl_core::textenc::decode(&b).text) {
                             let substitute = e.plugin.manifest.config.iter().any(|c| c.substitute && e.files.get(e.index).and_then(|f| f.file_name()).is_some_and(|n| n.to_string_lossy() == c.file));
                             e.text = if substitute {
                                 t.replace("{plugin_dir}", &e.plugin.dir.to_string_lossy()).replace("{config_dir}", &e.plugin.config_dir().to_string_lossy())
@@ -2217,14 +2282,9 @@ impl App {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let dirty = e.text != e.saved;
                     if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), dirty && !e.files.is_empty()).clicked() {
-                        if let Some(f) = e.files.get(e.index) {
-                            match std::fs::write(f, &e.text) {
-                                Ok(()) => {
-                                    e.saved = e.text.clone();
-                                    e.status = Some((tr(lang, "cfg.saved").to_string(), true));
-                                }
-                                Err(err) => e.status = Some((format!("{err}"), false)),
-                            }
+                        match e.save() {
+                            Ok(()) => e.status = Some((tr(lang, "cfg.saved").to_string(), true)),
+                            Err(err) => e.status = Some((err, false)),
                         }
                     }
                     let label = if dirty { tr(lang, "cfg.discard") } else { tr(lang, "up.close") };

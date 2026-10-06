@@ -2606,6 +2606,7 @@ dependencies = [
  "eframe",
  "image",
  "rfd",
+ "serde_json",
  "stl-core",
 ]
 

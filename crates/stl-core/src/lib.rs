@@ -19,6 +19,7 @@ pub mod process;
 pub mod saves;
 pub mod script;
 pub mod store;
+pub mod textenc;
 pub mod updates;
 pub mod workshop;
 

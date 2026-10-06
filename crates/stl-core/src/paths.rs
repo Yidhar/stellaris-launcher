@@ -29,8 +29,14 @@ pub fn app_data_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(base).join("stellaris-launcher"))
 }
 
-/// The folders of the Steam libraries that may hold games (`...\steamapps`).
+/// The folders of the Steam libraries that may hold games (`...\steamapps`). Found once per process (it asks the registry through `reg.exe`,
+/// which costs a few process starts; the Mods page asks for every cover it shows).
 pub fn steam_libraries() -> Vec<PathBuf> {
+    static LIBS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    LIBS.get_or_init(find_steam_libraries).clone()
+}
+
+fn find_steam_libraries() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for key in [r"HKCU\Software\Valve\Steam", r"HKLM\SOFTWARE\WOW6432Node\Valve\Steam"] {
         for value in ["SteamPath", "InstallPath"] {
