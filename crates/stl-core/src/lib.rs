@@ -27,6 +27,7 @@ pub mod script;
 pub mod store;
 pub mod textenc;
 pub mod updates;
+pub mod uploadcheck;
 pub mod workshop;
 
 pub use anyhow::{anyhow, bail, Context, Result};

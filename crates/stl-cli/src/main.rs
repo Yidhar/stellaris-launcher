@@ -504,26 +504,92 @@ fn run() -> Result<()> {
                         change_note: note.clone(),
                         existing,
                     };
+                    use stl_core::uploadcheck as uc;
                     println!("{} {} to the Steam Workshop", if existing.is_some() { "update" } else { "new item" }, m.name);
                     println!("  content: {}\n  preview: {}\n  tags: {}", content.display(), preview.as_ref().map(|p| p.display().to_string()).unwrap_or("(none)".into()), m.tags.join(", "));
                     if let Some(id) = existing {
                         println!("  item: {}", stl_core::workshop::item_url(id));
                     }
+                    // the checks: on the disk, then with Steam
+                    let mut pre = uc::local(&m, &up, None);
+                    uc::remote(&game.dir, &mut pre, existing);
+                    let mut found = pre.findings.clone();
+                    found.sort_by(|a, b| b.level.cmp(&a.level));
+                    println!("checks:");
+                    for f in &found {
+                        let tag = match f.level {
+                            uc::Level::Error => "ERROR  ",
+                            uc::Level::Warning => "warning",
+                            uc::Level::Info => "info   ",
+                        };
+                        println!("  {tag} {}", uc::finding_text(f));
+                    }
+                    if pre.blocked() {
+                        bail!("not uploaded: fix the errors above first");
+                    }
                     if !*yes {
                         println!("nothing sent; add --yes to upload");
                         return Ok(());
                     }
+                    // what should not be sent (.git, source art…) stays out: a clean copy goes up instead of the folder
+                    let mut up = up;
+                    let copy = if pre.excluded.is_empty() { None } else { Some(uc::clean_copy(&content)?) };
+                    if let Some(c) = &copy {
+                        up.content = c.clone();
+                    }
                     let mut last = String::new();
-                    let outcome = stl_core::workshop::upload(&game.dir, &up, &mut |id| stl_core::modmake::set_remote_file_id(&m, id), &mut |stage, done, total| {
-                        let line = match stage {
-                            stl_core::workshop::Stage::Uploading(_) if total > 0 => format!("{stage:?} {}%", done * 100 / total),
-                            _ => format!("{stage:?}"),
-                        };
-                        if line != last {
-                            println!("  {line}");
-                            last = line;
+                    let result = stl_core::workshop::upload(
+                        &game.dir,
+                        &up,
+                        &mut |id| {
+                            stl_core::modmake::set_remote_file_id(&m, id)?;
+                            if let Some(c) = &copy {
+                                let _ = std::fs::copy(content.join("descriptor.mod"), c.join("descriptor.mod"));
+                            }
+                            Ok(())
+                        },
+                        &mut |stage, done, total| {
+                            let line = match stage {
+                                stl_core::workshop::Stage::Uploading(_) if total > 0 => format!("{stage:?} {}%", done * 100 / total),
+                                _ => format!("{stage:?}"),
+                            };
+                            if line != last {
+                                println!("  {line}");
+                                last = line;
+                            }
+                        },
+                    );
+                    if let Some(c) = &copy {
+                        uc::remove_clean_copy(c);
+                    }
+                    let outcome = match result {
+                        Ok(o) => o,
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            let err = e.downcast_ref::<stl_core::workshop::UploadError>().cloned();
+                            if let Some(err) = &err {
+                                let x = uc::explain(err, Some(&pre));
+                                eprintln!("{} {}", uc::line_text(&x.headline), uc::line_text(&x.meaning));
+                                for c in &x.causes {
+                                    eprintln!("  likely: {}", uc::line_text(c));
+                                }
+                                for f in &x.fixes {
+                                    eprintln!("  to do:  {}", uc::line_text(f));
+                                }
+                                if let Some(l) = &x.link {
+                                    eprintln!("  {l}");
+                                }
+                            }
+                            // the whole story in a file, to send to whoever helps
+                            let report = uc::report(&m, &up, Some(&pre), Some((&msg, err.as_ref())), None, game.version());
+                            let dir = stl_core::paths::app_data_dir()?.join("logs");
+                            std::fs::create_dir_all(&dir)?;
+                            let file = dir.join(format!("upload-{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)));
+                            std::fs::write(&file, &report)?;
+                            eprintln!("diagnostic report: {}", file.display());
+                            bail!("{msg}");
                         }
-                    })?;
+                    };
                     println!("{} {}", if outcome.created { "created" } else { "updated" }, stl_core::workshop::item_url(outcome.id));
                     if outcome.needs_agreement {
                         println!("the Workshop agreement is not accepted yet: the item stays hidden until you accept it on its page");

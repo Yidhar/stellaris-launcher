@@ -19,7 +19,8 @@ stl import-official                     copy the playsets of the Paradox Launche
 stl playsets / stl playset show|new|use|remove|add|rm|enable|disable|move
 stl mods                                the mods the game can load
 stl mod new <name> [--tags a,b]         make a local mod (folder + both descriptors)
-stl mod upload <mod> [--yes]            upload a local mod to the Steam Workshop (through the running Steam client)
+stl mod upload <mod> [--yes]            check a local mod, then upload it to the Steam Workshop (through the running Steam client);
+                                        .git and source files stay out, and a failure says why and what to do
 stl dlc [enable|disable <name>…]        the installed DLC, switched on/off in the active playset
 stl news [--refresh]                    the news cards of the official launcher's home page
 stl plugin install <folder> [--link]    DLL plugins (see docs/PLUGINS.md); stl plugin enable <id>

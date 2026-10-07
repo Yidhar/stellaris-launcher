@@ -1,5 +1,6 @@
 //! A small HTTP GET over WinHTTP (the system's own client: it brings TLS, the user's proxy settings and certificate store, and costs no crate).
-//! Used for the public news feed and its pictures only; nothing is sent but the request, and cookies are not kept.
+//! Used for the public news feed and its pictures, GitHub releases, and Steam's public item details (a POST of the item id); nothing else
+//! is sent, and cookies are not kept.
 
 use crate::{bail, Context, Result};
 use std::ffi::OsStr;
@@ -46,6 +47,26 @@ impl Drop for Handle {
 
 /// GETs a URL (redirects followed) and returns the body of a 200 answer. `max_bytes` bounds what is read.
 pub fn http_get(url: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>> {
+    request("GET", url, None, timeout_ms, max_bytes)
+}
+
+/// POSTs a form (`a=1&b=2`, already encoded) and returns the body of a 200 answer.
+pub fn http_post_form(url: &str, form: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>> {
+    request("POST", url, Some(form.as_bytes()), timeout_ms, max_bytes)
+}
+
+/// `application/x-www-form-urlencoded` encoding of one value.
+pub fn form_encode(v: &str) -> String {
+    v.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b' ' => "+".to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn request(method: &str, url: &str, form: Option<&[u8]>, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>> {
     let (secure, host, port, path) = split_url(url)?;
     unsafe {
         let session = Handle(WinHttpOpen(wide("stellaris-launcher/0.1").as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, std::ptr::null(), std::ptr::null(), 0));
@@ -60,7 +81,7 @@ pub fn http_get(url: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>>
         let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
         let request = Handle(WinHttpOpenRequest(
             connection.0,
-            wide("GET").as_ptr(),
+            wide(method).as_ptr(),
             wide(&path).as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
@@ -70,7 +91,14 @@ pub fn http_get(url: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>>
         if request.0.is_null() {
             bail!("WinHttpOpenRequest failed");
         }
-        if WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) == 0 {
+        let sent = match form {
+            Some(body) => {
+                let headers = wide("Content-Type: application/x-www-form-urlencoded\r\n");
+                WinHttpSendRequest(request.0, headers.as_ptr(), u32::MAX, body.as_ptr() as *const _, body.len() as u32, body.len() as u32, 0)
+            }
+            None => WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0),
+        };
+        if sent == 0 {
             bail!("request to {host} failed (no network, or the host did not answer)");
         }
         if WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
@@ -117,5 +145,6 @@ mod tests {
         assert_eq!(split_url("http://host:8080").unwrap(), (false, "host".into(), 8080, "/".into()));
         assert!(split_url("ftp://x").is_err());
         assert!(split_url("https:///x").is_err());
+        assert_eq!(form_encode("a b&c=d/é"), "a+b%26c%3Dd%2F%C3%A9");
     }
 }

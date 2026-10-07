@@ -97,6 +97,82 @@ struct ParamStringArray {
     count: i32,
 }
 
+/// The step of an upload that went wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// starting the Steam API
+    Connect,
+    /// `CreateItem`
+    Create,
+    /// `StartItemUpdate`
+    StartUpdate,
+    Title,
+    Description,
+    Content,
+    Preview,
+    Tags,
+    Visibility,
+    /// `SubmitItemUpdate` and the transfer
+    Submit,
+}
+
+/// What went wrong in an upload, for an explanation (`uploadcheck::explain`) and a report: the step, Steam's `EResult` if it gave one, how far
+/// the transfer had come (`EItemUpdateStatus`), and whether the item had already been made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadError {
+    pub step: Step,
+    pub result: Option<i32>,
+    /// the last `EItemUpdateStatus` seen: 1 preparing config, 2 preparing content, 3 uploading content, 4 uploading preview, 5 committing
+    pub status: Option<i32>,
+    /// the item (made now, or the one being updated)
+    pub item: Option<u64>,
+    pub created: bool,
+    pub message: String,
+}
+
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UploadError {}
+
+/// The name Valve gives an `EResult` (`k_EResultInvalidParam`), for reports.
+pub fn eresult_name(r: i32) -> &'static str {
+    match r {
+        1 => "k_EResultOK",
+        2 => "k_EResultFail",
+        3 => "k_EResultNoConnection",
+        5 => "k_EResultInvalidPassword",
+        6 => "k_EResultLoggedInElsewhere",
+        8 => "k_EResultInvalidParam",
+        9 => "k_EResultFileNotFound",
+        10 => "k_EResultBusy",
+        11 => "k_EResultInvalidState",
+        14 => "k_EResultDuplicateName",
+        15 => "k_EResultAccessDenied",
+        16 => "k_EResultTimeout",
+        17 => "k_EResultBanned",
+        20 => "k_EResultServiceUnavailable",
+        21 => "k_EResultNotLoggedOn",
+        24 => "k_EResultInsufficientPrivilege",
+        25 => "k_EResultLimitExceeded",
+        29 => "k_EResultDuplicateRequest",
+        33 => "k_EResultLockingFailed",
+        34 => "k_EResultLogonSessionReplaced",
+        35 => "k_EResultConnectFailed",
+        36 => "k_EResultHandshakeFailed",
+        37 => "k_EResultIOFailure",
+        38 => "k_EResultRemoteDisconnect",
+        44 => "k_EResultServiceReadOnly",
+        53 => "k_EResultDataCorruption",
+        54 => "k_EResultDiskFull",
+        84 => "k_EResultRateLimitExceeded",
+        _ => "",
+    }
+}
+
 const CREATE_ITEM_RESULT: i32 = 3403;
 const SUBMIT_ITEM_UPDATE_RESULT: i32 = 3404;
 
@@ -254,6 +330,8 @@ pub fn check(game_dir: &Path) -> Result<(u32, u64)> {
 
 /// Creates the Workshop item (when `u.existing` is None, after which `on_created` is told its id, so that the caller can write it into the
 /// mod's descriptors before the content is sent) and uploads the content folder, preview, title, tags and change note.
+///
+/// A failure is an `UploadError` (inside the `anyhow` error): the step, Steam's answer, how far it came.
 pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Result<()>, progress: &mut dyn FnMut(Stage, u64, u64)) -> Result<Outcome> {
     if !u.content.is_dir() {
         bail!("the content folder {} does not exist", u.content.display());
@@ -266,8 +344,12 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
     }
     let _one = STEAM.lock().unwrap_or_else(|e| e.into_inner());
     progress(Stage::Connecting, 0, 0);
-    let s = Session::open(game_dir)?;
+    let mut item = u.existing;
     let mut created = false;
+    let fail = |step: Step, result: Option<i32>, status: Option<i32>, item: Option<u64>, created: bool, message: String| -> anyhow::Error {
+        anyhow::Error::new(UploadError { step, result, status, item, created, message })
+    };
+    let s = Session::open(game_dir).map_err(|e| fail(Step::Connect, None, None, item, false, format!("{e:#}")))?;
     let mut needs_agreement = false;
     let id = match u.existing {
         Some(id) => id,
@@ -275,12 +357,13 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
             progress(Stage::Creating, 0, 0);
             let r: CreateItemResult = unsafe {
                 let create: unsafe extern "C" fn(*mut c_void, u32, i32) -> u64 = s.api.f("SteamAPI_ISteamUGC_CreateItem")?;
-                s.wait(create(s.ugc, APP_ID, 0), CREATE_ITEM_RESULT, Duration::from_secs(90), || {})?
+                s.wait(create(s.ugc, APP_ID, 0), CREATE_ITEM_RESULT, Duration::from_secs(90), || {}).map_err(|e| fail(Step::Create, None, None, None, false, format!("{e:#}")))?
             };
             if r.result != 1 {
-                bail!("the Workshop item could not be created: {}", result_text(r.result));
+                return Err(fail(Step::Create, Some(r.result), None, None, false, format!("the Workshop item could not be created: {}", result_text(r.result))));
             }
             created = true;
+            item = Some(r.id);
             needs_agreement |= r.needs_agreement;
             on_created(r.id)?;
             r.id
@@ -293,24 +376,26 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
         let set_str = |name: &str| s.api.f::<unsafe extern "C" fn(*mut c_void, u64, *const c_char) -> bool>(name);
         let handle = start(s.ugc, APP_ID, id);
         if handle == u64::MAX || handle == 0 {
-            bail!("Steam would not start an update of item {id}");
+            return Err(fail(Step::StartUpdate, None, None, item, created, format!("Steam would not start an update of item {id}")));
         }
         let title = cstr(&u.title);
         if !set_str("SteamAPI_ISteamUGC_SetItemTitle")?(s.ugc, handle, title.as_ptr()) {
-            bail!("Steam did not take the title");
+            return Err(fail(Step::Title, None, None, item, created, "Steam did not take the title".into()));
         }
         if created && !u.description.trim().is_empty() {
             let d = cstr(&u.description);
-            set_str("SteamAPI_ISteamUGC_SetItemDescription")?(s.ugc, handle, d.as_ptr());
+            if !set_str("SteamAPI_ISteamUGC_SetItemDescription")?(s.ugc, handle, d.as_ptr()) {
+                return Err(fail(Step::Description, None, None, item, created, "Steam did not take the description".into()));
+            }
         }
         let content = path_str(&u.content);
         if !set_str("SteamAPI_ISteamUGC_SetItemContent")?(s.ugc, handle, content.as_ptr()) {
-            bail!("Steam did not take the content folder");
+            return Err(fail(Step::Content, None, None, item, created, "Steam did not take the content folder".into()));
         }
         if let Some(p) = &u.preview {
             let preview = path_str(p);
             if !set_str("SteamAPI_ISteamUGC_SetItemPreview")?(s.ugc, handle, preview.as_ptr()) {
-                bail!("Steam did not take the preview picture");
+                return Err(fail(Step::Preview, None, None, item, created, "Steam did not take the preview picture".into()));
             }
         }
         if !u.tags.is_empty() {
@@ -318,24 +403,33 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
             let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
             let arr = ParamStringArray { strings: ptrs.as_ptr(), count: ptrs.len() as i32 };
             let tags: unsafe extern "C" fn(*mut c_void, u64, *const ParamStringArray) -> bool = s.api.f("SteamAPI_ISteamUGC_SetItemTags")?;
-            tags(s.ugc, handle, &arr);
+            if !tags(s.ugc, handle, &arr) {
+                return Err(fail(Step::Tags, None, None, item, created, "Steam did not take the tags".into()));
+            }
         }
         let visibility = u.visibility.or(if created { Some(Visibility::Private) } else { None });
         if let Some(v) = visibility {
             let vis: unsafe extern "C" fn(*mut c_void, u64, i32) -> bool = s.api.f("SteamAPI_ISteamUGC_SetItemVisibility")?;
-            vis(s.ugc, handle, v as i32);
+            if !vis(s.ugc, handle, v as i32) {
+                return Err(fail(Step::Visibility, None, None, item, created, "Steam did not take the visibility".into()));
+            }
         }
         let submit: unsafe extern "C" fn(*mut c_void, u64, *const c_char) -> u64 = s.api.f("SteamAPI_ISteamUGC_SubmitItemUpdate")?;
         let note = cstr(&u.change_note);
         let call = submit(s.ugc, handle, if u.change_note.is_empty() { std::ptr::null() } else { note.as_ptr() });
         let status: unsafe extern "C" fn(*mut c_void, u64, *mut u64, *mut u64) -> i32 = s.api.f("SteamAPI_ISteamUGC_GetItemUpdateProgress")?;
-        let r: SubmitItemUpdateResult = s.wait(call, SUBMIT_ITEM_UPDATE_RESULT, Duration::from_secs(3600), || {
+        let mut status_seen: Option<i32> = None;
+        let waited: Result<SubmitItemUpdateResult> = s.wait(call, SUBMIT_ITEM_UPDATE_RESULT, Duration::from_secs(3600), || {
             let (mut done, mut total) = (0u64, 0u64);
             let st = status(s.ugc, handle, &mut done, &mut total);
+            if st > 0 {
+                status_seen = Some(st);
+            }
             progress(Stage::Uploading(st), done, total);
-        })?;
+        });
+        let r = waited.map_err(|e| fail(Step::Submit, None, status_seen, item, created, format!("{e:#}")))?;
         if r.result != 1 {
-            bail!("the upload of item {id} failed: {}", result_text(r.result));
+            return Err(fail(Step::Submit, Some(r.result), status_seen, item, created, format!("the upload of item {id} failed: {}", result_text(r.result))));
         }
         needs_agreement |= r.needs_agreement;
     }

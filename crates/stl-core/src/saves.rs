@@ -47,6 +47,17 @@ pub fn local_time(t: SystemTime) -> Option<(u16, u16, u16, u16, u16)> {
     Some((local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute))
 }
 
+/// Seconds since 1970 as the user's clock shows them, `2026-10-07 14:05` (empty for 0 or a time that cannot be shown).
+pub fn local_time_string(unix_secs: i64) -> String {
+    if unix_secs <= 0 {
+        return String::new();
+    }
+    match local_time(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs as u64)) {
+        Some((y, mo, d, h, mi)) => format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}"),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

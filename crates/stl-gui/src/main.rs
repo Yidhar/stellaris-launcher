@@ -6,6 +6,7 @@ mod assets;
 mod editor;
 mod i18n;
 mod theme;
+mod upload_i18n;
 
 use assets::Assets;
 use eframe::egui::{self, pos2, vec2, Align, Color32, CursorIcon, Layout, Rect, RichText, Sense, Shape, Ui, UiBuilder, Vec2};
@@ -21,7 +22,7 @@ use stl_core::plugins::{self, Compat, Plugin};
 use stl_core::store::Store;
 use stl_core::saves::{self, Save};
 use stl_core::gamesettings::{self, Graphics};
-use stl_core::{modmake, workshop};
+use stl_core::{modmake, uploadcheck, workshop};
 use stl_core::{artwork, dlcload, import, launch, official, pe, process};
 use theme::{bold, chip, circle_button, glass, glass_pane, large_title, pill_button, plain_rows, segmented, stack, switch, ButtonStyle, Icon, Rows, BLUE, GREEN, LABEL, ORANGE, PURPLE, RED, SECONDARY};
 
@@ -89,7 +90,7 @@ struct PluginUpdates {
 
 enum UpMsg {
     Progress(workshop::Stage, u64, u64),
-    Done(Result<workshop::Outcome, String>),
+    Done(Result<workshop::Outcome, (String, Option<workshop::UploadError>)>),
 }
 
 /// The "upload to the Workshop" sheet, and the upload once it runs.
@@ -103,6 +104,17 @@ struct UploadForm {
     rx: Option<Receiver<UpMsg>>,
     stage: Option<(workshop::Stage, u64, u64)>,
     result: Option<Result<workshop::Outcome, String>>,
+    /// the checks before anything is sent: running, then what they found, for which item
+    pre_rx: Option<Receiver<uploadcheck::Preflight>>,
+    pre: Option<uploadcheck::Preflight>,
+    pre_item: Option<u64>,
+    /// upload as soon as the checks pass (the Upload button was pressed before they ran for this item)
+    start_after_check: bool,
+    /// what went wrong, as the upload reported it
+    failure: Option<workshop::UploadError>,
+    /// the upload as it was last sent (for the report)
+    sent: Option<workshop::Upload>,
+    copied_at: f64,
 }
 
 enum Msg {
@@ -191,6 +203,7 @@ enum Act {
     SetModsFilter(usize),
     OpenUpload(String),
     StartUpload,
+    CheckUpload,
 }
 
 /// The requests of a page; shared by the closures that build one row, so it uses a cell.
@@ -357,6 +370,8 @@ struct App {
     dev_popup: Option<String>,
     /// development: run the check on start, then open this sheet (`all`, `sort`, or a mod's position)
     dev_check: Option<String>,
+    /// development: once the upload checks are done, show a failure with this EResult (for screenshots of the explanation)
+    dev_upload_fail: Option<i32>,
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
@@ -468,6 +483,7 @@ impl App {
             focus_playset_filter: false,
             dev_popup: None,
             dev_check: None,
+            dev_upload_fail: None,
             make: None,
             config: None,
             updates: PluginUpdates::default(),
@@ -524,6 +540,8 @@ impl App {
                 app.pick_upload = true;
             } else if a == "--make" {
                 app.make = Some(MakeForm { name: "My New Mod".into(), version: "1.0.0".into(), tags: vec!["Gameplay".into()], add_to_playset: true, error: None });
+            } else if let Some(v) = a.strip_prefix("--upload-fail=") {
+                app.dev_upload_fail = v.parse().ok();
             } else if let Some(v) = a.strip_prefix("--upload=") {
                 if let Some(m) = app.mods.iter().find(|m| m.name.contains(v)) {
                     app.acts.push(Act::OpenUpload(m.id.clone()));
@@ -695,15 +713,9 @@ impl App {
         });
     }
 
-    fn start_upload(&mut self) {
-        let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
-        if f.rx.is_some() {
-            return;
-        }
-        let Some(content) = f.m.path.clone() else {
-            f.result = Some(Err("the mod has no content folder (path=)".into()));
-            return;
-        };
+    /// What the form says to send: the upload, and the item number typed in (None when none was typed).
+    fn form_upload(f: &UploadForm) -> Option<(workshop::Upload, Option<String>)> {
+        let content = f.m.path.clone()?;
         let visibility = match f.visibility {
             1 => Some(workshop::Visibility::Private),
             2 => Some(workshop::Visibility::FriendsOnly),
@@ -711,7 +723,7 @@ impl App {
             4 => Some(workshop::Visibility::Public),
             _ => None,
         };
-        let up = workshop::Upload {
+        let mut up = workshop::Upload {
             title: f.m.name.clone(),
             description: String::new(),
             preview: mods::own_thumbnail(&f.m),
@@ -721,36 +733,125 @@ impl App {
             change_note: f.note.trim().to_string(),
             existing: f.m.remote_file_id.as_deref().and_then(|v| v.parse().ok()),
         };
-        let mut up = up;
         let typed = f.item_id.trim().to_string();
-        let mut record_typed = None;
         if up.existing.is_none() && !typed.is_empty() {
-            match typed.parse::<u64>() {
-                Ok(id) => {
-                    up.existing = Some(id);
-                    record_typed = Some(id);
-                }
-                Err(_) => {
-                    f.result = Some(Err(tr(self.lang, "up.bad_id").to_string()));
-                    return;
-                }
-            }
+            up.existing = typed.parse().ok();
+            return Some((up, Some(typed)));
         }
+        Some((up, None))
+    }
+
+    /// Runs the checks of the upload form (on the disk, then with Steam) on a worker thread.
+    fn check_upload(&mut self) {
+        let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
+        if f.pre_rx.is_some() {
+            return;
+        }
+        let Some((up, typed)) = Self::form_upload(f) else {
+            f.result = Some(Err("the mod has no content folder (path=)".into()));
+            return;
+        };
+        let m = f.m.clone();
+        f.pre_item = up.existing;
+        f.pre = None;
+        let (tx, rx) = channel();
+        f.pre_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut p = uploadcheck::local(&m, &up, typed.as_deref());
+            uploadcheck::remote(&game.dir, &mut p, up.existing);
+            let _ = tx.send(p);
+        });
+    }
+
+    /// The Upload button: checks first when the checks have not run for this item; uploads when nothing stops it.
+    fn start_upload(&mut self) {
+        let Some(f) = self.upload.as_mut() else { return };
+        if f.rx.is_some() {
+            return;
+        }
+        let item = Self::form_upload(f).and_then(|(u, _)| u.existing);
+        if f.pre_rx.is_some() || f.pre.is_none() || f.pre_item != item {
+            f.start_after_check = true;
+            self.check_upload();
+            return;
+        }
+        if f.pre.as_ref().is_some_and(|p| p.blocked()) {
+            return;
+        }
+        self.upload_now();
+    }
+
+    fn upload_now(&mut self) {
+        let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
+        let Some((mut up, typed)) = Self::form_upload(f) else { return };
+        let record_typed = typed.and_then(|t| t.parse::<u64>().ok());
+        // what should not be sent (.git, source art…) stays out: a clean copy goes up instead of the folder
+        let excluded = f.pre.as_ref().is_some_and(|p| !p.excluded.is_empty());
         let m = f.m.clone();
         let (tx, rx) = channel();
         f.rx = Some(rx);
         f.result = None;
+        f.failure = None;
+        f.sent = Some(up.clone());
         std::thread::spawn(move || {
             let tx_p = tx.clone();
-            let r = workshop::upload(&game.dir, &up, &mut |id| modmake::set_remote_file_id(&m, id), &mut |stage, done, total| {
-                let _ = tx_p.send(UpMsg::Progress(stage, done, total));
-            });
+            let original = up.content.clone();
+            let copy = if excluded {
+                match uploadcheck::clean_copy(&original) {
+                    Ok(c) => {
+                        up.content = c.clone();
+                        Some(c)
+                    }
+                    Err(e) => {
+                        let _ = tx.send(UpMsg::Done(Err((format!("cannot make a clean copy of the mod to upload: {e:#}"), None))));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let r = workshop::upload(
+                &game.dir,
+                &up,
+                &mut |id| {
+                    modmake::set_remote_file_id(&m, id)?;
+                    // the copy being sent carries the new number too
+                    if let Some(c) = &copy {
+                        let _ = std::fs::copy(original.join("descriptor.mod"), c.join("descriptor.mod"));
+                    }
+                    Ok(())
+                },
+                &mut |stage, done, total| {
+                    let _ = tx_p.send(UpMsg::Progress(stage, done, total));
+                },
+            );
+            if let Some(c) = &copy {
+                uploadcheck::remove_clean_copy(c);
+            }
             let r = match (r, record_typed) {
                 (Ok(o), Some(id)) => modmake::set_remote_file_id(&m, id).map(|_| o),
                 (r, _) => r,
             };
-            let _ = tx.send(UpMsg::Done(r.map_err(|e| format!("{e:#}"))));
+            let r = r.map_err(|e| (format!("{e:#}"), e.downcast_ref::<workshop::UploadError>().cloned()));
+            let _ = tx.send(UpMsg::Done(r));
         });
+    }
+
+    /// The diagnostic report of the upload form, to copy.
+    fn upload_report(&self) -> String {
+        let Some(f) = &self.upload else { return String::new() };
+        let up = f.sent.clone().or_else(|| Self::form_upload(f).map(|(u, _)| u));
+        let Some(up) = up else { return String::new() };
+        let version = self.game.as_ref().map(|g| g.settings.version.clone()).unwrap_or_default();
+        let failure = match &f.result {
+            Some(Err(msg)) => Some((msg.as_str(), f.failure.as_ref())),
+            _ => None,
+        };
+        let outcome = match &f.result {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        uploadcheck::report(&f.m, &up, f.pre.as_ref(), failure, outcome, &version)
     }
 
     /// Asks GitHub about every plugin that names a repository, on a worker thread.
@@ -1044,7 +1145,22 @@ impl App {
 
     fn drain_upload(&mut self) {
         let mut finished = None;
+        let mut go = false;
+        let fake = self.dev_upload_fail;
         if let Some(f) = self.upload.as_mut() {
+            if let Some(rx) = &f.pre_rx {
+                if let Ok(p) = rx.try_recv() {
+                    f.pre_rx = None;
+                    go = std::mem::take(&mut f.start_after_check) && !p.blocked();
+                    if let Some(code) = fake {
+                        let item = f.pre_item;
+                        f.failure = Some(workshop::UploadError { step: workshop::Step::Submit, result: Some(code), status: Some(5), item, created: false, message: format!("the upload failed: EResult {code}") });
+                        f.result = Some(Err(format!("the upload failed: EResult {code}")));
+                        go = false;
+                    }
+                    f.pre = Some(p);
+                }
+            }
             if let Some(rx) = &f.rx {
                 while let Ok(m) = rx.try_recv() {
                     match m {
@@ -1057,15 +1173,24 @@ impl App {
                 f.rx = None;
                 let line = match &r {
                     Ok(o) => format!("uploaded {} to {}", f.m.name, workshop::item_url(o.id)),
-                    Err(e) => format!("could not upload {}: {e}", f.m.name),
+                    Err((e, _)) => format!("could not upload {}: {e}", f.m.name),
                 };
-                f.result = Some(r);
+                f.result = Some(match r {
+                    Ok(o) => Ok(o),
+                    Err((msg, err)) => {
+                        f.failure = err;
+                        Err(msg)
+                    }
+                });
                 self.log.push(line);
                 // the descriptors may carry the new item's id now
                 if let Ok(g) = &self.game {
                     self.mods = mods::scan(&g.data_dir);
                 }
             }
+        }
+        if go {
+            self.upload_now();
         }
     }
 
@@ -1324,11 +1449,28 @@ impl App {
             Act::OpenUpload(id) => {
                 if let Some(m) = self.mods.iter().find(|m| m.id == id) {
                     let existing = m.remote_file_id.is_some();
-                    self.upload = Some(UploadForm { m: m.clone(), visibility: if existing { 0 } else { 1 }, note: String::new(), item_id: String::new(), rx: None, stage: None, result: None });
+                    self.upload = Some(UploadForm {
+                        m: m.clone(),
+                        visibility: if existing { 0 } else { 1 },
+                        note: String::new(),
+                        item_id: String::new(),
+                        rx: None,
+                        stage: None,
+                        result: None,
+                        pre_rx: None,
+                        pre: None,
+                        pre_item: None,
+                        start_after_check: false,
+                        failure: None,
+                        sent: None,
+                        copied_at: -10.0,
+                    });
                     self.pick_upload = false;
+                    self.check_upload();
                 }
             }
             Act::StartUpload => self.start_upload(),
+            Act::CheckUpload => self.check_upload(),
             Act::RescanMods => {
                 if let Ok(g) = &self.game {
                     self.mods = mods::scan(&g.data_dir);
@@ -3294,12 +3436,25 @@ impl App {
 
     /// The "upload to the Workshop" sheet: what will be sent and where, the visibility, a change note; then the progress and the result.
     fn upload_sheet(&mut self, ctx: &egui::Context) {
+        let report = self.upload_report();
         let Some(f) = self.upload.as_mut() else { return };
         let lang = self.lang;
         let running = f.rx.is_some();
+        let checking = f.pre_rx.is_some();
         let mut close = false;
         let mut start = false;
+        let mut recheck = false;
         let mut open: Option<String> = None;
+        let now = ctx.input(|i| i.time);
+        if checking {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        // the sheet fits the window: what is above the checks and the buttons below take about 560 points; the checks and an explanation of
+        // a failure share the rest, each scrolling on its own
+        let room = (ctx.screen_rect().height() - 560.0).clamp(140.0, 560.0);
+        let failed_now = matches!(f.result, Some(Err(_)));
+        let checks_h = if failed_now { (room * 0.3).max(70.0) } else { room };
+        let explain_h = (room - checks_h).max(120.0);
         let resp = egui::Modal::new(egui::Id::new("upload-mod")).frame(Self::sheet_frame()).show(ctx, |ui| {
             ui.set_width(480.0);
             ui.label(RichText::new(tr(lang, "up.title")).size(22.0).family(bold()));
@@ -3352,6 +3507,36 @@ impl App {
             theme::text_field(ui, &mut f.note, "", 480.0);
             ui.add_space(10.0);
             ui.label(RichText::new(tr(lang, "up.steam_note")).size(12.0).color(SECONDARY));
+            // what the checks found: red stops the upload, orange is worth a look, grey is for information
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr(lang, "up.checks")).size(12.5).color(SECONDARY));
+                if checking {
+                    ui.label(RichText::new(tr(lang, "up.checking")).size(12.5).color(SECONDARY));
+                } else if !running && ui.add(egui::Label::new(RichText::new(tr(lang, "up.recheck")).size(12.5).color(BLUE)).sense(Sense::click())).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    recheck = true;
+                }
+            });
+            if let Some(p) = &f.pre {
+                let mut found: Vec<&uploadcheck::Finding> = p.findings.iter().collect();
+                found.sort_by(|a, b| b.level.cmp(&a.level));
+                egui::ScrollArea::vertical().id_salt("upload-checks").max_height(checks_h).show(ui, |ui| {
+                    for x in found {
+                        let color = match x.level {
+                            uploadcheck::Level::Error => RED,
+                            uploadcheck::Level::Warning => ORANGE,
+                            uploadcheck::Level::Info => SECONDARY,
+                        };
+                        ui.horizontal_top(|ui| {
+                            ui.label(RichText::new("●").size(10.0).color(color));
+                            ui.add(egui::Label::new(RichText::new(upload_i18n::text(lang, x.key, &x.args)).size(12.5).color(if x.level == uploadcheck::Level::Info { SECONDARY } else { LABEL })).wrap());
+                        });
+                    }
+                });
+                if p.blocked() {
+                    ui.label(RichText::new(tr(lang, "up.blocked")).size(12.5).color(RED));
+                }
+            }
             // progress and result
             if running {
                 ui.add_space(14.0);
@@ -3379,19 +3564,58 @@ impl App {
                 }
                 Some(Err(e)) => {
                     ui.add_space(14.0);
-                    ui.label(RichText::new(e).size(12.5).color(RED));
+                    match &f.failure {
+                        Some(err) => egui::ScrollArea::vertical().id_salt("upload-explain").max_height(explain_h).show(ui, |ui| {
+                            // what happened, why it probably happened here, and what to do
+                            let x = uploadcheck::explain(err, f.pre.as_ref());
+                            let t = |l: &uploadcheck::Line| upload_i18n::text(lang, l.key, &l.args);
+                            ui.add(egui::Label::new(RichText::new(t(&x.headline)).size(14.0).family(bold()).color(RED)).wrap());
+                            ui.add(egui::Label::new(RichText::new(t(&x.meaning)).size(12.5).color(LABEL)).wrap());
+                            if !x.causes.is_empty() {
+                                ui.add_space(6.0);
+                                ui.label(RichText::new(tr(lang, "up.causes")).size(12.5).color(SECONDARY));
+                                for c in &x.causes {
+                                    ui.add(egui::Label::new(RichText::new(format!("•  {}", t(c))).size(12.5)).wrap());
+                                }
+                            }
+                            if !x.fixes.is_empty() {
+                                ui.add_space(6.0);
+                                ui.label(RichText::new(tr(lang, "up.todo")).size(12.5).color(SECONDARY));
+                                for c in &x.fixes {
+                                    ui.add(egui::Label::new(RichText::new(format!("•  {}", t(c))).size(12.5)).wrap());
+                                }
+                            }
+                            if let Some(url) = &x.link {
+                                if pill_button(ui, tr(lang, "up.open_agreement"), ButtonStyle::Plain(BLUE), true).clicked() {
+                                    open = Some(url.clone());
+                                }
+                            }
+                        }).inner,
+                        None => {
+                            ui.add(egui::Label::new(RichText::new(e).size(12.5).color(RED)).wrap());
+                        }
+                    }
                 }
                 None => {}
             }
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let finished = matches!(f.result, Some(Ok(_)));
-                if !finished && pill_button(ui, tr(lang, "up.upload"), ButtonStyle::Filled(BLUE), !running).clicked() {
+                let failed = matches!(f.result, Some(Err(_)));
+                let blocked = f.pre.as_ref().is_some_and(|p| p.blocked()) && !checking;
+                let label = if failed { tr(lang, "up.retry") } else { tr(lang, "up.upload") };
+                if !finished && pill_button(ui, label, ButtonStyle::Filled(BLUE), !running && !blocked).clicked() {
                     start = true;
                 }
                 let label = if finished { tr(lang, "up.close") } else { tr(lang, "common.cancel") };
                 if pill_button(ui, label, ButtonStyle::Plain(SECONDARY), !running).clicked() {
                     close = true;
+                }
+                // everything about this upload, to send to whoever helps
+                let copy_label = if now - f.copied_at < 2.0 { tr(lang, "up.copied") } else { tr(lang, "up.copy_report") };
+                if pill_button(ui, copy_label, ButtonStyle::Plain(BLUE), !report.is_empty()).clicked() {
+                    ui.ctx().copy_text(report.clone());
+                    f.copied_at = now;
                 }
             });
         });
@@ -3402,6 +3626,8 @@ impl App {
             self.upload = None;
         } else if start {
             self.acts.push(Act::StartUpload);
+        } else if recheck {
+            self.acts.push(Act::CheckUpload);
         }
     }
 
