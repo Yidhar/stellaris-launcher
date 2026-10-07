@@ -66,7 +66,7 @@ Either way it then updates itself from the releases (below). Your playsets and s
 
 What was found in the official launcher while taking it apart — how it starts the game, where its data lives, 16 problems people run into — is in
 [docs/FINDINGS.md](docs/FINDINGS.md) and [docs/PROBLEMS.md](docs/PROBLEMS.md). The design is in [docs/DESIGN.md](docs/DESIGN.md), the plugin
-manifest in [docs/PLUGINS.md](docs/PLUGINS.md).
+manifest in [docs/PLUGINS.md](docs/PLUGINS.md), and how to write a plugin in [docs/PLUGIN_HANDBOOK.md](docs/PLUGIN_HANDBOOK.md).
 
 ## Build
 

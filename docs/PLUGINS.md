@@ -1,5 +1,9 @@
 # DLL plugins (spec, schema 2)
 
+> Writing a plugin? The developer handbook, [PLUGIN_HANDBOOK.md](PLUGIN_HANDBOOK.md) (in Chinese), walks through it end to end: a ten-minute
+> start, the rules for the DLL (`DllMain`, threads, coexisting with other plugins), game-build compatibility, packaging, releases and updates,
+> a checklist, a C++ template that is tested in the game, and a JSON Schema for the manifest. This page is the compact reference.
+
 A plugin is a native Windows DLL that is loaded into `stellaris.exe` (hooks, tools, a bridge to something outside). The launcher keeps a list of
 them, says which belong to which playset, checks that each was made for the installed game build, makes its settings files, lets the user edit
 them, and loads the plugin when the game is up.
