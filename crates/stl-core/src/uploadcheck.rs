@@ -713,6 +713,17 @@ pub fn explain(e: &UploadError, pre: Option<&Preflight>) -> Explanation {
             retry = true;
         }
     }
+    // Steam's own log names the reason the EResult does not
+    if let Some(r) = &e.steam_log {
+        let lower = r.to_lowercase();
+        if ["timeout", "timed out", "connect", "network", "http", "socket"].iter().any(|w| lower.contains(w)) {
+            // known now: not the files
+            causes.retain(|c| c.key != "c.content_problem" && c.key != "pf.long_paths" && c.key != "c.generic");
+            causes.insert(0, line("c.steam_network", &[]));
+            fixes.insert(0, line("f.check_network", &[]));
+        }
+        causes.insert(0, line("c.steam_log", &[r]));
+    }
     if e.created && e.step != Step::Create {
         fixes.push(line("f.created_item", &[&item]));
     }
@@ -837,6 +848,9 @@ pub fn english(key: &str) -> &'static str {
         "f.fix_preview" => "Save thumbnail.png again as a PNG or JPG of under 1 MB and try again.",
         "f.copy_report" => "If it keeps failing, copy the diagnostic report and send it to whoever helps you.",
         "f.created_item" => "Item {0} was created before the failure (it is private) and its number is in the descriptors: trying again updates it instead of making another.",
+        "c.steam_log" => "Steam's own log says: {0}.",
+        "c.steam_network" => "That is the connection between Steam and its file servers timing out, not a problem with the mod: a proxy, VPN or firewall in between is the usual cause.",
+        "f.check_network" => "Let Steam connect directly (turn the proxy or VPN off for it, or change its route), restart Steam, then try again.",
         "c.descriptor_write" => "The Workshop item was made, but its number could not be written into the mod's descriptors (a file in use, or read-only).",
         "f.created_not_written" => "Item {0} exists (private) and the launcher remembers it: trying again updates it instead of making another.",
         "j.interrupted" => "The last upload of this mod (started {0}) did not finish.",
@@ -899,7 +913,7 @@ pub const KEYS: &[&str] = &[
     "c.content_problem", "c.generic",
     "f.start_steam", "f.ask_contributor", "f.accept_agreement", "f.check_fields", "f.check_paths", "f.free_cloud", "f.support", "f.wait_days",
     "f.open_item", "f.rename", "f.retry_later", "f.clear_id", "f.shorten_title", "f.fix_preview", "f.copy_report", "f.created_item",
-    "c.descriptor_write", "f.created_not_written", "j.interrupted", "j.created", "v.unchecked", "v.updated", "v.not_updated", "v.visibility",
+    "c.steam_log", "c.steam_network", "f.check_network", "c.descriptor_write", "f.created_not_written", "j.interrupted", "j.created", "v.unchecked", "v.updated", "v.not_updated", "v.visibility",
     "v.visibility_differs", "v.title_differs", "v.size", "v.agreement", "vis.public", "vis.friends", "vis.private", "vis.unlisted", "vis.unknown",
 ];
 
@@ -961,6 +975,7 @@ pub fn report(m: &Mod, u: &Upload, pre: Option<&Preflight>, failure: Option<(&st
             add(format!("message: {}", private(message)));
             if let Some(e) = err {
                 add(format!("step: {:?} · EResult: {} · transfer phase: {} · item: {} · created now: {}", e.step, e.result.map(|r| format!("{r} {}", workshop::eresult_name(r))).unwrap_or("-".into()), e.status.map(|s| s.to_string()).unwrap_or("-".into()), e.item.map(|i| i.to_string()).unwrap_or("-".into()), e.created));
+                add(format!("steam log: {}", e.steam_log.as_deref().unwrap_or("-")));
                 let x = explain(e, pre);
                 add(format!("what happened: {} {}", line_text(&x.headline), line_text(&x.meaning)));
                 for c in &x.causes {
@@ -1072,7 +1087,7 @@ mod tests {
         let up = upload_of(&m);
         let mut pre = Preflight::default();
         pre.findings.push(finding(Level::Warning, "pf.item_other_owner", &[&42, &7656u64]));
-        let err = UploadError { step: Step::Submit, result: Some(15), status: Some(5), item: Some(42), created: false, message: "the upload of item 42 failed".into() };
+        let err = UploadError { step: Step::Submit, result: Some(15), status: Some(5), item: Some(42), created: false, message: "the upload of item 42 failed".into(), steam_log: None };
         let r = report(&m, &up, Some(&pre), Some((&err.message, Some(&err))), None, "Cygnus v4.5.2");
         assert!(r.contains("[result] FAILED"));
         assert!(r.contains("EResult: 15 k_EResultAccessDenied"));
@@ -1086,7 +1101,7 @@ mod tests {
 
     #[test]
     fn explains_failures_with_what_the_checks_found() {
-        let err = |step, result, status, created| UploadError { step, result, status, item: Some(42), created, message: String::new() };
+        let err = |step, result, status, created| UploadError { step, result, status, item: Some(42), created, message: String::new(), steam_log: None };
         let mut pre = Preflight::default();
         pre.findings.push(finding(Level::Warning, "pf.item_other_owner", &[&42, &7656u64]));
         // access denied on an item someone else made: that comes first, with the owner
@@ -1102,6 +1117,11 @@ mod tests {
         assert!(y.fixes.iter().any(|f| f.key == "f.created_item"));
         // Steam busy: try again
         assert!(explain(&err(Step::Create, Some(16), None, false), None).retry);
+        // a timeout in Steam's log: the network, not the files
+        let z = explain(&UploadError { steam_log: Some("Timeout uploading manifest (size 773)".into()), ..err(Step::Submit, Some(2), Some(3), false) }, None);
+        let keys: Vec<&str> = z.causes.iter().map(|c| c.key).collect();
+        assert_eq!(keys, vec!["c.steam_log", "c.steam_network"]);
+        assert_eq!(z.fixes[0].key, "f.check_network");
         // every key has words
         for k in KEYS {
             assert!(!english(k).is_empty(), "{k}");

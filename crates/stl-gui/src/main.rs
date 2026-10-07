@@ -1160,7 +1160,7 @@ impl App {
                     go = std::mem::take(&mut f.start_after_check) && !p.blocked();
                     if let Some(code) = fake {
                         let item = f.pre_item;
-                        f.failure = Some(workshop::UploadError { step: workshop::Step::Submit, result: Some(code), status: Some(5), item, created: false, message: format!("the upload failed: EResult {code}") });
+                        f.failure = Some(workshop::UploadError { step: workshop::Step::Submit, result: Some(code), status: Some(5), item, created: false, message: format!("the upload failed: EResult {code}"), steam_log: None });
                         f.result = Some(Err(format!("the upload failed: EResult {code}")));
                         go = false;
                     }

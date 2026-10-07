@@ -47,6 +47,15 @@ fn registry_string(local_machine: bool, key: &str, value: &str) -> Option<String
     (!s.is_empty()).then_some(s)
 }
 
+/// Steam's own folder (its logs are under it).
+pub fn steam_root() -> Option<PathBuf> {
+    [(false, r"Software\Valve\Steam", "SteamPath"), (true, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath")]
+        .into_iter()
+        .filter_map(|(machine, key, value)| registry_string(machine, key, value))
+        .map(|p| PathBuf::from(p.replace('/', "\\")))
+        .find(|p| p.is_dir())
+}
+
 /// The folders of the Steam libraries that may hold games (`...\steamapps`). Found once per process (the Mods page asks for every cover it
 /// shows).
 pub fn steam_libraries() -> Vec<PathBuf> {

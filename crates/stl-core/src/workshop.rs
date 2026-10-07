@@ -172,6 +172,8 @@ pub struct UploadError {
     pub item: Option<u64>,
     pub created: bool,
     pub message: String,
+    /// why Steam's own log (`logs\workshop_log.txt`) says the upload failed: the `EResult` is often only "failed"
+    pub steam_log: Option<String>,
 }
 
 impl std::fmt::Display for UploadError {
@@ -181,6 +183,40 @@ impl std::fmt::Display for UploadError {
 }
 
 impl std::error::Error for UploadError {}
+
+fn steam_log_path() -> Option<PathBuf> {
+    crate::paths::steam_root().map(|r| r.join("logs").join("workshop_log.txt"))
+}
+
+fn steam_log_len() -> u64 {
+    steam_log_path().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Why Steam's log says the upload of item `id` failed, among what it wrote after byte `since` (Steam may write it a moment after it
+/// answers, so it is waited for a little).
+pub fn steam_log_reason(id: u64, since: u64) -> Option<String> {
+    let path = steam_log_path()?;
+    for _ in 0..10 {
+        if let Ok(bytes) = std::fs::read(&path) {
+            // a log Steam started over is read whole
+            let from = if (since as usize) <= bytes.len() { since as usize } else { 0 };
+            if let Some(r) = log_reason(&String::from_utf8_lossy(&bytes[from..]), id) {
+                return Some(r);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    None
+}
+
+/// `[time] [AppID 281990] Upload workshop item 3815197025 failed (Timeout uploading manifest (size 773))` gives what is in the brackets.
+fn log_reason(text: &str, id: u64) -> Option<String> {
+    let needle = format!("workshop item {id} failed (");
+    let line = text.lines().rev().find(|l| l.contains(&needle))?;
+    let rest = &line[line.find(&needle)? + needle.len()..];
+    let reason = rest.trim_end().strip_suffix(')').unwrap_or(rest).trim();
+    (!reason.is_empty()).then(|| reason.to_string())
+}
 
 /// The name Valve gives an `EResult` (`k_EResultInvalidParam`), for reports.
 pub fn eresult_name(r: i32) -> &'static str {
@@ -391,8 +427,11 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let mut item = u.existing;
     let mut created = false;
+    // what Steam's log says about this upload is what it wrote after this point
+    let log_mark = steam_log_len();
     let fail = |step: Step, result: Option<i32>, status: Option<i32>, item: Option<u64>, created: bool, message: String| -> anyhow::Error {
-        anyhow::Error::new(UploadError { step, result, status, item, created, message })
+        let steam_log = if step == Step::Submit { item.and_then(|id| steam_log_reason(id, log_mark)) } else { None };
+        anyhow::Error::new(UploadError { step, result, status, item, created, message, steam_log })
     };
     let s = Session::open(game_dir).map_err(|e| fail(Step::Connect, None, None, item, false, format!("{e:#}")))?;
     let mut needs_agreement = false;
@@ -543,6 +582,14 @@ pub fn details(game_dir: &Path, id: u64) -> Result<ItemDetails> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_why_steam_says_an_upload_failed() {
+        let log = "[2026-10-07 19:40:25] [AppID 281990] Upload starting for workshop item 3815197025 by AppID 281990\n\
+                   [2026-10-07 19:40:32] [AppID 281990] Upload workshop item 3815197025 failed (Timeout uploading manifest (size 773))\n";
+        assert_eq!(log_reason(log, 3815197025).as_deref(), Some("Timeout uploading manifest (size 773)"));
+        assert_eq!(log_reason(log, 1), None);
+    }
 
     #[test]
     fn callback_layouts_are_the_steam_ones() {
