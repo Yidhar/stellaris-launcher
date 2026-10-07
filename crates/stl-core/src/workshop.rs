@@ -59,6 +59,50 @@ pub struct Outcome {
     pub created: bool,
     /// the user has not accepted the Workshop agreement yet: the item stays hidden until they do (on its page)
     pub needs_agreement: bool,
+    /// what Steam says about the item right after the upload (None when it would not say)
+    pub details: Option<ItemDetails>,
+    /// when the upload started (seconds since 1970), to tell whether Steam's copy is the new one
+    pub started: i64,
+}
+
+/// An item as Steam's client shows it to its owner (private items too): from `SteamUGCDetails_t`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ItemDetails {
+    pub id: u64,
+    pub result: i32,
+    pub app_id: u32,
+    pub title: String,
+    pub owner: u64,
+    pub created: u32,
+    pub updated: u32,
+    /// `ERemoteStoragePublishedFileVisibility`: 0 public, 1 friends, 2 private, 3 unlisted
+    pub visibility: i32,
+    pub banned: bool,
+    pub file_size: i32,
+}
+
+// `SteamUGCDetails_t` (Steamworks, 8-byte packing on Windows): the offsets of the fields read. The struct only ever grew at its end, so a
+// buffer far larger than it is filled and these are read from it.
+const D_ID: usize = 0;
+const D_RESULT: usize = 8;
+const D_CONSUMER_APP: usize = 20;
+const D_TITLE: usize = 24; // char[129]
+const D_OWNER: usize = 8160; // after char[8000] of description, aligned to 8
+const D_CREATED: usize = 8168;
+const D_UPDATED: usize = 8172;
+const D_VISIBILITY: usize = 8180;
+const D_BANNED: usize = 8184;
+const D_FILE_SIZE: usize = 9492;
+const UGC_QUERY_COMPLETED: i32 = 3401;
+
+#[repr(C)]
+#[derive(Default)]
+struct QueryCompleted {
+    handle: u64,
+    result: i32,
+    returned: u32,
+    total: u32,
+    cached: bool,
 }
 
 pub fn item_url(id: u64) -> String {
@@ -344,6 +388,7 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
     }
     let _one = STEAM.lock().unwrap_or_else(|e| e.into_inner());
     progress(Stage::Connecting, 0, 0);
+    let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let mut item = u.existing;
     let mut created = false;
     let fail = |step: Step, result: Option<i32>, status: Option<i32>, item: Option<u64>, created: bool, message: String| -> anyhow::Error {
@@ -365,7 +410,9 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
             created = true;
             item = Some(r.id);
             needs_agreement |= r.needs_agreement;
-            on_created(r.id)?;
+            if let Err(e) = on_created(r.id) {
+                return Err(fail(Step::Create, None, None, item, true, format!("item {} was made, but its number could not be recorded: {e:#}", r.id)));
+            }
             r.id
         }
     };
@@ -434,7 +481,63 @@ pub fn upload(game_dir: &Path, u: &Upload, on_created: &mut dyn FnMut(u64) -> Re
         needs_agreement |= r.needs_agreement;
     }
     progress(Stage::Done, 0, 0);
-    Ok(Outcome { id, created, needs_agreement })
+    // what Steam has now, to check the upload landed (its own client sees private items too)
+    let details = query_details(&s, id).ok();
+    Ok(Outcome { id, created, needs_agreement, details, started })
+}
+
+fn read_u32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+}
+
+fn query_details(s: &Session, id: u64) -> Result<ItemDetails> {
+    unsafe {
+        let create: unsafe extern "C" fn(*mut c_void, *const u64, u32) -> u64 = s.api.f("SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest")?;
+        let cached: unsafe extern "C" fn(*mut c_void, u64, u32) -> bool = s.api.f("SteamAPI_ISteamUGC_SetAllowCachedResponse")?;
+        let send: unsafe extern "C" fn(*mut c_void, u64) -> u64 = s.api.f("SteamAPI_ISteamUGC_SendQueryUGCRequest")?;
+        let get: unsafe extern "C" fn(*mut c_void, u64, u32, *mut u8) -> bool = s.api.f("SteamAPI_ISteamUGC_GetQueryUGCResult")?;
+        let release: unsafe extern "C" fn(*mut c_void, u64) -> bool = s.api.f("SteamAPI_ISteamUGC_ReleaseQueryUGCRequest")?;
+        let ids = [id];
+        let handle = create(s.ugc, ids.as_ptr(), 1);
+        if handle == u64::MAX {
+            bail!("Steam would not make the query");
+        }
+        cached(s.ugc, handle, 0);
+        let done: Result<QueryCompleted> = s.wait(send(s.ugc, handle), UGC_QUERY_COMPLETED, Duration::from_secs(30), || {});
+        let out = (|| {
+            let q = done?;
+            if q.result != 1 || q.returned == 0 {
+                bail!("Steam answered the query with EResult {}", q.result);
+            }
+            let mut buf = vec![0u8; 32 * 1024];
+            if !get(s.ugc, handle, 0, buf.as_mut_ptr()) {
+                bail!("Steam gave no details of item {id}");
+            }
+            let title_bytes = &buf[D_TITLE..D_TITLE + 129];
+            let end = title_bytes.iter().position(|&c| c == 0).unwrap_or(129);
+            Ok(ItemDetails {
+                id: u64::from_le_bytes(buf[D_ID..D_ID + 8].try_into().unwrap()),
+                result: read_u32(&buf, D_RESULT) as i32,
+                app_id: read_u32(&buf, D_CONSUMER_APP),
+                title: String::from_utf8_lossy(&title_bytes[..end]).to_string(),
+                owner: u64::from_le_bytes(buf[D_OWNER..D_OWNER + 8].try_into().unwrap()),
+                created: read_u32(&buf, D_CREATED),
+                updated: read_u32(&buf, D_UPDATED),
+                visibility: read_u32(&buf, D_VISIBILITY) as i32,
+                banned: buf[D_BANNED] != 0,
+                file_size: read_u32(&buf, D_FILE_SIZE) as i32,
+            })
+        })();
+        release(s.ugc, handle);
+        out
+    }
+}
+
+/// What Steam's client says about an item (the owner sees private items too).
+pub fn details(game_dir: &Path, id: u64) -> Result<ItemDetails> {
+    let _one = STEAM.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::open(game_dir)?;
+    query_details(&s, id)
 }
 
 #[cfg(test)]

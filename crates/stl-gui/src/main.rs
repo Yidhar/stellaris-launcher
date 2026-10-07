@@ -793,6 +793,7 @@ impl App {
         f.result = None;
         f.failure = None;
         f.sent = Some(up.clone());
+        uploadcheck::journal_start(&m.id, up.existing);
         std::thread::spawn(move || {
             let tx_p = tx.clone();
             let original = up.content.clone();
@@ -814,6 +815,8 @@ impl App {
                 &game.dir,
                 &up,
                 &mut |id| {
+                    // remembered first: if anything after this fails, the next try still finds the item
+                    uploadcheck::journal_created(&m.id, id);
                     modmake::set_remote_file_id(&m, id)?;
                     // the copy being sent carries the new number too
                     if let Some(c) = &copy {
@@ -832,6 +835,9 @@ impl App {
                 (Ok(o), Some(id)) => modmake::set_remote_file_id(&m, id).map(|_| o),
                 (r, _) => r,
             };
+            if r.is_ok() {
+                uploadcheck::journal_finish(&m.id);
+            }
             let r = r.map_err(|e| (format!("{e:#}"), e.downcast_ref::<workshop::UploadError>().cloned()));
             let _ = tx.send(UpMsg::Done(r));
         });
@@ -1449,11 +1455,13 @@ impl App {
             Act::OpenUpload(id) => {
                 if let Some(m) = self.mods.iter().find(|m| m.id == id) {
                     let existing = m.remote_file_id.is_some();
+                    // an upload that did not finish had made an item: its number is used, so the next try updates it
+                    let remembered = if existing { None } else { uploadcheck::journal_pending(&m.id).and_then(|j| j.item) };
                     self.upload = Some(UploadForm {
                         m: m.clone(),
                         visibility: if existing { 0 } else { 1 },
                         note: String::new(),
-                        item_id: String::new(),
+                        item_id: remembered.map(|i| i.to_string()).unwrap_or_default(),
                         rx: None,
                         stage: None,
                         result: None,
@@ -3558,8 +3566,18 @@ impl App {
                             open = Some(workshop::item_url(o.id));
                         }
                     });
-                    if o.needs_agreement {
-                        ui.label(RichText::new(tr(lang, "up.agreement")).size(12.5).color(ORANGE));
+                    // what Steam has now, against what was sent
+                    if let Some(sent) = &f.sent {
+                        for x in uploadcheck::verify(sent, o) {
+                            let color = if x.level == uploadcheck::Level::Info { SECONDARY } else { ORANGE };
+                            ui.horizontal_top(|ui| {
+                                ui.label(RichText::new("●").size(10.0).color(color));
+                                ui.add(egui::Label::new(RichText::new(upload_i18n::text(lang, x.key, &x.args)).size(12.5)).wrap());
+                            });
+                        }
+                    }
+                    if o.needs_agreement && pill_button(ui, tr(lang, "up.open_agreement"), ButtonStyle::Plain(BLUE), true).clicked() {
+                        open = Some("https://steamcommunity.com/sharedfiles/workshoplegalagreement".into());
                     }
                 }
                 Some(Err(e)) => {

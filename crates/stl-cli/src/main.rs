@@ -57,6 +57,8 @@ enum Cmd {
     },
     /// start the Steam API, say which game and account it sees, stop it (changes nothing)
     WorkshopCheck,
+    /// what Steam's client says about a Workshop item (the owner sees private items too); changes nothing
+    WorkshopItem { id: u64 },
     /// update the launcher itself from its GitHub releases (the window must be closed; the new files replace the ones next to stl.exe)
     SelfUpdate {
         /// only say whether there is a newer version
@@ -494,6 +496,8 @@ fn run() -> Result<()> {
                     };
                     let preview = mods::own_thumbnail(&m);
                     let existing = m.remote_file_id.as_deref().and_then(|v| v.parse::<u64>().ok());
+                    // an upload that did not finish had made an item: that one is updated rather than making another
+                    let existing = existing.or_else(|| stl_core::uploadcheck::journal_pending(&m.id).and_then(|j| j.item));
                     let up = stl_core::workshop::Upload {
                         title: m.name.clone(),
                         description: String::new(),
@@ -538,10 +542,12 @@ fn run() -> Result<()> {
                         up.content = c.clone();
                     }
                     let mut last = String::new();
+                    uc::journal_start(&m.id, up.existing);
                     let result = stl_core::workshop::upload(
                         &game.dir,
                         &up,
                         &mut |id| {
+                            uc::journal_created(&m.id, id);
                             stl_core::modmake::set_remote_file_id(&m, id)?;
                             if let Some(c) = &copy {
                                 let _ = std::fs::copy(content.join("descriptor.mod"), c.join("descriptor.mod"));
@@ -563,7 +569,13 @@ fn run() -> Result<()> {
                         uc::remove_clean_copy(c);
                     }
                     let outcome = match result {
-                        Ok(o) => o,
+                        Ok(o) => {
+                            uc::journal_finish(&m.id);
+                            for f in uc::verify(&up, &o) {
+                                println!("  {}", uc::finding_text(&f));
+                            }
+                            o
+                        }
                         Err(e) => {
                             let msg = format!("{e:#}");
                             let err = e.downcast_ref::<stl_core::workshop::UploadError>().cloned();
@@ -720,6 +732,11 @@ fn run() -> Result<()> {
             }
             let exe = su::install(&staged)?;
             println!("installed {} into {}", staged.version, exe.parent().map(|p| p.display().to_string()).unwrap_or_default());
+        }
+        Cmd::WorkshopItem { id } => {
+            let game = open_game(&cli, &store)?;
+            let d = stl_core::workshop::details(&game.dir, *id)?;
+            println!("{d:#?}");
         }
         Cmd::WorkshopCheck => {
             let game = open_game(&cli, &store)?;

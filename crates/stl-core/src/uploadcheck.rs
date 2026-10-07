@@ -11,6 +11,9 @@
 //! - `explain` turns a failure (`workshop::UploadError`: the step, Steam's code, how far the transfer came) and the checks into what happened,
 //!   the likely causes for *this* upload, and what to do.
 //! - `report` writes all of it as plain text.
+//! - The journal (`journal_*`) remembers an upload that did not finish, and the item it had made: the next try updates that item instead of
+//!   making another, even when the launcher was closed half-way or the number could not be written into the descriptors.
+//! - `verify` reads what Steam has after an upload (its client sees private items too) and says whether the new version is there.
 //!
 //! Texts are English here (`text`); the window has its own words for each key.
 
@@ -286,6 +289,9 @@ pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
             push(&mut p, finding(Level::Error, "pf.bad_item_id", &[&t]));
         }
     }
+    if let Some(e) = journal_pending(&m.id) {
+        p.findings.extend(journal_findings(&e));
+    }
     p
 }
 
@@ -370,6 +376,122 @@ pub fn remove_clean_copy(copy: &Path) {
     if let Some(parent) = copy.parent().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("stl-upload-"))) {
         let _ = std::fs::remove_dir_all(parent);
     }
+}
+
+// ------------------------------------------------------------------ the journal: uploads that did not finish
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct JournalEntry {
+    /// the item being updated, or the one this upload made
+    pub item: Option<u64>,
+    /// the item was made by this upload
+    #[serde(default)]
+    pub created: bool,
+    /// when it started (seconds since 1970)
+    pub started: i64,
+}
+
+fn journal_path() -> Result<PathBuf> {
+    Ok(crate::paths::app_data_dir()?.join("upload-journal.json"))
+}
+
+fn journal_load() -> std::collections::BTreeMap<String, JournalEntry> {
+    journal_path().ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn journal_save(map: &std::collections::BTreeMap<String, JournalEntry>) {
+    if let Ok(p) = journal_path() {
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(p, serde_json::to_string_pretty(map).unwrap_or_default());
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// An upload of a mod (its descriptor id) starts. A number remembered from an unfinished upload is kept when none is given.
+pub fn journal_start(mod_id: &str, item: Option<u64>) {
+    let mut m = journal_load();
+    let old = m.get(mod_id).cloned().unwrap_or_default();
+    m.insert(mod_id.to_string(), JournalEntry { item: item.or(old.item), created: old.created && item.is_none(), started: now_secs() });
+    journal_save(&m);
+}
+
+/// The upload made item `id` (written before anything else, so that a crash right after leaves the number behind).
+pub fn journal_created(mod_id: &str, id: u64) {
+    let mut m = journal_load();
+    let e = m.entry(mod_id.to_string()).or_default();
+    e.item = Some(id);
+    e.created = true;
+    journal_save(&m);
+}
+
+/// The upload went through: nothing to remember.
+pub fn journal_finish(mod_id: &str) {
+    let mut m = journal_load();
+    if m.remove(mod_id).is_some() {
+        journal_save(&m);
+    }
+}
+
+/// An upload of this mod that did not finish (failed, or the launcher was closed during it).
+pub fn journal_pending(mod_id: &str) -> Option<JournalEntry> {
+    journal_load().get(mod_id).cloned()
+}
+
+fn journal_findings(e: &JournalEntry) -> Vec<Finding> {
+    let mut v = vec![finding(Level::Warning, "j.interrupted", &[&crate::saves::local_time_string(e.started)])];
+    if let (Some(id), true) = (e.item, e.created) {
+        v.push(finding(Level::Info, "j.created", &[&id]));
+    }
+    v
+}
+
+// ------------------------------------------------------------------ after an upload
+
+fn visibility_key(v: i32) -> &'static str {
+    match v {
+        0 => "vis.public",
+        1 => "vis.friends",
+        2 => "vis.private",
+        3 => "vis.unlisted",
+        _ => "vis.unknown",
+    }
+}
+
+/// What Steam has after an upload, against what was sent: whether its copy is the new one, the visibility, the title, the size.
+pub fn verify(u: &Upload, o: &workshop::Outcome) -> Vec<Finding> {
+    let mut v = Vec::new();
+    match &o.details {
+        None => v.push(finding(Level::Info, "v.unchecked", &[])),
+        Some(d) => {
+            let when = crate::saves::local_time_string(d.updated as i64);
+            // Steam's clock and ours differ a little
+            if d.updated as i64 + 120 >= o.started {
+                v.push(finding(Level::Info, "v.updated", &[&when]));
+            } else {
+                v.push(finding(Level::Warning, "v.not_updated", &[&when]));
+            }
+            let asked = u.visibility.map(|x| x as i32).or(if o.created { Some(workshop::Visibility::Private as i32) } else { None });
+            match asked {
+                Some(a) if a != d.visibility => v.push(finding(Level::Warning, "v.visibility_differs", &[&visibility_key(d.visibility), &visibility_key(a)])),
+                _ => v.push(finding(Level::Info, "v.visibility", &[&visibility_key(d.visibility)])),
+            }
+            if d.title.trim() != u.title.trim() {
+                v.push(finding(Level::Info, "v.title_differs", &[&d.title]));
+            }
+            if d.file_size > 0 {
+                v.push(finding(Level::Info, "v.size", &[&human(d.file_size as u64)]));
+            }
+        }
+    }
+    if o.needs_agreement {
+        v.push(finding(Level::Warning, "v.agreement", &[]));
+    }
+    v
 }
 
 // ------------------------------------------------------------------ explaining a failure
@@ -469,6 +591,10 @@ pub fn explain(e: &UploadError, pre: Option<&Preflight>) -> Explanation {
     let pf = |key: &str| pre.and_then(|p| p.has(key));
     let item = e.item.map(|i| i.to_string()).unwrap_or_default();
     match (e.step, e.result) {
+        (Step::Create, None) if e.created => {
+            causes.push(line("c.descriptor_write", &[]));
+            fixes.push(line("f.created_not_written", &[&item]));
+        }
         (Step::Connect, _) => {
             causes.push(line("c.steam_not_running", &[]));
             fixes.push(line("f.start_steam", &[]));
@@ -587,7 +713,7 @@ pub fn explain(e: &UploadError, pre: Option<&Preflight>) -> Explanation {
             retry = true;
         }
     }
-    if e.created {
+    if e.created && e.step != Step::Create {
         fixes.push(line("f.created_item", &[&item]));
     }
     Explanation { headline, meaning, causes, fixes, retry, link }
@@ -711,6 +837,23 @@ pub fn english(key: &str) -> &'static str {
         "f.fix_preview" => "Save thumbnail.png again as a PNG or JPG of under 1 MB and try again.",
         "f.copy_report" => "If it keeps failing, copy the diagnostic report and send it to whoever helps you.",
         "f.created_item" => "Item {0} was created before the failure (it is private) and its number is in the descriptors: trying again updates it instead of making another.",
+        "c.descriptor_write" => "The Workshop item was made, but its number could not be written into the mod's descriptors (a file in use, or read-only).",
+        "f.created_not_written" => "Item {0} exists (private) and the launcher remembers it: trying again updates it instead of making another.",
+        "j.interrupted" => "The last upload of this mod (started {0}) did not finish.",
+        "j.created" => "It had made item {0}: that number is used, so trying again updates it instead of making another.",
+        "v.unchecked" => "Steam did not say what it has now; open the item's page to check.",
+        "v.updated" => "Steam has the new version (updated {0}).",
+        "v.not_updated" => "Steam's copy says it was last updated {0}, before this upload: the new files may not be there yet. Check the item's page in a few minutes.",
+        "v.visibility" => "Visibility on Steam: {0}.",
+        "v.visibility_differs" => "Visibility on Steam is {0}, not {1} as chosen; set it on the item's page.",
+        "v.title_differs" => "Steam shows the title \"{0}\" (a translated title set on the item's page shows like this).",
+        "v.size" => "Size on Steam: {0}.",
+        "v.agreement" => "The Workshop agreement is not accepted: others cannot see the item until you accept it.",
+        "vis.public" => "public",
+        "vis.friends" => "friends only",
+        "vis.private" => "private",
+        "vis.unlisted" => "unlisted",
+        "vis.unknown" => "unknown",
         _ => "",
     }
 }
@@ -756,6 +899,8 @@ pub const KEYS: &[&str] = &[
     "c.content_problem", "c.generic",
     "f.start_steam", "f.ask_contributor", "f.accept_agreement", "f.check_fields", "f.check_paths", "f.free_cloud", "f.support", "f.wait_days",
     "f.open_item", "f.rename", "f.retry_later", "f.clear_id", "f.shorten_title", "f.fix_preview", "f.copy_report", "f.created_item",
+    "c.descriptor_write", "f.created_not_written", "j.interrupted", "j.created", "v.unchecked", "v.updated", "v.not_updated", "v.visibility",
+    "v.visibility_differs", "v.title_differs", "v.size", "v.agreement", "vis.public", "vis.friends", "vis.private", "vis.unlisted", "vis.unknown",
 ];
 
 // ------------------------------------------------------------------ the report
@@ -828,8 +973,8 @@ pub fn report(m: &Mod, u: &Upload, pre: Option<&Preflight>, failure: Option<(&st
         }
         (None, Some(o)) => {
             add(format!("[result] OK · item {} · {}", workshop::item_url(o.id), if o.created { "created" } else { "updated" }));
-            if o.needs_agreement {
-                add("the Workshop agreement is not accepted: the item stays hidden until it is".into());
+            for f in verify(u, o) {
+                add(format!("- {}", finding_text(&f)));
             }
         }
         _ => add("[result] not uploaded".into()),
@@ -900,6 +1045,23 @@ mod tests {
         let ek: Vec<&str> = pe.findings.iter().map(|f| f.key).collect();
         assert!(ek.contains(&"pf.content_empty") && ek.contains(&"pf.descriptor_missing") && ek.contains(&"pf.bad_item_id"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn checks_what_steam_has_after_an_upload() {
+        let m = Mod { name: "M".into(), ..mods::parse_descriptor(Path::new("x.mod"), "name=\"M\"\npath=\"C:/x\"\n", Path::new("C:/")) };
+        let up = Upload { title: "M".into(), description: String::new(), content: PathBuf::from("C:/x"), preview: None, tags: vec![], visibility: None, change_note: String::new(), existing: None };
+        let details = workshop::ItemDetails { id: 5, result: 1, title: "M".into(), updated: 1_000_100, visibility: 2, file_size: 2048, ..Default::default() };
+        let o = workshop::Outcome { id: 5, created: true, needs_agreement: true, details: Some(details.clone()), started: 1_000_000 };
+        let keys: Vec<&str> = verify(&up, &o).iter().map(|f| f.key).collect();
+        assert_eq!(keys, vec!["v.updated", "v.visibility", "v.size", "v.agreement"]);
+        // an old copy, another visibility, another (translated) title
+        let stale = workshop::ItemDetails { updated: 900_000, visibility: 0, title: "M (中文)".into(), ..details };
+        let o2 = workshop::Outcome { details: Some(stale), needs_agreement: false, ..o };
+        let keys: Vec<&str> = verify(&up, &o2).iter().map(|f| f.key).collect();
+        assert_eq!(keys, vec!["v.not_updated", "v.visibility_differs", "v.title_differs", "v.size"]);
+        assert!(text("v.visibility_differs", &["vis.public".into(), "vis.private".into()]).contains("public, not private"));
+        let _ = m;
     }
 
     #[test]
