@@ -469,6 +469,26 @@ pub fn pill_button(ui: &mut Ui, text: &str, style: ButtonStyle, enabled: bool) -
     capsule_button(ui, text, vec2(galley.size().x + 28.0, 32.0), style, enabled)
 }
 
+/// A link the size of the words around it (for use in a line of text): blue, underlined while the pointer is on it.
+pub fn text_link(ui: &mut Ui, text: &str, size: f32) -> Response {
+    let resp = ui.add(egui::Label::new(egui::RichText::new(text).size(size).color(BLUE)).sense(Sense::click()).selectable(false));
+    if resp.hovered() {
+        ui.painter().hline(resp.rect.x_range(), resp.rect.bottom() - 1.0, Stroke::new(1.0, BLUE));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A line of a list: a dot in its own column, then the text, which wraps under itself (not under the dot).
+pub fn bullet(ui: &mut Ui, dot: Color32, text: &str, size: f32, color: Color32) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let row = ui.fonts(|f| f.row_height(&FontId::new(size, FontFamily::Proportional)));
+        let (rect, _) = ui.allocate_exact_size(vec2(16.0, row), Sense::hover());
+        ui.painter().circle_filled(pos2(rect.left() + 4.0, rect.center().y), 3.0, dot);
+        ui.add(egui::Label::new(egui::RichText::new(text).size(size).color(color)).wrap());
+    });
+}
+
 /// A capsule that is on or off (a tag in a list of tags).
 pub fn toggle_chip(ui: &mut Ui, text: &str, on: bool) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(13.0, FontFamily::Proportional), LABEL);

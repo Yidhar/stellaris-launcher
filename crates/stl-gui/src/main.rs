@@ -838,8 +838,7 @@ impl App {
             if r.is_ok() {
                 uploadcheck::journal_finish(&m.id);
             }
-            let r = r.map_err(|e| (format!("{e:#}"), e.downcast_ref::<workshop::UploadError>().cloned()));
-            let _ = tx.send(UpMsg::Done(r));
+            let _ = tx.send(UpMsg::Done(r.map_err(upload_failure)));
         });
     }
 
@@ -1159,9 +1158,12 @@ impl App {
                     f.pre_rx = None;
                     go = std::mem::take(&mut f.start_after_check) && !p.blocked();
                     if let Some(code) = fake {
+                        // a pretend failure, as the upload would hand it over (Steam's log line included)
                         let item = f.pre_item;
-                        f.failure = Some(workshop::UploadError { step: workshop::Step::Submit, result: Some(code), status: Some(5), item, created: false, message: format!("the upload failed: EResult {code}"), steam_log: None });
-                        f.result = Some(Err(format!("the upload failed: EResult {code}")));
+                        let err = workshop::UploadError { step: workshop::Step::Submit, result: Some(code), status: Some(3), item, created: false, message: format!("the upload failed: EResult {code}"), steam_log: Some("Timeout uploading manifest (size 425)".into()) };
+                        let (msg, err) = upload_failure(anyhow::Error::new(err).context("uploading"));
+                        f.failure = err;
+                        f.result = Some(Err(msg));
                         go = false;
                     }
                     f.pre = Some(p);
@@ -3473,9 +3475,10 @@ impl App {
             match &existing {
                 Some(id) => {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
                         ui.label(RichText::new(tr_args(lang, "up.update", &[id])).size(13.0).color(SECONDARY));
                         if let Ok(n) = id.parse::<u64>() {
-                            if pill_button(ui, tr(lang, "up.open"), ButtonStyle::Plain(BLUE), true).clicked() {
+                            if theme::text_link(ui, tr(lang, "up.open"), 13.0).clicked() {
                                 open = Some(workshop::item_url(n));
                             }
                         }
@@ -3521,7 +3524,7 @@ impl App {
                 ui.label(RichText::new(tr(lang, "up.checks")).size(12.5).color(SECONDARY));
                 if checking {
                     ui.label(RichText::new(tr(lang, "up.checking")).size(12.5).color(SECONDARY));
-                } else if !running && ui.add(egui::Label::new(RichText::new(tr(lang, "up.recheck")).size(12.5).color(BLUE)).sense(Sense::click())).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                } else if !running && theme::text_link(ui, tr(lang, "up.recheck"), 12.5).clicked() {
                     recheck = true;
                 }
             });
@@ -3535,10 +3538,7 @@ impl App {
                             uploadcheck::Level::Warning => ORANGE,
                             uploadcheck::Level::Info => SECONDARY,
                         };
-                        ui.horizontal_top(|ui| {
-                            ui.label(RichText::new("●").size(10.0).color(color));
-                            ui.add(egui::Label::new(RichText::new(upload_i18n::text(lang, x.key, &x.args)).size(12.5).color(if x.level == uploadcheck::Level::Info { SECONDARY } else { LABEL })).wrap());
-                        });
+                        theme::bullet(ui, color, &upload_i18n::text(lang, x.key, &x.args), 12.5, if x.level == uploadcheck::Level::Info { SECONDARY } else { LABEL });
                     }
                 });
                 if p.blocked() {
@@ -3561,22 +3561,21 @@ impl App {
                 Some(Ok(o)) => {
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
                         ui.label(RichText::new(format!("✓  {}", tr(lang, "up.done"))).size(14.0).color(GREEN));
-                        if pill_button(ui, tr(lang, "up.open"), ButtonStyle::Plain(BLUE), true).clicked() {
+                        if theme::text_link(ui, tr(lang, "up.open"), 14.0).clicked() {
                             open = Some(workshop::item_url(o.id));
                         }
                     });
+                    ui.add_space(4.0);
                     // what Steam has now, against what was sent
                     if let Some(sent) = &f.sent {
                         for x in uploadcheck::verify(sent, o) {
                             let color = if x.level == uploadcheck::Level::Info { SECONDARY } else { ORANGE };
-                            ui.horizontal_top(|ui| {
-                                ui.label(RichText::new("●").size(10.0).color(color));
-                                ui.add(egui::Label::new(RichText::new(upload_i18n::text(lang, x.key, &x.args)).size(12.5)).wrap());
-                            });
+                            theme::bullet(ui, color, &upload_i18n::text(lang, x.key, &x.args), 12.5, if x.level == uploadcheck::Level::Info { SECONDARY } else { LABEL });
                         }
                     }
-                    if o.needs_agreement && pill_button(ui, tr(lang, "up.open_agreement"), ButtonStyle::Plain(BLUE), true).clicked() {
+                    if o.needs_agreement && theme::text_link(ui, tr(lang, "up.open_agreement"), 12.5).clicked() {
                         open = Some("https://steamcommunity.com/sharedfiles/workshoplegalagreement".into());
                     }
                 }
@@ -3593,18 +3592,19 @@ impl App {
                                 ui.add_space(6.0);
                                 ui.label(RichText::new(tr(lang, "up.causes")).size(12.5).color(SECONDARY));
                                 for c in &x.causes {
-                                    ui.add(egui::Label::new(RichText::new(format!("•  {}", t(c))).size(12.5)).wrap());
+                                    theme::bullet(ui, ORANGE, &t(c), 12.5, LABEL);
                                 }
                             }
                             if !x.fixes.is_empty() {
                                 ui.add_space(6.0);
                                 ui.label(RichText::new(tr(lang, "up.todo")).size(12.5).color(SECONDARY));
                                 for c in &x.fixes {
-                                    ui.add(egui::Label::new(RichText::new(format!("•  {}", t(c))).size(12.5)).wrap());
+                                    theme::bullet(ui, BLUE, &t(c), 12.5, LABEL);
                                 }
                             }
                             if let Some(url) = &x.link {
-                                if pill_button(ui, tr(lang, "up.open_agreement"), ButtonStyle::Plain(BLUE), true).clicked() {
+                                ui.add_space(4.0);
+                                if theme::text_link(ui, tr(lang, "up.open_agreement"), 12.5).clicked() {
                                     open = Some(url.clone());
                                 }
                             }
@@ -4012,4 +4012,10 @@ mod tests {
         assert_eq!(version_parts("Some Name"), ("".into(), "Some Name".into(), "".into()));
         assert_eq!(version_parts(""), ("".into(), "".into(), "".into()));
     }
+}
+
+/// An upload's error as the sheet keeps it: the text, and what went wrong (for the explanation) when the upload said.
+fn upload_failure(e: anyhow::Error) -> (String, Option<workshop::UploadError>) {
+    let err = e.chain().find_map(|c| c.downcast_ref::<workshop::UploadError>()).cloned();
+    (format!("{e:#}"), err)
 }
