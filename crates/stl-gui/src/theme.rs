@@ -336,7 +336,15 @@ pub fn large_title(ui: &mut Ui, title: &str, subtitle: Option<&str>, trailing: i
 
 /// The iOS switch: a green capsule with a white knob.
 pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::click());
+    let id = ui.next_auto_id();
+    switch_keyed(ui, id, on)
+}
+
+/// A switch in a list: `key` (the row's mod or DLC) keeps its animation with it. A list that lays out only the rows on screen gives its
+/// widgets other automatic ids as it scrolls, and a switch would take up the animation of the one that had its id before.
+pub fn switch_keyed(ui: &mut Ui, key: impl std::hash::Hash, on: &mut bool) -> Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::hover());
+    let mut response = ui.interact(rect, egui::Id::new(("switch", key)), Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();

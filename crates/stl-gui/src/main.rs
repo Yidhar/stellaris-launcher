@@ -2150,7 +2150,7 @@ impl App {
                 });
                 rows.row(ui, 58.0, 146.0, false, |ui| {
                     let mut on = enabled;
-                    if switch(ui, &mut on).changed() {
+                    if theme::switch_keyed(ui, ("ps-mod", &m.id), &mut on).changed() {
                         acts.push(Act::ModFlag(i, on));
                     }
                     ui.label(RichText::new(format!("{:>3}", i + 1)).size(12.0).color(theme::TERTIARY).monospace());
@@ -2231,7 +2231,7 @@ impl App {
                     });
                 }, |ui| {
                     let mut v = on;
-                    if switch(ui, &mut v).changed() {
+                    if theme::switch_keyed(ui, ("ps-dlc", &d.id), &mut v).changed() {
                         acts.push(Act::DlcFlag(d.id.clone(), v));
                     }
                 });
@@ -2266,7 +2266,7 @@ impl App {
                     });
                 }, |ui| {
                     let mut v = on;
-                    if switch(ui, &mut v).changed() {
+                    if theme::switch_keyed(ui, ("ps-plugin", &p.manifest.id), &mut v).changed() {
                         acts.push(Act::PluginFlag(p.manifest.id.clone(), v));
                     }
                 });
