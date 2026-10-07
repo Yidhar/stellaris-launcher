@@ -1,74 +1,80 @@
-# Stellaris Launcher DLL 插件开发手册
+# Stellaris Launcher DLL Plugin Developer Handbook
 
-> 规范版本：**插件规范 v2**（清单 `"schema": 2`），适用于 Stellaris Launcher 0.1 及以上、Stellaris 4.5（Windows x64）。
-> 本手册是写给插件作者的完整说明；字段速查见 [PLUGINS.md](PLUGINS.md)。
+**English** | [简体中文](PLUGIN_HANDBOOK.zh-CN.md)
+
+> Spec version: **plugin spec v2** (manifest `"schema": 2`), for Stellaris Launcher 0.1 and later and Stellaris 4.5 (Windows x64).
+> This handbook is the complete guide for plugin authors; the compact field reference is [PLUGINS.md](PLUGINS.md).
 >
-> 文中「**必须**」是规范要求，不满足的插件会被启动器拒绝或会损坏用户的环境；「**应当**」是强烈建议；「**可以**」是可选做法。
+> **MUST** marks a requirement of the spec: a plugin that breaks it is refused by the launcher or damages the user's setup. **SHOULD** is a
+> strong recommendation. **MAY** is optional.
 
 ---
 
-## 目录
+## Contents
 
-1. [插件是什么](#1-插件是什么)
-2. [十分钟上手](#2-十分钟上手)
-3. [插件文件夹](#3-插件文件夹)
-4. [清单 stl-plugin.json](#4-清单-stl-pluginjson)
-5. [生命周期：从安装到注入](#5-生命周期从安装到注入)
-6. [编写 DLL 的规则](#6-编写-dll-的规则)
-7. [适配游戏版本](#7-适配游戏版本)
-8. [设置文件](#8-设置文件)
-9. [日志与排错](#9-日志与排错)
-10. [打包与发布](#10-打包与发布)
-11. [自动更新](#11-自动更新)
-12. [行为准则](#12-行为准则)
-13. [发布前检查清单](#13-发布前检查清单)
-14. [附录 A：最小 C++ 模板](#附录-a最小-c-模板)
-15. [附录 B：清单的 JSON Schema](#附录-b清单的-json-schema)
-16. [附录 C：从 schema 1 迁移](#附录-c从-schema-1-迁移)
+1. [What a plugin is](#1-what-a-plugin-is)
+2. [Ten-minute start](#2-ten-minute-start)
+3. [The plugin folder](#3-the-plugin-folder)
+4. [The manifest: stl-plugin.json](#4-the-manifest-stl-pluginjson)
+5. [Lifecycle: from install to injection](#5-lifecycle-from-install-to-injection)
+6. [Rules for the DLL](#6-rules-for-the-dll)
+7. [Game build compatibility](#7-game-build-compatibility)
+8. [Settings files](#8-settings-files)
+9. [Logs and troubleshooting](#9-logs-and-troubleshooting)
+10. [Packaging and releases](#10-packaging-and-releases)
+11. [Automatic updates](#11-automatic-updates)
+12. [Code of conduct](#12-code-of-conduct)
+13. [Release checklist](#13-release-checklist)
+14. [Appendix A: a minimal C++ template](#appendix-a-a-minimal-c-template)
+15. [Appendix B: JSON Schema of the manifest](#appendix-b-json-schema-of-the-manifest)
+16. [Appendix C: moving from schema 1](#appendix-c-moving-from-schema-1)
 
 ---
 
-## 1. 插件是什么
+## 1. What a plugin is
 
-插件是一个 **Windows 原生 DLL**，由启动器在游戏启动后**注入**到 `stellaris.exe` 进程中运行。它可以挂钩渲染、读取游戏内存、调用引擎函数，或在游戏和外部程序之间架桥。现有的例子：
+A plugin is a **native Windows DLL** that the launcher **injects** into the `stellaris.exe` process once the game has started. It can hook
+rendering, read game memory, call engine functions, or bridge the game and an outside program. Existing examples:
 
-| 插件 | 做什么 |
+| Plugin | What it does |
 |---|---|
-| `stellaris-mcp` | 让 AI 代理通过 MCP 读取和操作游戏 |
-| `stellaris-live2d` | 在肖像位置绘制 Live2D 模型 |
-| `stellaris-perf` | 性能优化 |
+| `stellaris-mcp` | lets AI agents read and play the game over MCP |
+| `stellaris-live2d` | draws Live2D models in the portraits |
+| `stellaris-perf` | performance improvements |
 
-插件和**模组（mod）**的区别：
+How plugins differ from **mods**:
 
-| | 模组 | 插件 |
+| | Mod | Plugin |
 |---|---|---|
-| 形态 | 游戏脚本、图像、本地化文件 | 原生 DLL |
-| 谁加载 | 游戏自己（`dlc_load.json`） | Stellaris Launcher 注入 |
-| 放在哪 | `Documents\…\Stellaris\mod\` | `Documents\…\Stellaris\plugins\` |
-| 与游戏版本 | 一般跨小版本可用 | 依赖 exe 内部地址，**每次游戏更新都可能失效** |
-| 影响成就/铁人 | 视改动而定 | 不改校验文件，但能做任何事：用户必须信任作者 |
+| What it is | game scripts, pictures, localisation | a native DLL |
+| Loaded by | the game itself (`dlc_load.json`) | Stellaris Launcher, by injection |
+| Lives in | `Documents\…\Stellaris\mod\` | `Documents\…\Stellaris\plugins\` |
+| Game versions | usually works across minor versions | depends on addresses inside the exe: **may break with every game update** |
+| Achievements / Ironman | depends on what it changes | changes no checksummed file, but can do anything: users must trust the author |
 
-启动器负责：保存插件、按播放集启用、检查插件是否适配已安装的游戏版本、生成和编辑设置文件、自动更新，以及在游戏就绪后把插件加载进去。
+The launcher keeps plugins, enables them per playset, checks that each fits the installed game build, makes and edits their settings files,
+updates them, and loads them once the game is up.
 
-**插件只能由启动器加载。**规范 v2 不支持代理 DLL（如替身 `d3dx9_43.dll`）或任何放进游戏目录的加载器。从 Steam 或 Paradox 启动器直接启动的游戏不带插件，这是设计如此。
+**Only the launcher loads plugins.** Spec v2 has no proxy DLLs (a stand-in `d3dx9_43.dll` or the like) and no loaders placed in the game
+folder. A game started from Steam or the Paradox Launcher runs without plugins; that is intended.
 
 ---
 
-## 2. 十分钟上手
+## 2. Ten-minute start
 
-以 id 为 `hello-stellaris` 的插件为例。
+The example plugin's id is `hello-stellaris`.
 
-**1. 建文件夹**（放在任何地方，开发时用「链接」，不必复制）：
+**1. Make a folder.** It can be anywhere; during development the launcher uses it where it is ("link"), with no copying.
 
 ```
 D:\dev\hello-stellaris\
   stl-plugin.json
-  hello_stellaris.dll        ← 你的构建产物
+  hello_stellaris.dll        ← your build output
   defaults\
     hello_stellaris.ini
 ```
 
-**2. 写清单** `stl-plugin.json`：
+**2. Write the manifest** `stl-plugin.json`:
 
 ```json
 {
@@ -86,76 +92,81 @@ D:\dev\hello-stellaris\
 }
 ```
 
-**3. 写 DLL**：用[附录 A](#附录-a最小-c-模板)的模板。它在 `DllMain` 里只开一个线程，线程里找到自己的文件夹、读 `config\hello_stellaris.ini`、往 `logs\hello.log` 写一行。
+**3. Write the DLL** from the template in [Appendix A](#appendix-a-a-minimal-c-template). Its `DllMain` only starts a thread; the thread finds
+the plugin's folder, reads `config\hello_stellaris.ini` and writes a line to `logs\hello.log`.
 
-**4. 链接到启动器**（开发时用链接：启动器直接使用这个文件夹，重新编译后下次启动游戏就是新 DLL）：
+**4. Link it to the launcher.** While developing, link: the launcher uses the folder in place, so a rebuild is picked up at the next game
+start.
 
 ```
 stl plugin install D:\dev\hello-stellaris --link
 ```
 
-也可以在启动器的「插件」页点「链接开发中的插件」。
+Or use *Link a plugin under development* on the Plugins page.
 
-**5. 在播放集里启用**：
+**5. Enable it in a playset:**
 
 ```
 stl plugin enable hello-stellaris
 ```
 
-或在「播放集 → 插件」里打开开关。另外确认「设置 → 启动 → 加载 DLL 插件」是开的。
+Or switch it on under Playsets → Plugins. Also check that Settings → Launch → *Load DLL plugins* is on.
 
-**6. 启动游戏**：
+**6. Start the game:**
 
 ```
 stl launch
 ```
 
-或点启动器的「开始游戏」。命令行会打印 `plugin hello-stellaris: loaded`。
+Or press *Play* in the launcher. The command line prints `plugin hello-stellaris: loaded`.
 
-**7. 看结果**：`D:\dev\hello-stellaris\logs\hello.log`。
+**7. See the result** in `D:\dev\hello-stellaris\logs\hello.log`.
 
-> 已经在运行的游戏也可以手动注入：`stl inject D:\dev\hello-stellaris\hello_stellaris.dll`。这只适合开发；注意同一个 DLL 不能卸载后再注入新版本，见 [6.6](#66-不要卸载自己)。
+> A game that is already running can be given a DLL by hand: `stl inject D:\dev\hello-stellaris\hello_stellaris.dll`. That is for development
+> only. A loaded DLL cannot be swapped for a new build without restarting the game; see [6.6](#66-never-unload-yourself).
 
 ---
 
-## 3. 插件文件夹
+## 3. The plugin folder
 
-每个插件**一个文件夹**，和游戏自己的 `mod` 文件夹并列：
+Every plugin has **one folder**, next to the game's own `mod` folder:
 
 ```
 Documents\Paradox Interactive\Stellaris\
-  mod\                          游戏的模组（与插件无关）
+  mod\                          the game's mods (nothing to do with plugins)
   plugins\
-    <id>\                       文件夹名 = 插件 id
-      stl-plugin.json           清单（必须）
-      <你的>.dll                主 DLL（必须）；它依赖的其他 DLL 放在旁边
-      defaults\                 设置文件的默认版本（只读，更新时会被替换）
-      data\                     插件自己的只读数据（可选）
-      config\                   用户的设置（启动器生成和编辑；更新时保留）
-      logs\                     插件写日志的地方（可选）
+    <id>\                       the folder name is the plugin id
+      stl-plugin.json           the manifest (MUST)
+      <yours>.dll               the main DLL (MUST); DLLs it needs sit beside it
+      defaults\                 the default versions of the settings files (read-only, replaced by an update)
+      data\                     the plugin's own read-only data (MAY)
+      config\                   the user's settings (made and edited by the launcher; kept by an update)
+      logs\                     where the plugin writes its logs (MAY)
 ```
 
-文件夹里的东西分两类：
+Its contents belong to one of two owners:
 
-| 属于插件包（更新时整体替换） | 属于用户（更新时保留或不碰） |
+| The plugin package (replaced whole by an update) | The user (kept by an update, never shipped) |
 |---|---|
-| `stl-plugin.json`、DLL、`defaults\`、`data\`、其他随包文件 | `config\`（更新时原样保留）、`logs\` |
+| `stl-plugin.json`, the DLL, `defaults\`, `data\`, other shipped files | `config\` (kept as it is by an update), `logs\` |
 
-规则：
+Rules:
 
-1. **必须**从自己的模块路径找到插件文件夹（见 [6.2](#62-找到自己的文件夹)），不能假设工作目录或游戏目录。
-2. **必须不**往 `defaults\`、`data\` 或 DLL 旁边写文件：下次更新会被整体替换掉，用户的修改也会丢失。
-3. **必须不**往游戏目录写任何东西。
-4. 发布包里**必须不**带 `config\` 和 `logs\`：它们属于用户。
-5. 开发时「链接」的插件就用它所在的文件夹，`config\` 和 `logs\` 也在那里。
+1. The plugin **MUST** find its folder from its own module path (see [6.2](#62-find-your-own-folder)), never from the working folder or the
+   game folder.
+2. It **MUST NOT** write into `defaults\`, `data\` or next to the DLL: the next update replaces them whole, and the user's changes would be
+   lost.
+3. It **MUST NOT** write anything into the game folder.
+4. A release package **MUST NOT** contain `config\` or `logs\`: they belong to the user.
+5. A plugin linked for development uses the folder where it is; its `config\` and `logs\` are there too.
 
 ---
 
-## 4. 清单 stl-plugin.json
+## 4. The manifest: stl-plugin.json
 
-清单是 UTF-8 编码的 JSON（允许 BOM）。
+The manifest is JSON in UTF-8 (a BOM is accepted).
 
-### 4.1 完整示例
+### 4.1 Full example
 
 ```json
 {
@@ -175,146 +186,154 @@ Documents\Paradox Interactive\Stellaris\
 }
 ```
 
-### 4.2 字段
+### 4.2 Fields
 
-| 字段 | 必填 | 类型 | 说明 |
+| Field | Required | Type | Meaning |
 |---|---|---|---|
-| `schema` | 应当 | 整数 | 写 `2` |
-| `id` | **是** | 字符串 | 只能是字母、数字、`-`、`_`、`.`。同时是文件夹名、播放集里的引用和命令行里的名字。**发布后不要改** |
-| `name` | **是** | 字符串 | 给人看的名字 |
-| `version` | 应当 | 字符串 | 点分数字版本，如 `0.2.0`。自动更新靠它比较新旧（见 [11.2](#112-版本比较)） |
-| `description` | 可以 | 字符串 | 一句话说明，显示在插件页 |
-| `dll` | **是** | 字符串 | 主 DLL 在插件文件夹内的相对路径；不能是绝对路径，不能含 `..` |
-| `game.exe_timestamps` | 应当 | 字符串数组 | 插件适配的 `stellaris.exe` 构建的 PE 时间戳，十六进制，如 `"0x6ABEAA3F"`。列了就只加载进这些构建；空数组表示不检查（见 [第 7 节](#7-适配游戏版本)） |
-| `load.wait` | 可以 | `"window"` / `"none"` | `window`（默认）：等游戏出现可见窗口再加载；`none`：进程一存在就加载 |
-| `load.delay_ms` | 可以 | 整数 | 满足 `wait` 之后再等多少毫秒 |
-| `config` | 可以 | 数组 | 设置文件列表，见 [4.3](#43-config-条目) |
-| `update.github` | 可以 | 字符串 | GitHub 仓库 `owner/repo`（也接受 `https://github.com/owner/repo`）。有它才能自动更新 |
-| `update.asset` | 可以 | 字符串 | 要安装的发布附件名，`*` 是通配符；默认 `*.zip` |
-| `homepage` | 可以 | 字符串 | 给人看的主页；插件页会链接它（为空时用 `update.github` 的仓库页） |
-| `seed_files` | 不要用 | 数组 | schema 1 遗留，往游戏目录写文件。仍兼容，但新插件**必须不**用，见[附录 C](#附录-c从-schema-1-迁移) |
+| `schema` | SHOULD | integer | `2` |
+| `id` | **yes** | string | letters, digits, `-`, `_`, `.` only. Also the folder name, the reference in playsets and the name on the command line. **Do not change it after the first release** |
+| `name` | **yes** | string | the name people see |
+| `version` | SHOULD | string | a dotted numeric version such as `0.2.0`; updates compare it (see [11.2](#112-comparing-versions)) |
+| `description` | MAY | string | one sentence, shown on the Plugins page |
+| `dll` | **yes** | string | the main DLL, relative to the plugin folder; not absolute, no `..` |
+| `game.exe_timestamps` | SHOULD | array of strings | the PE timestamps of the `stellaris.exe` builds the plugin was made for, in hex, e.g. `"0x6ABEAA3F"`. When listed, the plugin is loaded only into these builds; an empty list means no check (see [section 7](#7-game-build-compatibility)) |
+| `load.wait` | MAY | `"window"` / `"none"` | `window` (default): load once the game has a visible window; `none`: as soon as the process exists |
+| `load.delay_ms` | MAY | integer | how many more milliseconds to wait after `wait` is met |
+| `config` | MAY | array | the settings files; see [4.3](#43-config-entries) |
+| `update.github` | MAY | string | the GitHub repository `owner/repo` (`https://github.com/owner/repo` is accepted too). Needed for automatic updates |
+| `update.asset` | MAY | string | the release asset to install, `*` as a wildcard; `*.zip` by default |
+| `homepage` | MAY | string | a page for people; the Plugins page links it (the `update.github` repository when empty) |
+| `seed_files` | do not use | array | schema 1, writes files into the game folder. Still honoured, but new plugins **MUST NOT** use it; see [Appendix C](#appendix-c-moving-from-schema-1) |
 
-未知字段会被忽略，方便以后扩展；但不要依赖这一点放自己的数据，自己的数据放 `data\`。
+Unknown fields are ignored, which leaves room for later versions; do not use that to store data of your own (that goes in `data\`).
 
-### 4.3 `config` 条目
+### 4.3 `config` entries
 
-| 字段 | 说明 |
+| Field | Meaning |
 |---|---|
-| `file` | `config\` 里的文件名；**不能有子目录**，不能含 `..` |
-| `default` | 插件文件夹内的默认文件，如 `defaults/x.ini`。`config\` 里缺这个文件时，启动器从它复制一份 |
-| `title` | 设置编辑器里显示的标题；空时用文件名 |
-| `substitute` | `true` 时，复制默认文件的同时把 `{plugin_dir}` 和 `{config_dir}` 替换成实际的绝对路径 |
+| `file` | a file name in `config\`: **no sub-folders**, no `..` |
+| `default` | a file in the plugin folder, e.g. `defaults/x.ini`. When `config\` lacks the file, the launcher copies it from here |
+| `title` | what the settings editor calls the file; the file name when empty |
+| `substitute` | `true`: while copying the default, replace `{plugin_dir}` and `{config_dir}` with the actual absolute paths |
 
-`config\` 里没有声明的文件也会出现在编辑器里（排在声明的文件后面），所以插件运行时自己生成的设置文件同样能编辑。
+Files in `config\` that are not declared are shown in the editor too (after the declared ones), so settings files the plugin writes at run
+time can be edited as well.
 
-### 4.4 启动器的校验
+### 4.4 What the launcher checks
 
-清单不满足下面任何一条，插件都会被列为问题、不会加载：
+A manifest that fails any of these is listed as a problem and its plugin is not loaded:
 
-- 是合法 JSON；
-- `id` 非空，只含允许的字符；
-- `dll` 非空、是相对路径、不含 `..`；
-- `config` 的 `file` 不含 `/`、`\`、`..`，`default` 是插件文件夹内的相对路径；
-- `seed_files` 的路径不越界。
+- valid JSON;
+- `id` not empty, allowed characters only;
+- `dll` not empty, relative, without `..`;
+- each `config` `file` without `/`, `\` or `..`, each `default` a relative path inside the plugin folder;
+- `seed_files` paths not leaving their folders.
 
-另外，安装时 `dll` 指向的文件必须存在；从更新包安装时，包里清单的 `id` 必须和已安装的相同。
+On install, the file `dll` names must exist; when installing an update, the `id` in the package's manifest must match the installed one.
 
 ---
 
-## 5. 生命周期：从安装到注入
+## 5. Lifecycle: from install to injection
 
-### 5.1 安装
+### 5.1 Install
 
-| 方式 | 结果 |
+| How | Result |
 |---|---|
-| `stl plugin install <文件夹>`，或插件页「安装」 | 复制到 `plugins\<id>\` |
-| `stl plugin install <文件夹> --link`，或「链接开发中的插件」 | 不复制，直接使用原文件夹（开发用） |
-| 自动更新 | 下载发布包，校验后像安装文件夹一样安装 |
+| `stl plugin install <folder>`, or *Install* on the Plugins page | copied to `plugins\<id>\` |
+| `stl plugin install <folder> --link`, or *Link a plugin under development* | not copied: the folder is used where it is (for development) |
+| automatic update | the release package is downloaded, checked, and installed like a folder |
 
-覆盖安装（包括更新）是**原子的**：
+Installing over an existing plugin (updates included) is **atomic**:
 
-1. 新版本先完整准备在 `plugins\.<id>.new\`；
-2. 已安装的 `config\` 复制进去（用户设置优先于新的默认值），再补齐缺少的设置文件；
-3. 用改名把旧文件夹换成新的。
+1. the new version is prepared completely in `plugins\.<id>.new\`;
+2. the installed `config\` is copied into it (the user's settings win over the new defaults), then missing settings files are made;
+3. the old folder is swapped for the new one by renaming.
 
-游戏正在运行时，旧 DLL 被占用，改名会失败：已安装的版本和设置**原封不动**，用户关闭游戏后重试即可。旧文件夹暂时留作 `.<id>.old`，不再被占用后自动删除。
+While the game runs it holds the old DLL, so the rename fails: the installed version and its settings stay **exactly as they were**, and the
+user retries after closing the game. The old folder may wait as `.<id>.old` and is deleted once nothing holds it.
 
-### 5.2 启用
+### 5.2 Enabling
 
-插件按**播放集**启用：播放集 → 插件里的开关，或 `stl plugin enable|disable <id>`（作用于当前播放集）。全局开关「设置 → 启动 → 加载 DLL 插件」关闭时，所有插件都不加载。
+Plugins are enabled **per playset**: the switch under Playsets → Plugins, or `stl plugin enable|disable <id>` (for the active playset). With
+the global switch Settings → Launch → *Load DLL plugins* off, no plugin is loaded.
 
-### 5.3 启动时的检查
+### 5.3 Checks at launch
 
-用户点「开始游戏」或运行 `stl launch` 时，对当前播放集里每个启用的插件：
+When the user presses *Play* or runs `stl launch`, for each enabled plugin of the active playset:
 
-| 情况 | 结果 |
+| Case | Result |
 |---|---|
-| 没有安装 | 跳过，提示 `not installed` |
-| DLL 文件不存在 | 跳过 |
-| 列了 `exe_timestamps`，但不含当前游戏构建 | 跳过，提示适配的构建和当前构建 |
-| 没列 `exe_timestamps` | 加载（不检查） |
+| not installed | skipped: `not installed` |
+| the DLL file is missing | skipped |
+| `exe_timestamps` listed, the current game build not among them | skipped, naming the builds it is for and the current one |
+| no `exe_timestamps` | loaded (no check) |
 
-然后补齐缺少的设置文件，启动游戏。
+Then the missing settings files are made and the game is started.
 
-### 5.4 注入
+### 5.4 Injection
 
 ```
-游戏进程启动
+the game process starts
    │
-   ├─ load.wait = "window"：等到游戏有可见窗口（标题含 "stellaris"）
-   ├─ 再等 load.delay_ms
+   ├─ load.wait = "window": wait until the game has a visible window (its title contains "stellaris")
+   ├─ then wait load.delay_ms more
    │
-   ├─ 插件已在进程里？ → 不重复加载
+   ├─ already in the process? → not loaded again
    │
-   └─ 在游戏进程中创建远程线程，执行 LoadLibraryW("<插件文件夹>\<dll>")
-         ├─ 等它返回，最多 30 秒
-         └─ 确认模块确实出现在游戏进程里
+   └─ a remote thread in the game process runs LoadLibraryW("<plugin folder>\<dll>")
+         ├─ waits for it to return, at most 30 s
+         └─ checks that the module really is in the game's process
 ```
 
-需要注意的事实：
+Facts to keep in mind:
 
-- 插件按播放集里的顺序**依次**加载，每个都单独等待；`delay_ms` 是从该插件开始等待算起。
-- 等待游戏就绪的总时限是 180 秒；超时或游戏退出则放弃加载，并报告原因。
-- **`DllMain` 运行在启动器创建的远程线程上，不是游戏主线程。**
-- 窗口出现时游戏通常**还在加载数据库**（加载画面）。插件不能假设引擎已经初始化完毕，也看不到游戏启动的早期阶段。
-- `LoadLibraryW` 返回 `NULL`（`DllMain` 返回 `FALSE`，或依赖的 DLL 找不到）会被报告为加载失败。
-- 启动器**从不**对游戏里的插件调用 `FreeLibrary`。插件一直留到游戏退出。
+- Plugins are loaded **one after another**, in the order of the playset, each with its own wait; `delay_ms` counts from when that plugin
+  starts waiting.
+- Waiting for the game has an overall limit of 180 s; past it, or if the game exits, the load is abandoned and the reason reported.
+- **`DllMain` runs on the remote thread the launcher created, not on the game's main thread.**
+- When the window appears the game is usually **still loading its databases** (the loading screen). A plugin cannot assume the engine is
+  fully initialised, and it never sees the game's early start-up.
+- `LoadLibraryW` returning `NULL` (`DllMain` returned `FALSE`, or a DLL it needs was not found) is reported as a failed load.
+- The launcher **never** calls `FreeLibrary` on a plugin in the game. A plugin stays until the game exits.
 
-### 5.5 移除
+### 5.5 Removal
 
-`stl plugin remove <id>` 或插件页的删除：先把文件夹改名再删除。游戏运行中、DLL 被占用时，移除整体失败、不留半截文件夹。链接的插件只是取消链接，文件夹不动。
+`stl plugin remove <id>`, or deleting it on the Plugins page: the folder is renamed first, then deleted. While the game runs and holds the
+DLL, the removal fails whole instead of leaving half a folder. A linked plugin is only unlinked; its folder is not touched.
 
 ---
 
-## 6. 编写 DLL 的规则
+## 6. Rules for the DLL
 
-### 6.1 DllMain 要极简
+### 6.1 Keep DllMain minimal
 
-`DllMain` 在加载器锁（loader lock）内执行。在这里等待、加载其他库、创建窗口或调用引擎，都可能**死锁整个游戏**。
+`DllMain` runs under the loader lock. Waiting, loading other libraries, creating windows or calling the engine there can **dead-lock the whole
+game**.
 
-**必须**：`DllMain` 只做最少的事：
+`DllMain` **MUST** do as little as possible:
 
 ```cpp
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
-        HANDLE t = CreateThread(nullptr, 0, InitThread, module, 0, nullptr);  // 真正的初始化在这里
+        HANDLE t = CreateThread(nullptr, 0, InitThread, module, 0, nullptr);  // the real start-up happens there
         if (t) CloseHandle(t);
     }
     return TRUE;
 }
 ```
 
-**必须不**在 `DllMain` 里：
+In `DllMain` the plugin **MUST NOT**:
 
-- `WaitForSingleObject` / `Sleep` / 等待你创建的线程；
-- `LoadLibrary`（隐式依赖由系统加载，没有问题）；
-- 调用游戏或 D3D 的函数；
-- 做耗时的文件或网络操作。
+- `WaitForSingleObject`, `Sleep`, or wait for a thread it created;
+- `LoadLibrary` (implicit dependencies are loaded by the system; that is fine);
+- call game or D3D functions;
+- do slow file or network work.
 
-### 6.2 找到自己的文件夹
+### 6.2 Find your own folder
 
-从**自己模块的地址**取 DLL 路径，它的父目录就是插件文件夹。安装、链接和手动注入时都能用同一段代码：
+Take the DLL's path from **an address inside your own module**; its parent folder is the plugin folder. The same code works when installed,
+linked, or injected by hand:
 
 ```cpp
 const std::wstring& PluginDir() {
@@ -325,60 +344,68 @@ const std::wstring& PluginDir() {
                            reinterpret_cast<LPCWSTR>(&PluginDir), &self);
         GetModuleFileNameW(self, path, static_cast<DWORD>(std::size(path)));
         std::wstring p(path);
-        return p.substr(0, p.find_last_of(L"\\/") + 1);   // 带结尾的反斜杠
+        return p.substr(0, p.find_last_of(L"\\/") + 1);   // with the trailing backslash
     }();
     return dir;
 }
 ```
 
-**必须不**用当前工作目录：游戏进程的工作目录是游戏目录。
-**必须不**写死 `Documents\…\plugins\<id>`：开发时插件是链接的，在别处；文档文件夹也可能被用户重定向。
+The plugin **MUST NOT** use the current working folder: in the game's process that is the game folder.
+It **MUST NOT** hard-code `Documents\…\plugins\<id>`: during development the plugin is linked from elsewhere, and the Documents folder may be
+redirected.
 
-### 6.3 线程：引擎代码只在游戏主线程调用
+### 6.3 Threads: call the engine only on the game's main thread
 
-这是最容易让游戏**静默崩溃或卡死**的地方。
+This is what most often makes the game **crash or freeze without a word**.
 
-- **必须**只在游戏自己的线程（通常是渲染/主线程）上调用引擎函数、发送游戏命令、读写会被主线程并发修改的对象。常用做法：挂钩 `IDXGISwapChain::Present` 或游戏主循环中的函数，在钩子里执行一个任务队列，其他线程只往队列里放任务。
-- **必须不**从自己的线程或远程线程直接调用引擎的 UI 或逻辑函数。
-- 自己的线程适合做：等待、文件读写、网络、命名管道服务、计算。
+- Engine functions, game commands, and objects the main thread changes concurrently **MUST** only be touched on the game's own thread
+  (usually the render/main thread). The common way: hook `IDXGISwapChain::Present` or a function of the main loop, run a task queue in the
+  hook, and let other threads only put tasks in that queue.
+- The plugin **MUST NOT** call the engine's UI or logic functions directly from its own thread or from a remote thread.
+- Its own threads are for waiting, files, networking, a named-pipe server, computation.
 
-### 6.4 读内存要防崩溃
+### 6.4 Read memory without crashing
 
-游戏更新后地址会变，指针也可能为空或已释放。
+After a game update addresses move; pointers can be null or freed.
 
-- **必须**用 SEH（`__try / __except`）包裹对游戏内存的原始读取，一个坏指针不能让游戏崩溃。
-- **应当**用特征码扫描（pattern scan）定位函数和全局变量，而不是写死 RVA，这样小补丁后仍可能继续工作；定位失败时安全地停用功能，并写入日志。
-- 不要依赖 Linux 版反编译里的结构偏移：Windows（MSVC）和 Linux（GCC）的对象布局不同。
+- Raw reads of game memory **MUST** be wrapped in SEH (`__try / __except`): one bad pointer must not take the game down.
+- Functions and globals **SHOULD** be located by pattern scanning rather than hard-coded RVAs, which may survive small patches. When locating
+  fails, switch the feature off safely and write it to the log.
+- Do not rely on structure offsets from a decompile of the Linux build: Windows (MSVC) and Linux (GCC) lay objects out differently.
 
-### 6.5 与其他插件共存
+### 6.5 Living with other plugins
 
-同一个游戏里可能同时有多个插件，它们常常挂钩同一个函数（比如 `Present`）。
+Several plugins can run in one game, and they often hook the same function (`Present`, for one).
 
-- **必须**在钩子里调用原函数（trampoline），把调用链传下去。
-- **必须不**假设自己是第一个或最后一个挂钩的；**必须不**恢复或覆盖别人的钩子。
-- **应当**只挂钩真正需要的函数；钩子里的工作要短，重活放到自己的线程。
-- 全局资源（窗口子类化、`SetWindowLongPtr` 换窗口过程、修改 D3D 状态）用完要恢复原状。
+- A hook **MUST** call the original function (the trampoline) and pass the call on down the chain.
+- It **MUST NOT** assume it is the first or last hook, and **MUST NOT** restore or overwrite other hooks.
+- Hook only what you need (SHOULD); keep the work inside hooks short and do the heavy work on your own thread.
+- Put shared state back as it was: window subclassing, `SetWindowLongPtr` window procedures, D3D state.
 
-### 6.6 不要卸载自己
+### 6.6 Never unload yourself
 
-启动器从不卸载插件，插件也**必须不**卸载自己（`FreeLibraryAndExitThread`）或其他模块。
+The launcher never unloads plugins, and a plugin **MUST NOT** unload itself (`FreeLibraryAndExitThread`) or other modules.
 
-带着钩子卸载 DLL，就算处理了 `DLL_PROCESS_DETACH`，在多个插件交叉挂钩时仍极易崩溃。开发时想换新版本：**关闭游戏，重新启动**。
+Unloading a DLL that has hooks installed, even with a `DLL_PROCESS_DETACH` handler, very easily crashes the game when several plugins hook
+across each other. To try a new build during development: **close the game and start it again**.
 
-### 6.7 其他
+### 6.7 Other rules
 
-- **必须不**弹出控制台窗口（`AllocConsole`），或启动控制台程序却不加 `CREATE_NO_WINDOW`。
-- **应当**静态链接 C/C++ 运行库（MSVC 用 `/MT`），或把需要的运行库 DLL 放进插件文件夹，避免用户机器缺 VC++ 运行库。
-- 只支持 x64。
-- 插件自己的错误不能拖垮游戏：初始化失败就记日志并安静地什么都不做。
+- **MUST NOT** open console windows (`AllocConsole`), or start console programs without `CREATE_NO_WINDOW`.
+- **SHOULD** link the C/C++ runtime statically (MSVC `/MT`), or ship the runtime DLLs it needs in the plugin folder, so users without the
+  VC++ redistributable can run it.
+- x64 only.
+- The plugin's own errors must not bring the game down: when start-up fails, log it and quietly do nothing.
 
 ---
 
-## 7. 适配游戏版本
+## 7. Game build compatibility
 
-插件通常依赖 `stellaris.exe` 内部的地址和结构布局，游戏一更新就可能读错内存。`game.exe_timestamps` 就是为此设计的。
+Plugins usually depend on addresses and structure layouts inside `stellaris.exe`, which can be wrong after any game update.
+`game.exe_timestamps` exists for exactly this.
 
-**它是什么**：`stellaris.exe` 的 PE 头时间戳（`IMAGE_FILE_HEADER.TimeDateStamp`），每个构建不同。查看当前游戏的值：
+**What it is:** the PE header timestamp of `stellaris.exe` (`IMAGE_FILE_HEADER.TimeDateStamp`), different for every build. To see the
+current game's:
 
 ```
 > stl status
@@ -386,112 +413,124 @@ game        Cygnus v4.5.2 (9776) (…\Stellaris)
 exe build   0x6ABEAA3F (2026-10-01 18:45 UTC)
 ```
 
-**怎么用**：
+**How to use it:**
 
-- 把测试通过的构建写进 `exe_timestamps`，可以写多个。
-- 启动器只把插件加载进列出的构建，不匹配时会告诉用户「为哪些构建制作、当前是哪个」。
-- 游戏更新后：重新验证地址（重新跑特征码、SDK 生成器等），把新时间戳**加进**列表，发布新版本。用户通过自动更新拿到。
+- List the builds you have tested; several are allowed.
+- The launcher loads the plugin only into listed builds; on a mismatch it tells the user which builds the plugin is for and which one is
+  installed.
+- After a game update: verify the addresses again (pattern scans, SDK generator, …), **add** the new timestamp to the list, and release a new
+  version. Users get it through the automatic update.
 
-**不列**（空数组）表示「我自己检查或与版本无关」。这时插件**必须**在运行时自己判断（比如特征码找不到就停用），绝不能对未知构建盲目读写内存。
+**An empty list** means "I check for myself, or I do not depend on the build". The plugin then **MUST** decide at run time (switch itself off
+when a pattern is not found, for instance) and never blindly read or write memory in an unknown build.
 
-**应当**两层都做：清单里列出构建，DLL 里同样检查一次。用户手动注入或清单被改动时，DLL 自己的检查仍能保护游戏。
-
----
-
-## 8. 设置文件
-
-### 8.1 位置与生成
-
-- 用户设置在 `<插件文件夹>\config\`，插件**必须**从这里读。
-- 默认值放在 `defaults\`，在清单的 `config` 里声明。安装、更新和每次启动前，启动器都会补齐 `config\` 里缺的文件，**已存在的文件绝不覆盖**。
-- 如果文件缺失（比如插件被手动注入），插件**必须**用内置默认值照常运行。
-
-### 8.2 编码与格式
-
-- 文本文件用 UTF-8；**应当**容忍文件开头的 BOM（启动器的编辑器会保留原文件的编码和换行）。
-- 格式不限，INI、JSON、TOML 都可以。启动器的编辑器对 INI 和 JSON 有语法提示。
-- 要在设置里放路径，用 `"substitute": true`，并在默认文件里写 `{plugin_dir}`、`{config_dir}`，生成时会替换成绝对路径。
-
-### 8.3 编辑与热重载
-
-用户在插件页点齿轮按钮打开设置编辑器，可以「保存」（原地写入）、「恢复默认」和「打开文件夹」。
-
-**应当**支持运行中重新读取设置。最简单的做法是每隔一两秒检查文件的修改时间，变了就重读（stellaris-mcp 的实现见[附录 A](#附录-a最小-c-模板)）。只在启动时读取的插件，改了设置要重启游戏才生效，**应当**在默认文件的注释里写明。
+Do both (SHOULD): list the builds in the manifest, and check again inside the DLL. If the DLL is injected by hand or the manifest is edited,
+its own check still protects the game.
 
 ---
 
-## 9. 日志与排错
+## 8. Settings files
 
-### 9.1 插件的日志
+### 8.1 Where they live, and how they are made
 
-- 写到 `<插件文件夹>\logs\`，不要写进 `config\`（那里会被当作设置展示给用户），也不要写进游戏目录。
-- 第一行**应当**记下插件版本、插件文件夹、读取的设置文件和游戏构建，排错时最有用。
-- 控制日志大小：每次启动覆盖或滚动，不要无限增长。
+- The user's settings are in `<plugin folder>\config\`, and the plugin **MUST** read them from there.
+- Defaults go in `defaults\` and are declared in the manifest's `config`. On install, on update and before each launch the launcher makes the
+  files missing from `config\`; **an existing file is never overwritten**.
+- If a file is missing (the plugin was injected by hand, say), the plugin **MUST** run with built-in defaults.
 
-### 9.2 启动器告诉你的
+### 8.2 Encoding and format
 
-| 在哪 | 看什么 |
+- Text files are UTF-8; a BOM at the start **SHOULD** be tolerated (the launcher's editor keeps a file's encoding and line endings).
+- Any format: INI, JSON, TOML. The launcher's editor gives syntax hints for INI and JSON.
+- For paths in settings, use `"substitute": true` and write `{plugin_dir}` / `{config_dir}` in the default file; they become absolute paths
+  when the file is made.
+
+### 8.3 Editing, and reloading while the game runs
+
+On the Plugins page the gear button opens the settings editor, with *Save* (writes in place), *Restore default* and *Open folder*.
+
+The plugin **SHOULD** re-read its settings while the game runs. The simplest way: check the file's modification time every second or two and
+re-read when it changes (as in [Appendix A](#appendix-a-a-minimal-c-template), and as stellaris-mcp does). A plugin that only reads at start
+needs a game restart after a change; it **SHOULD** say so in the default file's comments.
+
+---
+
+## 9. Logs and troubleshooting
+
+### 9.1 The plugin's logs
+
+- Write them to `<plugin folder>\logs\`, not into `config\` (the user is shown that folder as settings) and not into the game folder.
+- The first line **SHOULD** give the plugin version, the plugin folder, the settings file read and the game build: the most useful facts when
+  something goes wrong.
+- Open the log so that others can read it while the game runs (`_wfsopen` with `_SH_DENYWR`, not `_wfopen_s`, which locks it until the game
+  exits).
+- Keep it small: start a new one each run or rotate; do not let it grow without end.
+
+### 9.2 What the launcher tells you
+
+| Where | What |
 |---|---|
-| `stl launch` 的输出、启动器窗口的日志 | 每个插件 `loaded` / `skipped` / 失败原因 |
-| `stl plugins` | 已安装的插件，以及是否适配当前游戏构建 |
-| `stl plugin info <id>` | 清单、文件夹、DLL 的 SHA-256 |
-| `Documents\…\Stellaris\logs\error.log` | 游戏自己的错误日志 |
+| the output of `stl launch`, the launcher window's log | for each plugin: `loaded` / skipped / the reason it failed |
+| `stl plugins` | the installed plugins, and whether each fits the current game build |
+| `stl plugin info <id>` | manifest, folder, SHA-256 of the DLL |
+| `Documents\…\Stellaris\logs\error.log` | the game's own error log |
 
-### 9.3 常见问题
+### 9.3 Common problems
 
-| 现象 | 原因 |
+| Symptom | Cause |
 |---|---|
-| `LoadLibraryW failed in the game` | DLL 或它依赖的 DLL 找不到（缺 VC++ 运行库？）；`DllMain` 返回了 `FALSE`；不是 x64 |
-| `LoadLibraryW did not return within 30 s` | `DllMain` 里在等待或死锁了，见 [6.1](#61-dllmain-要极简) |
-| `is not among the game's modules` | DLL 加载后又卸载了自己 |
-| 跳过：`made for builds …` | 游戏更新了，`exe_timestamps` 不含新构建 |
-| 安装或更新失败 `a file in it is in use` | 游戏还在运行，DLL 被占用；关闭游戏重试，已安装的版本不受影响 |
-| 游戏卡死或闪退 | 从非主线程调用了引擎；读内存没用 SEH；钩子没调用原函数 |
+| `LoadLibraryW failed in the game` | the DLL or a DLL it needs was not found (no VC++ runtime?); `DllMain` returned `FALSE`; not x64 |
+| `LoadLibraryW did not return within 30 s` | `DllMain` waits or dead-locks; see [6.1](#61-keep-dllmain-minimal) |
+| `is not among the game's modules` | the DLL unloaded itself after loading |
+| skipped: `made for builds …` | the game was updated and `exe_timestamps` lacks the new build |
+| install or update fails: `a file in it is in use` | the game is running and holds the DLL; close it and retry, the installed version is unaffected |
+| the game freezes or crashes | engine called from a thread other than the main one; raw memory read without SEH; a hook not calling the original |
 
-### 9.4 调试
+### 9.4 Debugging
 
-用 Visual Studio「附加到进程」附加 `stellaris.exe`，加载插件的 PDB。开发时链接插件文件夹，构建输出直接写进那里，关闭游戏、重新编译、再启动即可。
+Attach Visual Studio to `stellaris.exe` (*Attach to Process*) and load the plugin's PDB. During development, link the plugin folder and have
+the build write into it: close the game, rebuild, start again.
 
 ---
 
-## 10. 打包与发布
+## 10. Packaging and releases
 
-### 10.1 发布包就是插件文件夹
+### 10.1 The package is the plugin folder
 
-发布包是一个 **zip**，内容就是插件文件夹：
+A release package is a **zip** whose contents are the plugin folder:
 
 ```
 hello-stellaris-v0.2.0.zip
   stl-plugin.json
   hello_stellaris.dll
   defaults\hello_stellaris.ini
-  data\…                        （如有）
+  data\…                        (if any)
 ```
 
-清单可以在 zip 根目录，也可以在**唯一的一层**子文件夹里。
+The manifest may be at the root of the zip, or inside **a single** folder.
 
-- **必须**包含清单和 `dll` 指向的文件。
-- **必须不**包含 `config\`、`logs\`，也不能有任何给游戏目录用的文件。
-- 清单里的 `version` 要和发布版本一致。
+- It **MUST** contain the manifest and the file `dll` names.
+- It **MUST NOT** contain `config\`, `logs\`, or any file meant for the game folder.
+- The manifest's `version` must equal the release's version.
 
-用户的安装方式：
+Users install it:
 
-- 启动器自动更新（推荐）；
-- 下载解压，在插件页「安装」那个文件夹；
-- 直接解压到 `Documents\Paradox Interactive\Stellaris\plugins\<id>\`。
+- through the launcher's automatic update (recommended);
+- by downloading and unpacking it, then *Install* on the Plugins page;
+- by unpacking it straight into `Documents\Paradox Interactive\Stellaris\plugins\<id>\`.
 
-### 10.2 GitHub Release
+### 10.2 GitHub releases
 
-自动更新从 GitHub 仓库的**最新正式发布**（Latest release）读取：
+Automatic updates read the repository's **latest full release** (*Latest release*):
 
-| 要求 | 说明 |
+| Requirement | Meaning |
 |---|---|
-| 标签 | `v0.2.0` 或 `0.2.0`，和清单的 `version` 一致 |
-| 附件 | 匹配 `update.asset` 的 zip，比如 `hello-stellaris-v0.2.0.zip` |
-| 校验文件（应当提供） | `<附件名>.sha256`，内容是十六进制摘要，后面可以跟文件名：`<sha256>  hello-stellaris-v0.2.0.zip`。有它时下载必须与之匹配 |
-| 预发布、草稿 | 不会被当作更新提供 |
+| tag | `v0.2.0` or `0.2.0`, equal to the manifest's `version` |
+| asset | a zip matching `update.asset`, e.g. `hello-stellaris-v0.2.0.zip` |
+| checksum file (SHOULD) | `<asset name>.sha256`: the hex digest, optionally followed by the file name: `<sha256>  hello-stellaris-v0.2.0.zip`. When present, the download must match it |
+| pre-releases, drafts | never offered as updates |
 
-### 10.3 CI 示例（GitHub Actions）
+### 10.3 CI example (GitHub Actions)
 
 ```yaml
 on:
@@ -530,93 +569,104 @@ jobs:
           files: package/*.zip*
 ```
 
-`stellaris-perf` 仓库的 `tools/check_plugin.py` 是一个更完整的例子：它在打包前检查清单字段、发布包里不能有 `config\`、标签与版本一致。
+The `stellaris-perf` repository's `tools/check_plugin.py` is a fuller example: before packaging it checks the manifest's fields, that the
+package has no `config\`, and that the tag equals the version.
 
 ---
 
-## 11. 自动更新
+## 11. Automatic updates
 
-### 11.1 流程
+### 11.1 How it works
 
-1. 每次会话里，插件页会对每个声明了 `update` 的插件检查一次（也可以点「检查更新」）；命令行是 `stl plugin update [<id>] [--check]`。
-2. 启动器读取 `update.github` 仓库的最新发布，标签版本比清单的 `version` 高时，在插件页显示「更新」。
-3. 点击后下载匹配 `update.asset` 的 zip。有 `.sha256` 时校验，不匹配就拒绝。
-4. 解压，确认包里清单的 `id` 一致，再按 [5.1](#51-安装) 原子安装，**用户的 `config\` 保留**。
-5. 游戏运行中无法替换 DLL，提示用户关闭游戏，下次启动生效。
+1. Once per session the Plugins page checks every plugin that declares `update` (and again on *Check for updates*); on the command line,
+   `stl plugin update [<id>] [--check]`.
+2. The launcher reads the latest release of the `update.github` repository; when its tag is a higher version than the manifest's `version`,
+   the Plugins page shows *Update*.
+3. Pressing it downloads the zip matching `update.asset` and, when a `.sha256` is published, checks it: a mismatch is refused.
+4. The zip is unpacked, its manifest's `id` must match, and it is installed atomically as in [5.1](#51-install), **keeping the user's
+   `config\`**.
+5. While the game runs the DLL cannot be replaced: the user is told to close the game, and the new version loads at the next start.
 
-**链接**的插件（开发中）不会被更新。
+**Linked** plugins (under development) are never updated.
 
-### 11.2 版本比较
+### 11.2 Comparing versions
 
-- 去掉开头的 `v`，按点分隔逐段比较数字：`0.10.0` 比 `0.9.2` 新，`1.0` 比 `0.9` 新。
-- `-` 或 `+` 之后的部分忽略：`0.2.0-rc1` 和 `0.2.0` 视为相同，**不会**被当作更新。要发预览版，请在 GitHub 上标为预发布。
-- 缺的段按 0 处理：`0.2.1` 比 `0.2` 新。
+- A leading `v` is dropped and the numbers between the dots are compared one by one: `0.10.0` is newer than `0.9.2`, `1.0` newer than `0.9`.
+- Anything after `-` or `+` is ignored: `0.2.0-rc1` counts as `0.2.0` and is **not** offered as an update. Mark previews as pre-releases on
+  GitHub.
+- A missing number counts as 0: `0.2.1` is newer than `0.2`.
 
-### 11.3 游戏更新时的推荐做法
+### 11.3 When the game is updated
 
-游戏更新后，旧插件会因为 `exe_timestamps` 不匹配被跳过（这是保护，不是故障）。作者应当：
+After a game update, old plugins are skipped because `exe_timestamps` does not match: that is the protection working, not a fault. The author
+SHOULD:
 
-1. 在新构建上验证；
-2. 把新时间戳加进 `exe_timestamps`；
-3. 升版本号、打标签发布。
+1. verify the plugin on the new build;
+2. add the new timestamp to `exe_timestamps`;
+3. raise the version, tag, and release.
 
-用户在插件页点「更新」后即可使用。
-
----
-
-## 12. 行为准则
-
-插件在游戏进程里拥有和游戏相同的权限，启动器无法沙箱化它。为了让用户能放心使用：
-
-- **必须不**修改游戏目录、存档或其他插件的文件夹。
-- **必须不**在用户不知情时联网、收集或上传任何数据；需要联网的功能**必须**在说明和设置里写明，并且默认关闭或可关闭。
-- **必须不**加载其他插件或安装加载器（代理 DLL、注册表启动项等）。
-- **必须不**绕过启动器的版本检查（比如自己再注入一遍到不兼容的构建）。
-- **应当**开源，或至少公开发布页和校验值；**应当**在 `homepage` 写清楚功能、已知问题和适配的游戏版本。
-- 影响多人游戏同步或成就的功能，**必须**在说明中明确告知。
+Users then press *Update* on the Plugins page.
 
 ---
 
-## 13. 发布前检查清单
+## 12. Code of conduct
 
-**清单**
-- [ ] `"schema": 2`；`id` 合法且和以前一致；`version` 已升级
-- [ ] `exe_timestamps` 包含所有测试过的构建（或为空，且 DLL 自己做版本检查）
-- [ ] `config` 里每个 `default` 文件都在包里
-- [ ] 需要自动更新时：`update.github`、`update.asset` 正确
+A plugin has the game process's rights; the launcher cannot sandbox it. So that users can trust plugins:
+
+- A plugin **MUST NOT** change the game folder, saves, or other plugins' folders.
+- It **MUST NOT** go online, collect or upload anything without the user knowing. A feature that needs the network **MUST** be described in
+  the plugin's description and settings, and be off by default or possible to switch off.
+- It **MUST NOT** load other plugins or install loaders (proxy DLLs, autorun registry entries, …).
+- It **MUST NOT** get around the launcher's build check (by injecting itself into an unsupported build, say).
+- It **SHOULD** be open source, or at least publish its release page and checksums, and **SHOULD** use `homepage` to say what it does, its
+  known problems and the game versions it supports.
+- A feature that affects multiplayer synchronisation or achievements **MUST** say so plainly in the description.
+
+---
+
+## 13. Release checklist
+
+**Manifest**
+- [ ] `"schema": 2`; `id` valid and unchanged; `version` raised
+- [ ] `exe_timestamps` lists every tested build (or is empty, and the DLL checks the build itself)
+- [ ] every `default` file named in `config` is in the package
+- [ ] for automatic updates: `update.github` and `update.asset` are right
 
 **DLL**
-- [ ] `DllMain` 只创建线程，不等待、不加载库
-- [ ] 从模块路径找到插件文件夹；只读 `config\`，日志写 `logs\`
-- [ ] 设置文件缺失时用内置默认值运行
-- [ ] 引擎调用只在游戏主线程；原始内存读取有 SEH
-- [ ] 钩子调用原函数；不卸载自己
-- [ ] x64、静态运行库（或运行库随包）；不弹控制台窗口
-- [ ] 在未列出的构建上（手动注入时）安全地不工作
+- [ ] `DllMain` only starts a thread: no waiting, no loading libraries
+- [ ] the plugin folder comes from the module path; settings only from `config\`, logs to `logs\`
+- [ ] runs with built-in defaults when a settings file is missing
+- [ ] engine calls only on the game's main thread; raw memory reads under SEH
+- [ ] hooks call the original; the plugin never unloads itself
+- [ ] x64, static runtime (or the runtime shipped with it); no console windows
+- [ ] does nothing harmful on a build it does not list (when injected by hand)
 
-**包与发布**
-- [ ] zip 的内容就是插件文件夹；没有 `config\`、`logs\`、游戏目录文件
-- [ ] 标签 = `v` + `version`；附件名匹配 `update.asset`；附带 `.sha256`
-- [ ] 正式发布（不是预发布、不是草稿）
+**Package and release**
+- [ ] the zip's contents are the plugin folder; no `config\`, `logs\` or files for the game folder
+- [ ] tag = `v` + `version`; asset name matches `update.asset`; `.sha256` alongside
+- [ ] a full release (not a pre-release or draft)
 
-**实测**
-- [ ] 全新安装 → 启用 → `stl launch`：日志里 `loaded`，功能正常
-- [ ] 从上一版本自动更新：设置保留，新版本在下次启动生效
-- [ ] 游戏运行时点更新：安全失败，已安装版本不受影响
-- [ ] 与其他常用插件同时启用无冲突
+**Tested**
+- [ ] fresh install → enable → `stl launch`: `loaded` in the log, the feature works
+- [ ] automatic update from the previous version: settings kept, the new version loads at the next start
+- [ ] *Update* while the game runs: fails safely, the installed version is unaffected
+- [ ] together with other common plugins: no conflict
 
 ---
 
-## 附录 A：最小 C++ 模板
+## Appendix A: a minimal C++ template
 
-下面的代码可以直接编译成一个合规的插件。它做了四件事：
+The code below builds a plugin that follows this spec. It does four things:
 
-- 在独立线程里初始化；
-- 找到插件文件夹；
-- 读取 `config\hello_stellaris.ini`（缺失时用默认值），并每 2 秒检查一次修改时间、自动重读；
-- 写日志到 `logs\hello.log`。
+- starts up on a thread of its own;
+- finds the plugin folder;
+- reads `config\hello_stellaris.ini` (built-in defaults when it is missing), checks the file's modification time every 2 seconds, and re-reads
+  it when it changes;
+- writes its log to `logs\hello.log`.
 
-真正的挂钩和游戏逻辑从 `Work()` 开始；记住引擎调用要转到游戏主线程（见 [6.3](#63-线程引擎代码只在游戏主线程调用)）。
+Your hooks and game logic start where the comment says `Work()`; remember that engine calls must move to the game's main thread (see
+[6.3](#63-threads-call-the-engine-only-on-the-games-main-thread)). This template was compiled with MSVC (`/W4`, no warnings), loaded into
+Stellaris 4.5.2 with `stl inject`, and read and reloaded its settings there.
 
 **CMakeLists.txt**
 
@@ -624,7 +674,7 @@ jobs:
 cmake_minimum_required(VERSION 3.20)
 project(hello_stellaris CXX)
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")   # /MT：不依赖 VC++ 运行库
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")   # /MT: no VC++ runtime needed
 add_library(hello_stellaris SHARED src/plugin.cpp)
 target_compile_definitions(hello_stellaris PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 ```
@@ -754,9 +804,9 @@ greeting = hello
 
 ---
 
-## 附录 B：清单的 JSON Schema
+## Appendix B: JSON Schema of the manifest
 
-可以在编辑器里给 `stl-plugin.json` 指定这个 schema，获得补全和检查（以启动器的实际校验为准）：
+Point your editor at this schema for `stl-plugin.json` to get completion and checks (the launcher's own checks are what count):
 
 ```json
 {
@@ -812,21 +862,22 @@ greeting = hello
 
 ---
 
-## 附录 C：从 schema 1 迁移
+## Appendix C: moving from schema 1
 
-schema 1 用 `seed_files` 把设置文件写进**游戏目录**，并允许用代理 DLL 自动加载。规范 v2 改为：
+Schema 1 used `seed_files` to write settings files into the **game folder**, and allowed proxy DLLs to load plugins on their own. Spec v2:
 
-| schema 1 | schema 2 |
+| Schema 1 | Schema 2 |
 |---|---|
-| `seed_files: [{ "from": "x.default.ini", "to": "x.ini" }]`（写进游戏目录） | `config: [{ "file": "x.ini", "default": "defaults/x.ini" }]`（写进插件自己的 `config\`） |
-| 插件从游戏目录读设置 | 插件从 `<插件文件夹>\config\` 读设置 |
-| 代理 DLL（如 `d3dx9_43.dll`）自动加载 | 只由启动器注入；删除代理 DLL |
-| 插件放在 `%APPDATA%\stellaris-launcher\plugins` | 放在 `Documents\Paradox Interactive\Stellaris\plugins`（启动器会自动迁移一次） |
+| `seed_files: [{ "from": "x.default.ini", "to": "x.ini" }]` (into the game folder) | `config: [{ "file": "x.ini", "default": "defaults/x.ini" }]` (into the plugin's own `config\`) |
+| the plugin reads its settings from the game folder | the plugin reads them from `<plugin folder>\config\` |
+| a proxy DLL (`d3dx9_43.dll`, …) loads it automatically | only the launcher injects it; remove the proxy DLL |
+| plugins in `%APPDATA%\stellaris-launcher\plugins` | plugins in `Documents\Paradox Interactive\Stellaris\plugins` (the launcher moves them once) |
 
-迁移步骤：
+Steps:
 
-1. 把默认设置文件移到 `defaults\`，在 `config` 里声明，删除 `seed_files`；
-2. DLL 改为从 `PluginDir() + L"config\\…"` 读设置，日志改写到 `logs\`；
-3. 删除代理加载器；从游戏目录读设置的旧代码可以保留一个版本作为后备，之后删除；
-4. 告诉用户可以删除游戏目录里旧的设置文件和代理 DLL（插件自己**必须不**去删游戏目录的文件）；
-5. 把 `schema` 改为 `2`，升版本号发布。
+1. Move the default settings file into `defaults\`, declare it in `config`, and remove `seed_files`.
+2. Make the DLL read its settings from `PluginDir() + L"config\\…"`, and write its logs to `logs\`.
+3. Remove the proxy loader. Code that reads the old settings from the game folder may stay for one version as a fallback, then go.
+4. Tell users they can delete the old settings file and proxy DLL from the game folder (the plugin itself **MUST NOT** delete files in the
+   game folder).
+5. Set `schema` to `2`, raise the version, and release.

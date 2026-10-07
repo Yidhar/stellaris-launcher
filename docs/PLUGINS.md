@@ -1,6 +1,6 @@
 # DLL plugins (spec, schema 2)
 
-> Writing a plugin? The developer handbook, [PLUGIN_HANDBOOK.md](PLUGIN_HANDBOOK.md) (in Chinese), walks through it end to end: a ten-minute
+> Writing a plugin? The developer handbook, [PLUGIN_HANDBOOK.md](PLUGIN_HANDBOOK.md) ([简体中文](PLUGIN_HANDBOOK.zh-CN.md)), walks through it end to end: a ten-minute
 > start, the rules for the DLL (`DllMain`, threads, coexisting with other plugins), game-build compatibility, packaging, releases and updates,
 > a checklist, a C++ template that is tested in the game, and a JSON Schema for the manifest. This page is the compact reference.
 
