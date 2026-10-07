@@ -82,6 +82,11 @@ pub struct Preflight {
 }
 
 impl Preflight {
+    /// The item belongs to another account: the signed-in one can only be a contributor, who cannot change the cover.
+    pub fn contributor(&self) -> bool {
+        self.has("pf.item_other_owner").is_some()
+    }
+
     pub fn blocked(&self) -> bool {
         self.findings.iter().any(|f| f.level == Level::Error)
     }
@@ -215,7 +220,7 @@ pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
                     differ.push("supported_version");
                 }
                 if !differ.is_empty() {
-                    push(&mut p, finding(Level::Warning, "pf.descriptor_differs", &[&differ.join(", ")]));
+                    push(&mut p, finding(Level::Info, "pf.descriptor_differs", &[&differ.join(", ")]));
                 }
                 let inner_id = get("remote_file_id");
                 let outer_id = m.remote_file_id.clone().unwrap_or_default();
@@ -224,7 +229,7 @@ pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
                 }
                 let pic = get("picture");
                 if !pic.is_empty() && !u.content.join(&pic).is_file() {
-                    push(&mut p, finding(Level::Warning, "pf.picture_missing", &[&pic]));
+                    push(&mut p, finding(Level::Info, "pf.picture_missing", &[&pic]));
                 }
             }
         }
@@ -254,12 +259,12 @@ pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
     // the tags the Workshop offers for Stellaris
     let unknown: Vec<&String> = u.tags.iter().filter(|t| !crate::modmake::TAGS.iter().any(|k| k.eq_ignore_ascii_case(t))).collect();
     if !unknown.is_empty() {
-        push(&mut p, finding(Level::Warning, "pf.unknown_tags", &[&unknown.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")]));
+        push(&mut p, finding(Level::Info, "pf.unknown_tags", &[&unknown.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")]));
     }
     // the preview
     let new_item = u.existing.is_none() && typed_item.map_or(true, |t| t.trim().is_empty());
     match &u.preview {
-        None if new_item => push(&mut p, finding(Level::Warning, "pf.no_preview_new", &[])),
+        None if new_item => push(&mut p, finding(Level::Info, "pf.no_preview_new", &[])),
         None => push(&mut p, finding(Level::Info, "pf.keep_preview", &[])),
         Some(path) => {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -275,7 +280,7 @@ pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
                             let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
                             let ext = if ext == "jpeg" { "jpg".to_string() } else { ext };
                             if ext != kind {
-                                push(&mut p, finding(Level::Warning, "pf.preview_ext", &[&name, &kind]));
+                                push(&mut p, finding(Level::Info, "pf.preview_ext", &[&name, &kind]));
                             }
                         }
                         other => push(&mut p, finding(Level::Error, "pf.preview_format", &[&name, &other.unwrap_or("?")])),
@@ -324,12 +329,37 @@ pub fn remote(game_dir: &Path, p: &mut Preflight, item: Option<u64>) {
         Err(e) => p.findings.push(finding(Level::Error, "pf.steam_unavailable", &[&format!("{e:#}")])),
     }
     let Some(id) = item else { return };
-    match item_info(id) {
-        Err(_) => p.offline = true,
-        Ok(info) => {
-            if !info.visible {
+    let info = match item_info(id) {
+        Err(_) => {
+            p.offline = true;
+            return;
+        }
+        Ok(info) if info.visible => Some(info),
+        Ok(_) => match workshop::details(game_dir, id) {
+            Ok(d) if d.result == 1 => Some(ItemInfo {
+                id,
+                visible: true,
+                creator: d.owner,
+                app_id: d.app_id,
+                title: d.title,
+                banned: d.banned,
+                updated: d.updated as i64,
+                size: d.file_size.max(0) as u64,
+            }),
+            Ok(_) => {
+                p.findings.push(finding(Level::Warning, "pf.item_gone", &[&id]));
+                None
+            }
+            Err(_) => {
                 p.findings.push(finding(Level::Warning, "pf.item_not_visible", &[&id]));
-            } else {
+                None
+            }
+        },
+    };
+    match info {
+        None => {}
+        Some(info) => {
+            {
                 if info.app_id != 0 && info.app_id != workshop::APP_ID {
                     p.findings.push(finding(Level::Error, "pf.item_other_game", &[&id, &info.app_id]));
                 }
@@ -338,7 +368,9 @@ pub fn remote(game_dir: &Path, p: &mut Preflight, item: Option<u64>) {
                 }
                 if let Some(me) = p.account {
                     if info.creator != 0 && info.creator != me {
-                        p.findings.push(finding(Level::Warning, "pf.item_other_owner", &[&id, &info.creator]));
+                        // only the owner can change the cover: the picture is not sent, so what was found about it does not matter
+                        p.findings.retain(|f| !f.key.starts_with("pf.preview_") && f.key != "pf.no_preview_new" && f.key != "pf.keep_preview");
+                        p.findings.push(finding(Level::Info, "pf.item_other_owner", &[&id, &info.creator]));
                     }
                 }
                 p.findings.push(finding(Level::Info, "pf.item_info", &[&info.title, &crate::saves::local_time_string(info.updated)]));
@@ -443,7 +475,7 @@ pub fn journal_pending(mod_id: &str) -> Option<JournalEntry> {
 }
 
 fn journal_findings(e: &JournalEntry) -> Vec<Finding> {
-    let mut v = vec![finding(Level::Warning, "j.interrupted", &[&crate::saves::local_time_string(e.started)])];
+    let mut v = vec![finding(Level::Info, "j.interrupted", &[&crate::saves::local_time_string(e.started)])];
     if let (Some(id), true) = (e.item, e.created) {
         v.push(finding(Level::Info, "j.created", &[&id]));
     }
@@ -666,7 +698,7 @@ pub fn explain(e: &UploadError, pre: Option<&Preflight>) -> Explanation {
         }
         (Step::StartUpdate, None) => {
             causes.push(line("c.item_gone", &[&item]));
-            if pf("pf.item_not_visible").is_some() {
+            if pf("pf.item_not_visible").is_some() || pf("pf.item_gone").is_some() {
                 causes.push(line("c.item_hidden", &[&item]));
             }
             fixes.push(line("f.clear_id", &[]));
@@ -765,7 +797,8 @@ pub fn english(key: &str) -> &'static str {
         "pf.item_not_visible" => "Steam does not show item {0} publicly: it is private, friends-only or deleted. If it was deleted, the upload fails; then clear the item number to make a new one.",
         "pf.item_other_game" => "Item {0} belongs to another game (app {1}), not Stellaris.",
         "pf.item_banned" => "Item {0} is banned on the Workshop; it cannot be updated.",
-        "pf.item_other_owner" => "Item {0} was made by another account ({1}). You can update it only if its owner added you as a contributor; otherwise Steam answers \"access denied\".",
+        "pf.item_other_owner" => "Item {0} belongs to account {1}. As a contributor you can update its files and change note, but only the owner can change its cover, so the picture is not sent. (Not a contributor: Steam answers \"access denied\".)",
+        "pf.item_gone" => "Steam has no item {0} (deleted, or this account cannot see it): updating it fails. Clear the item number to make a new one.",
         "pf.item_info" => "On the Workshop: \"{0}\", last updated {1}.",
         // explanations
         "ex.headline" => "The upload stopped {0}.",
@@ -900,7 +933,7 @@ pub const KEYS: &[&str] = &[
     "pf.remote_id_differs", "pf.picture_missing", "pf.no_supported_version", "pf.bad_supported_version", "pf.title_empty", "pf.title_too_long",
     "pf.note_too_long", "pf.description_too_long", "pf.unknown_tags", "pf.no_preview_new", "pf.keep_preview", "pf.preview_missing", "pf.preview_too_big",
     "pf.preview_format", "pf.preview_ext", "pf.bad_item_id", "pf.steam_unavailable", "pf.account", "pf.item_not_visible", "pf.item_other_game",
-    "pf.item_banned", "pf.item_other_owner", "pf.item_info",
+    "pf.item_banned", "pf.item_other_owner", "pf.item_gone", "pf.item_info",
     "ex.headline", "ex.headline_status", "ex.at_connect", "ex.at_create", "ex.at_start", "ex.at_title", "ex.at_description", "ex.at_content",
     "ex.at_preview", "ex.at_tags", "ex.at_visibility", "ex.at_submit", "ex.status_config", "ex.status_preparing", "ex.status_content",
     "ex.status_preview", "ex.status_committing", "ex.status_unknown", "ex.no_steam", "ex.no_answer", "ex.rejected_value", "ex.code_fail",
@@ -1092,7 +1125,7 @@ mod tests {
         assert!(r.contains("[result] FAILED"));
         assert!(r.contains("EResult: 15 k_EResultAccessDenied"));
         assert!(r.contains("likely: Item 42 belongs to account 7656"));
-        assert!(r.contains("warning: Item 42 was made by another account"));
+        assert!(r.contains("Item 42 belongs to account 7656"));
         if !home.is_empty() {
             assert!(!r.contains(&home), "the user's folder is hidden");
             assert!(r.contains("%USERPROFILE%"));

@@ -537,6 +537,10 @@ fn run() -> Result<()> {
                     }
                     // what should not be sent (.git, source art…) stays out: a clean copy goes up instead of the folder
                     let mut up = up;
+                    // a contributor cannot change the cover: it is not sent
+                    if pre.contributor() {
+                        up.preview = None;
+                    }
                     let copy = if pre.excluded.is_empty() { None } else { Some(uc::clean_copy(&content)?) };
                     if let Some(c) = &copy {
                         up.content = c.clone();

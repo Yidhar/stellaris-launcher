@@ -784,6 +784,10 @@ impl App {
     fn upload_now(&mut self) {
         let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
         let Some((mut up, typed)) = Self::form_upload(f) else { return };
+        // a contributor cannot change the cover: it is not sent
+        if f.pre.as_ref().is_some_and(|p| p.contributor()) {
+            up.preview = None;
+        }
         let record_typed = typed.and_then(|t| t.parse::<u64>().ok());
         // what should not be sent (.git, source art…) stays out: a clean copy goes up instead of the folder
         let excluded = f.pre.as_ref().is_some_and(|p| !p.excluded.is_empty());
@@ -3492,7 +3496,7 @@ impl App {
                 if existing.is_some() || !f.item_id.trim().is_empty() {
                     ui.label(RichText::new(tr(lang, "up.keep_preview")).size(12.5).color(SECONDARY));
                 } else {
-                    ui.label(RichText::new(tr(lang, "up.no_preview")).size(12.5).color(ORANGE));
+                    ui.label(RichText::new(tr(lang, "up.no_preview")).size(12.5).color(SECONDARY));
                 }
             }
             ui.add_space(14.0);
