@@ -380,6 +380,9 @@ struct App {
     /// the game's graphics settings, and the monitors (read when the Settings page is first shown)
     gfx: Option<Graphics>,
     displays: Vec<gamesettings::Display>,
+    /// when the game's settings files were written, as last read; and when that was last looked at
+    gfx_stamp: Vec<Option<(std::time::SystemTime, u64)>>,
+    gfx_looked: Instant,
     gfx_status: Option<(String, bool)>,
     /// the "Upload mod" picker is open
     pick_upload: bool,
@@ -491,6 +494,8 @@ impl App {
             check: CheckState::default(),
             gfx: None,
             displays: Vec::new(),
+            gfx_stamp: Vec::new(),
+            gfx_looked: Instant::now(),
             gfx_status: None,
             pick_upload: false,
             mod_times: std::collections::HashMap::new(),
@@ -1500,6 +1505,8 @@ impl App {
                     match gamesettings::write(&game.data_dir, &g) {
                         Ok(()) => {
                             self.gfx = Some(g);
+                            // our own write: not a change to read back
+                            self.gfx_stamp = gamesettings::stamp(&game.data_dir);
                             self.gfx_status = Some((tr(self.lang, "gfx.saved").to_string(), true));
                         }
                         Err(e) => self.gfx_status = Some((format!("{e:#}"), false)),
@@ -3657,7 +3664,16 @@ impl App {
     fn graphics_section(&mut self, ui: &mut Ui, acts: &Acts) {
         let lang = self.lang;
         let Ok(game) = &self.game else { return };
+        // the game writes its settings when it starts and when they change in it: what is shown follows the files
+        if self.gfx.is_some() && self.gfx_looked.elapsed() > Duration::from_secs(1) {
+            self.gfx_looked = Instant::now();
+            if gamesettings::stamp(&game.data_dir) != self.gfx_stamp {
+                self.gfx = None;
+            }
+        }
         if self.gfx.is_none() {
+            self.gfx_stamp = gamesettings::stamp(&game.data_dir);
+            self.gfx_looked = Instant::now();
             self.gfx = Some(gamesettings::read(&game.data_dir));
             self.displays = gamesettings::displays();
         }

@@ -154,9 +154,25 @@ fn parse_res(s: &str) -> Option<(u32, u32)> {
 
 // ------------------------------------------------------------------ the two files
 
-/// The current settings (the defaults for what neither file says).
+/// The current settings. What neither file says (the game has not written them yet) is the monitor's current mode for the size and the
+/// refresh rate, and the defaults for the rest.
 pub fn read(data_dir: &Path) -> Graphics {
+    let shown = displays();
+    read_with(data_dir, |index| shown.get(index as usize).or(shown.first()).map(|d| d.current))
+}
+
+/// When the files were last written: a different answer means the game (or the official launcher) changed them, and they are read again.
+pub fn stamp(data_dir: &Path) -> Vec<Option<(std::time::SystemTime, u64)>> {
+    ["settings.txt", "pdx_settings.txt"]
+        .iter()
+        .map(|f| std::fs::metadata(data_dir.join(f)).ok().and_then(|m| Some((m.modified().ok()?, m.len()))))
+        .collect()
+}
+
+/// `read`, with the monitor's current mode (width, height, refresh rate) for a `display_index`.
+fn read_with(data_dir: &Path, desktop: impl Fn(u32) -> Option<(u32, u32, u32)>) -> Graphics {
     let mut g = Graphics::default();
+    let (mut size_found, mut full_found, mut win_found, mut rate_found) = (false, false, false, false);
     if let Ok(t) = std::fs::read_to_string(data_dir.join("settings.txt")) {
         if let Some(gr) = block(&t, whole(&t), "graphics") {
             if let Some(size) = block(&t, gr, "size") {
@@ -164,6 +180,7 @@ pub fn read(data_dir: &Path) -> Graphics {
                     if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
                         g.windowed_resolution = (x, y);
                         g.fullscreen_resolution = (x, y);
+                        size_found = true;
                     }
                 }
             }
@@ -173,6 +190,7 @@ pub fn read(data_dir: &Path) -> Graphics {
             }
             if let Some(v) = get(&t, gr, "refreshRate").and_then(|v| v.parse().ok()) {
                 g.refresh_rate = v;
+                rate_found = true;
             }
             if let Some(v) = get(&t, gr, "multi_sampling").and_then(|v| v.parse().ok()) {
                 g.multi_sampling = v;
@@ -203,13 +221,27 @@ pub fn read(data_dir: &Path) -> Graphics {
             }
             if let Some(v) = val("fullscreen_resolution").and_then(|v| parse_res(&v)) {
                 g.fullscreen_resolution = v;
+                full_found = true;
             }
             if let Some(v) = val("windowed_resolution").and_then(|v| parse_res(&v)) {
                 g.windowed_resolution = v;
+                win_found = true;
             }
             if let Some(v) = val("vsync") {
                 g.vsync = v == "yes";
             }
+        }
+    }
+    // nothing written yet: what the monitor shows now, as the game starts with
+    if let Some((w, h, hz)) = desktop(g.display_index) {
+        if !size_found && !full_found {
+            g.fullscreen_resolution = (w, h);
+        }
+        if !size_found && !win_found {
+            g.windowed_resolution = (w, h);
+        }
+        if !rate_found && hz > 1 {
+            g.refresh_rate = hz;
         }
     }
     g
@@ -355,6 +387,24 @@ mod tests {
 
     const SETTINGS: &str = "force_pow2_textures=no\r\ngraphics=\r\n{\r\n\tsize=\r\n\t{\r\n\t\tx=1920\r\n\t\ty=1080\r\n\t}\r\n\r\n\tgui_scale=1.000000\r\n\trefreshRate=60\r\n\tfullScreen=no\r\n\tborderless=no\r\n\tdisplay_index=0\r\n\tmulti_sampling=4\r\n\tvsync=yes\r\n}\r\nmusic_volume=50.000000\r\nbloom=\r\n{\r\n\tquality=2\r\n}\r\n";
     const PDX: &str = "\"Graphics\"=\n{\n\t\"display_mode\"=\n\t{\n\t\tvalue=\"windowed\"\n\t\tversion=0\n\t}\n\t\"vsync\"=\n\t{\n\t\tenabled=yes\n\t\tversion=0\n\t}\n}\n\"System\"=\n{\n\t\"language\"=\n\t{\n\t\tvalue=\"l_simp_chinese\"\n\t\tversion=0\n\t}\n}\n";
+
+    #[test]
+    fn unwritten_settings_take_the_monitors_mode() {
+        let dir = std::env::temp_dir().join(format!("stl-test-gfx-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desk = |_| Some((3840, 2160, 144));
+        // no files: the monitor's mode
+        let g = read_with(&dir, desk);
+        assert_eq!((g.fullscreen_resolution, g.windowed_resolution, g.refresh_rate), ((3840, 2160), (3840, 2160), 144));
+        // what the files say wins
+        std::fs::write(dir.join("settings.txt"), SETTINGS).unwrap();
+        let g = read_with(&dir, desk);
+        assert_eq!((g.windowed_resolution, g.refresh_rate), ((1920, 1080), 60));
+        let before = stamp(&dir);
+        std::fs::write(dir.join("pdx_settings.txt"), PDX).unwrap();
+        assert_ne!(stamp(&dir), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_edits_and_keeps_everything_else() {
