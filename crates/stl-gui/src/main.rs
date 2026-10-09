@@ -2209,10 +2209,10 @@ impl App {
         let drag = self.ps_drag.clone();
         let from_s = drag.as_ref().and_then(|d| shown.iter().position(|&i| self.store.playsets[active].mods[i].id == d.id));
         let gen = self.ps_drag_gen;
+        let shift = ui.input(|i| i.modifiers.shift);
         let mut to_s: Option<usize> = None;
         let mut drag_start: Option<PsDrag> = None;
         let mut menu_open: Option<(String, egui::Pos2, Rect)> = None;
-        let menu_for = self.ps_menu.as_ref().map(|m| m.0.clone()).filter(|_| ui.memory(|mem| mem.is_popup_open(egui::Id::new("ps-row-menu"))));
         let mut floated = false;
         plain_rows(ui, "ps-mods", ROW_H, shown.len(), |ui, range| {
             let top0 = ui.cursor().top() - range.start as f32 * ROW_H;
@@ -2300,27 +2300,46 @@ impl App {
                         });
                     });
                 }, |ui| {
-                    // right to left: more (the menu), the switch, what the check found, then the version and the size
+                    // right to left: the switch, up and down (Shift: all the way), what the check found, the version and the size, then remove
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    let open_here = menu_for.as_deref() == Some(m.id.as_str());
-                    let more = circle_button(ui, Icon::More, theme::white(if open_here { 40 } else { 18 }), LABEL, true);
-                    if more.clicked() {
-                        menu_open = Some((m.id.clone(), pos2(more.rect.right() - 200.0, more.rect.bottom() + 6.0), more.rect));
-                    }
-                    ui.add_space(4.0);
                     let mut on = enabled;
                     if theme::switch_keyed(ui, ("ps-mod", &m.id), &mut on).changed() {
                         acts.push(Act::ModFlag(i, on));
                     }
+                    // up/down and remove show only while the pointer is on the row (their room is kept, so nothing moves)
+                    ui.scope(|ui| {
+                        ui.set_opacity(handle_t);
+                        if handle_t < 0.5 {
+                            ui.disable();
+                        }
+                        let (up, down) = theme::up_down(ui, egui::Id::new(("ps-move", &m.id)), i > 0, i + 1 < total);
+                        if up.on_hover_text(tr(lang, "ps.up_hint")).clicked() {
+                            acts.push(if shift { Act::ModMoveTo(i, 0) } else { Act::ModMove(i, -1) });
+                        }
+                        if down.on_hover_text(tr(lang, "ps.down_hint")).clicked() {
+                            acts.push(if shift { Act::ModMoveTo(i, total) } else { Act::ModMove(i, 1) });
+                        }
+                    });
                     if let Some((pos, n, _, wins, loses)) = found {
                         if n + wins + loses > 0 && circle_button(ui, Icon::Info, theme::white(18), LABEL, true).on_hover_text(tr(lang, "chk.details")).clicked() {
                             acts.push(Act::OpenModCheck(pos));
                         }
                     }
-                    if !meta.is_empty() {
-                        ui.add_space(6.0);
-                        ui.add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
-                    }
+                    // a column of its own, so that remove stands at the same place in every row
+                    ui.add_space(6.0);
+                    ui.allocate_ui_with_layout(vec2(150.0, ROW_H), Layout::right_to_left(Align::Center), |ui| {
+                        if !meta.is_empty() {
+                            ui.add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
+                        }
+                    });
+                    // apart from the switch and the arrows, before what is only read
+                    ui.add_space(4.0);
+                    ui.scope(|ui| {
+                        ui.set_opacity(handle_t);
+                        if circle_button(ui, Icon::Close, theme::white(14), SECONDARY, handle_t >= 0.5).on_hover_text(tr(lang, "mods.remove")).clicked() {
+                            acts.push(Act::ModRemove(i));
+                        }
+                    });
                 });
             }
             if let (Some(_), Some(p)) = (&drag, pointer) {
@@ -2371,14 +2390,8 @@ impl App {
             ui.memory_mut(|mem| mem.open_popup(menu_id));
         }
         if let Some(m) = menu_open {
-            // the ⋯ of the row whose menu is open closes it again
-            if m.2 != Rect::NOTHING && menu_for.as_deref() == Some(m.0.as_str()) {
-                ui.memory_mut(|mem| mem.close_popup());
-                self.ps_menu = None;
-            } else {
-                self.ps_menu = Some(m);
-                ui.memory_mut(|mem| mem.open_popup(menu_id));
-            }
+            self.ps_menu = Some(m);
+            ui.memory_mut(|mem| mem.open_popup(menu_id));
         }
         if let Some((id, at, button)) = self.ps_menu.clone() {
             let index = self.store.playsets[active].mods.iter().position(|x| x.id == id);

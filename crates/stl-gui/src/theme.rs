@@ -337,6 +337,27 @@ pub fn row_contents(ui: &mut Ui, rect: Rect, id: egui::Id, layer: Option<egui::L
     }
 }
 
+/// Up and down in one narrow capsule, a half each: (up, down). A half that cannot move is dimmed and does not respond.
+pub fn up_down(ui: &mut Ui, id: egui::Id, can_up: bool, can_down: bool) -> (Response, Response) {
+    let (rect, _) = ui.allocate_exact_size(vec2(24.0, 44.0), Sense::hover());
+    ui.painter().rect_filled(rect, cr(12.0), white(16));
+    let half = |top: bool, can: bool| {
+        let r = if top { Rect::from_min_max(rect.min, pos2(rect.right(), rect.center().y)) } else { Rect::from_min_max(pos2(rect.left(), rect.center().y), rect.max) };
+        let resp = ui.interact(r, id.with(top), if can { Sense::click() } else { Sense::hover() });
+        if can && resp.hovered() {
+            let corner = if top { egui::CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 } } else { egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 } };
+            ui.painter().rect_filled(r, corner, white(if resp.is_pointer_button_down_on() { 46 } else { 30 }));
+        }
+        let color = if can { LABEL } else { white(50) };
+        (if top { Icon::Up } else { Icon::Down }).draw(ui.painter(), r.center() + vec2(0.0, if top { 2.0 } else { -2.0 }), 12.0, color, 1.8);
+        resp
+    };
+    let up = half(true, can_up);
+    let down = half(false, can_down);
+    ui.painter().hline(egui::Rangef::new(rect.left() + 6.0, rect.right() - 6.0), rect.center().y, Stroke::new(1.0, white(22)));
+    (up, down)
+}
+
 /// A drag handle: six dots, `alpha` of white (hidden at 0).
 pub fn grip(painter: &egui::Painter, center: Pos2, alpha: f32) {
     if alpha <= 0.01 {
@@ -851,8 +872,6 @@ pub enum Icon {
     Upload,
     Download,
     Info,
-    /// three dots in a row: more actions
-    More,
     Trash,
     ViewList,
     ViewCompact,
@@ -928,11 +947,6 @@ impl Icon {
                 closed(vec![at(-0.27, -0.24), at(0.27, -0.24), at(0.21, 0.38), at(-0.21, 0.38)]);
                 line(vec![at(-0.07, -0.08), at(-0.06, 0.24)]);
                 line(vec![at(0.07, -0.08), at(0.06, 0.24)]);
-            }
-            Icon::More => {
-                for dx in [-0.26f32, 0.0, 0.26] {
-                    p.circle_filled(at(dx, 0.0), width * 1.05, color);
-                }
             }
             Icon::Info => {
                 p.circle_stroke(c, 0.4 * s, st);
