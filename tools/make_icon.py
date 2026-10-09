@@ -1,8 +1,9 @@
-"""Draws the program icon (a white four-pointed star on a rounded blue square, the same shape as theme::icon) at the sizes Windows uses
+"""Draws the program icon (the title bar's mark in white on a rounded blue square, the same drawing as theme::icon) at the sizes Windows uses
 and writes crates/stl-gui/assets/stellaris-launcher.ico, which build.rs puts into the exes. Run again after changing the drawing:
 
     python tools/make_icon.py
 """
+import math
 import os
 
 from PIL import Image
@@ -11,6 +12,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'crates', 'stl-gui', 'assets', 'stellaris-launcher.ico')
 SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
 SS = 4  # samples per pixel along each axis, for smooth edges
+MARK = 0.64  # the mark's radius, as a part of half the icon's width (theme::MARK_IN_ICON)
+
+# the mark (theme::mark_points): a four-pointed star, tips at 1 and the waist at 3.2/9, from the right-hand tip; the title bar fills it as a
+# fan of triangles from that first point, which makes the concave star a ray (theme::in_mark)
+V = [(math.cos(k * math.tau / 16) * (1.0 if k % 4 == 0 else 3.2 / 9), math.sin(k * math.tau / 16) * (1.0 if k % 4 == 0 else 3.2 / 9)) for k in range(16)]
+
+
+def in_mark(x, y):
+    def side(p, a, b):
+        return (p[0] - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p[1] - b[1])
+    p = (x, y)
+    for i in range(1, 15):
+        d1, d2, d3 = side(p, V[0], V[i]), side(p, V[i], V[i + 1]), side(p, V[i + 1], V[0])
+        if not ((d1 < 0 or d2 < 0 or d3 < 0) and (d1 > 0 or d2 > 0 or d3 > 0)):
+            return True
+    return False
 
 
 def pixel(fx, fy):
@@ -21,7 +38,7 @@ def pixel(fx, fy):
         return None
     t = (fy + 1) / 2
     r, g, b = 70 + (40 - 70) * t, 120 + (70 - 120) * t, 255 + (190 - 255) * t
-    if abs(fx) ** (2 / 3) + abs(fy) ** (2 / 3) <= 0.62 ** (2 / 3):
+    if in_mark(fx / MARK, fy / MARK):
         r, g, b = 255, 255, 255
     return r, g, b
 

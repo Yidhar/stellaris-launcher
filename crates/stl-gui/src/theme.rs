@@ -144,7 +144,11 @@ pub fn install_style(ctx: &egui::Context) {
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, LABEL);
     v.widgets.active.fg_stroke = Stroke::new(1.0, LABEL);
     v.popup_shadow = Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(120) };
-    ctx.set_style(style);
+    // egui keeps a style for each of the dark and light themes and picks one by Windows' app theme, which can be reported after the start:
+    // set only the current one, the other kept egui's defaults (dim grey text on this dark window). Both get this style, and it stays dark.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }
 
 // ------------------------------------------------------------------ the picture behind, and the glass in front of it
@@ -922,30 +926,69 @@ impl Icon {
     }
 }
 
-/// The window icon: a four-pointed star on a rounded blue square, drawn pixel by pixel.
+/// The mark's outline: a four-pointed star (tips at `radius`, the waist at 0.36 of it) as 16 points starting at the right-hand tip.
+pub fn mark_points(center: Pos2, radius: f32) -> Vec<Pos2> {
+    (0..16)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::TAU / 16.0;
+            let r = if k % 4 == 0 { radius } else { radius * 3.2 / 9.0 };
+            center + vec2(a.cos() * r, a.sin() * r)
+        })
+        .collect()
+}
+
+/// Whether a point (in units of the mark's radius, y down) is inside the mark as the title bar paints it. The outline is concave, and a
+/// convex fill draws it as a fan of triangles from its first point: the right half fills out into a body and the left tip stays a tail,
+/// like a ray. The icons are drawn the same way so that all three match.
+pub fn in_mark(x: f32, y: f32) -> bool {
+    let v = mark_points(pos2(0.0, 0.0), 1.0);
+    let side = |p: Pos2, a: Pos2, b: Pos2| (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
+    let p = pos2(x, y);
+    (1..15).any(|i| {
+        let (d1, d2, d3) = (side(p, v[0], v[i]), side(p, v[i], v[i + 1]), side(p, v[i + 1], v[0]));
+        !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+    })
+}
+
+/// The window icon: the mark in white on a rounded blue square (the exe's icon, `tools/make_icon.py`, is the same drawing).
 pub fn icon() -> egui::IconData {
     let n = 64usize;
+    let ss = 4usize;
     let mut rgba = vec![0u8; n * n * 4];
     for y in 0..n {
         for x in 0..n {
-            let (fx, fy) = ((x as f32 + 0.5) / n as f32 * 2.0 - 1.0, (y as f32 + 0.5) / n as f32 * 2.0 - 1.0);
-            let q = (fx.abs() - 0.78, fy.abs() - 0.78);
-            let outside = (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt() + q.0.max(q.1).min(0.0) - 0.2;
-            if outside > 0.0 {
-                continue;
+            let (mut acc, mut hits) = ([0.0f32; 3], 0usize);
+            for sy in 0..ss {
+                for sx in 0..ss {
+                    let fx = (x as f32 + (sx as f32 + 0.5) / ss as f32) / n as f32 * 2.0 - 1.0;
+                    let fy = (y as f32 + (sy as f32 + 0.5) / ss as f32) / n as f32 * 2.0 - 1.0;
+                    let q = (fx.abs() - 0.78, fy.abs() - 0.78);
+                    let outside = (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt() + q.0.max(q.1).min(0.0) - 0.2;
+                    if outside > 0.0 {
+                        continue;
+                    }
+                    let t = (fy + 1.0) / 2.0;
+                    let mut c = [egui::lerp(70.0..=40.0, t), egui::lerp(120.0..=70.0, t), egui::lerp(255.0..=190.0, t)];
+                    if in_mark(fx / MARK_IN_ICON, fy / MARK_IN_ICON) {
+                        c = [255.0; 3];
+                    }
+                    hits += 1;
+                    for i in 0..3 {
+                        acc[i] += c[i];
+                    }
+                }
             }
-            let t = (fy + 1.0) / 2.0;
-            let (mut r, mut g, mut b) = (egui::lerp(70.0..=40.0, t), egui::lerp(120.0..=70.0, t), egui::lerp(255.0..=190.0, t));
-            let star = fx.abs().powf(2.0 / 3.0) + fy.abs().powf(2.0 / 3.0);
-            if star <= 0.62f32.powf(2.0 / 3.0) {
-                (r, g, b) = (255.0, 255.0, 255.0);
+            if hits > 0 {
+                let i = (y * n + x) * 4;
+                for c in 0..3 {
+                    rgba[i + c] = (acc[c] / hits as f32).round() as u8;
+                }
+                rgba[i + 3] = (255 * hits / (ss * ss)) as u8;
             }
-            let i = (y * n + x) * 4;
-            rgba[i] = r as u8;
-            rgba[i + 1] = g as u8;
-            rgba[i + 2] = b as u8;
-            rgba[i + 3] = 255;
         }
     }
     egui::IconData { rgba, width: n as u32, height: n as u32 }
 }
+
+/// The mark's radius in the icon, as a part of half the icon's width.
+const MARK_IN_ICON: f32 = 0.64;

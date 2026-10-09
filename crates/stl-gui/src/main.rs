@@ -3885,14 +3885,8 @@ impl App {
         }
         // the mark: the star alone, in white like the title (no coloured tile, which stood out against the artwork)
         let mark = Rect::from_center_size(pos2(rect.left() + 34.0 + 10.0, rect.center().y), Vec2::splat(20.0));
-        let star: Vec<egui::Pos2> = (0..16)
-            .map(|k| {
-                let a = k as f32 * std::f32::consts::TAU / 16.0;
-                let r = if k % 4 == 0 { 9.0 } else { 3.2 };
-                mark.center() + vec2(a.cos() * r, a.sin() * r)
-            })
-            .collect();
-        ui.painter().add(Shape::convex_polygon(star, theme::white(225), egui::Stroke::NONE));
+        // painted as a convex shape on purpose: that fills the concave star into a ray (theme::in_mark), which the icons copy
+        ui.painter().add(Shape::convex_polygon(theme::mark_points(mark.center(), 9.0), theme::white(225), egui::Stroke::NONE));
         ui.painter().text(pos2(mark.right() + 9.0, rect.center().y), egui::Align2::LEFT_CENTER, "Stellaris Launcher", egui::FontId::new(13.5, bold()), theme::white(200));
         // the buttons
         let mut buttons = ui.new_child(UiBuilder::new().id_salt("window-buttons").max_rect(rect.shrink2(vec2(18.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
@@ -4016,6 +4010,11 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::install_style(&cc.egui_ctx);
+            if std::env::args().any(|a| a == "--other-theme") {
+                // as when Windows reports the other app theme after the start (a check that the look does not depend on it)
+                let t = cc.egui_ctx.theme();
+                cc.egui_ctx.set_theme(if t == egui::Theme::Dark { egui::Theme::Light } else { egui::Theme::Dark });
+            }
             Ok(Box::new(App::new(&cc.egui_ctx)))
         }),
     )
