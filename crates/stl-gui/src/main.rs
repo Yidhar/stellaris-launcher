@@ -376,6 +376,8 @@ struct App {
     /// development: a drag of the n-th row held with the pointer at a height (`--drag-demo=n,y`)
     dev_drag: Option<(usize, f32)>,
     dev_menu: bool,
+    /// development: every row shows what it shows under the pointer (`--row-tools`)
+    dev_row_tools: bool,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
     playset_filter: String,
     ps_filter: String,
@@ -502,6 +504,7 @@ impl App {
             mod_sizes_started: false,
             dev_drag: None,
             dev_menu: false,
+            dev_row_tools: false,
             playset_filter: String::new(),
             ps_filter: String::new(),
             focus_playset_filter: false,
@@ -579,6 +582,8 @@ impl App {
                 }
             } else if let Some(v) = a.strip_prefix("--ask-delete=") {
                 app.confirm_delete = v.parse().ok();
+            } else if a == "--row-tools" {
+                app.dev_row_tools = true;
             } else if let Some(v) = a.strip_prefix("--row-menu=") {
                 // development: the right-click menu of the n-th mod, open at a point
                 if let Some(m) = app.store.playsets.get(app.store.active_index()).and_then(|p| p.mods.get(v.parse::<usize>().unwrap_or(0))) {
@@ -2209,6 +2214,7 @@ impl App {
         let drag = self.ps_drag.clone();
         let from_s = drag.as_ref().and_then(|d| shown.iter().position(|&i| self.store.playsets[active].mods[i].id == d.id));
         let gen = self.ps_drag_gen;
+        let all_tools = self.dev_row_tools;
         let mut to_s: Option<usize> = None;
         let mut drag_start: Option<PsDrag> = None;
         let mut menu_open: Option<(String, egui::Pos2, Rect)> = None;
@@ -2265,7 +2271,7 @@ impl App {
                 }
                 // on the row (and not dragging another): its number gives way to the handle
                 let on_row = drag.is_none() && pointer.is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p));
-                let handle_t = ui.ctx().animate_bool_with_time(egui::Id::new(("ps-handle", &m.id)), lifted || on_row, 0.12);
+                let handle_t = ui.ctx().animate_bool_with_time(egui::Id::new(("ps-handle", &m.id)), lifted || on_row || all_tools, 0.12);
                 if on_row && ui.input(|x| x.pointer.secondary_clicked()) {
                     menu_open = pointer.map(|p| (m.id.clone(), p, Rect::from_center_size(p, vec2(16.0, 16.0))));
                 }
@@ -2307,11 +2313,12 @@ impl App {
                         acts.push(Act::ModFlag(i, on));
                     }
                     ui.add_space(6.0);
-                    ui.allocate_ui_with_layout(vec2(150.0, ROW_H), Layout::right_to_left(Align::Center), |ui| {
-                        if !meta.is_empty() {
-                            ui.add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
-                        }
-                    });
+                    // the room is taken whole first (allocate_ui_with_layout would keep only what the text uses), then the text is put in it
+                    let (col, _) = ui.allocate_exact_size(vec2(150.0, ROW_H), Sense::hover());
+                    if !meta.is_empty() {
+                        ui.new_child(UiBuilder::new().max_rect(col).layout(Layout::right_to_left(Align::Center)))
+                            .add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
+                    }
                     // remove: the red bin of the playset list, shown while the pointer is on the row (its room is kept)
                     ui.scope(|ui| {
                         ui.set_opacity(handle_t);
