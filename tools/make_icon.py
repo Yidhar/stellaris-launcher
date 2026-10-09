@@ -1,4 +1,4 @@
-"""Draws the program icon — the title bar's mark in white on a rounded blue square — and writes it twice:
+"""Draws the program icon — the title bar's mark in white on a rounded indigo square — and writes it twice:
 
 - crates/stl-gui/assets/stellaris-launcher.ico, at the sizes Windows uses, which build.rs puts into the exes;
 - crates/stl-gui/assets/window-icon-64.rgba, raw 64x64 RGBA, the window's icon (theme::icon).
@@ -24,6 +24,8 @@ SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
 SS = 4  # samples per pixel along each axis, for smooth edges
 MARK = 0.64  # the mark's radius, as a part of half the icon's width
 WHITE = 225 / 255  # the title bar paints the mark in white at this opacity
+TOP, BOTTOM = (58, 64, 128), (20, 22, 52)  # the square's colour at its top and its bottom
+RIM = 0.035  # the lighter rim's width, as a part of half the icon's width
 
 MESH = json.load(open(os.path.join(ASSETS, 'mark-mesh.json'), encoding='utf-8'))
 VERTS = np.array(MESH['vertices'], dtype=np.float64)
@@ -56,12 +58,15 @@ def draw(n):
     s = n * SS
     f = (np.arange(s) + 0.5) / s * 2 - 1
     fx, fy = np.meshgrid(f, f)
-    # the rounded square, its blue darkening downwards
+    # the rounded square: deep indigo, darker downwards, like the night the mark stands on in the title bar (a bright blue made the mark's
+    # dimmer parts blend in at taskbar size), with a lighter rim that keeps it apart from a dark taskbar
     qx, qy = np.abs(fx) - 0.78, np.abs(fy) - 0.78
     outside = np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - 0.2
     tile = outside <= 0
-    t = (fy + 1) / 2
-    rgb = np.stack([70 + (40 - 70) * t, 120 + (70 - 120) * t, 255 + (190 - 255) * t], axis=-1)
+    t = ((fy + 1) / 2)[..., None]
+    rgb = np.array(TOP) + (np.array(BOTTOM) - np.array(TOP)) * t
+    rim = (outside > -RIM)[..., None]
+    rgb = np.where(rim, rgb + (255 - rgb) * 0.22, rgb)
     # the mark: white at the title bar's 225/255, once per layer (where the fan overlaps itself it is brighter: the ray's body)
     k = layers(fx / MARK, fy / MARK)[..., None]
     rgb = 255.0 - (255.0 - rgb) * (1.0 - WHITE) ** k

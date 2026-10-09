@@ -1008,7 +1008,7 @@ pub fn mark_points(center: Pos2, radius: f32) -> Vec<Pos2> {
         .collect()
 }
 
-/// The window icon: the title bar's mark on a rounded blue square, 64 × 64, as `tools/make_icon.py` draws it (from egui's own triangles of
+/// The window icon: the title bar's mark on a rounded indigo square, 64 × 64, as `tools/make_icon.py` draws it (from egui's own triangles of
 /// the mark, so that it shows the same shape); the exes' icon is the same drawing.
 pub fn icon() -> egui::IconData {
     egui::IconData { rgba: include_bytes!("../assets/window-icon-64.rgba").to_vec(), width: 64, height: 64 }
