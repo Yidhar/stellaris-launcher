@@ -107,7 +107,7 @@ pub fn is_excluded(name: &str, dir: bool) -> bool {
             .any(|e| n.ends_with(e))
 }
 
-fn human(bytes: u64) -> String {
+pub fn human(bytes: u64) -> String {
     match bytes {
         b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
         b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),

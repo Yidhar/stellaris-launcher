@@ -317,6 +317,39 @@ impl Rows {
     }
 }
 
+/// The insides of a list row laid over `rect` — which may be away from where the row was allocated: moved aside while another row is
+/// dragged past it, or floating under the pointer on `layer`. `left` fills it up to a trailing area `trail_w` wide, laid out right to left.
+pub fn row_contents(ui: &mut Ui, rect: Rect, id: egui::Id, layer: Option<egui::LayerId>, trail_w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
+    let inner = rect.shrink2(vec2(16.0, 0.0));
+    let gap = if trail_w > 0.0 { 10.0 } else { 0.0 };
+    let build = |r: Rect, salt: &str, layout: Layout| {
+        let b = UiBuilder::new().id_salt((id, salt)).max_rect(r).layout(layout);
+        match layer {
+            Some(l) => b.layer_id(l),
+            None => b,
+        }
+    };
+    let left_rect = Rect::from_min_max(inner.min, pos2(inner.right() - trail_w - gap, inner.bottom()));
+    left(&mut ui.new_child(build(left_rect, "left", Layout::left_to_right(Align::Center))));
+    if trail_w > 0.0 {
+        let right_rect = Rect::from_min_max(pos2(inner.right() - trail_w, inner.top()), inner.max);
+        right(&mut ui.new_child(build(right_rect, "right", Layout::right_to_left(Align::Center))));
+    }
+}
+
+/// A drag handle: six dots, `alpha` of white (hidden at 0).
+pub fn grip(painter: &egui::Painter, center: Pos2, alpha: f32) {
+    if alpha <= 0.01 {
+        return;
+    }
+    let c = Color32::from_white_alpha((alpha.clamp(0.0, 1.0) * 255.0) as u8);
+    for dx in [-2.6f32, 2.6] {
+        for dy in [-5.5f32, 0.0, 5.5] {
+            painter.circle_filled(center + vec2(dx, dy), 1.6, c);
+        }
+    }
+}
+
 /// Small spaced capitals over a group.
 pub fn section(ui: &mut Ui, text: &str) {
     ui.add_space(14.0);
@@ -580,6 +613,30 @@ pub fn menu_on<R>(ui: &mut Ui, id: egui::Id, anchor: &Response, width: f32, abov
             })
         });
     let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p) && !anchor.rect.contains(p)));
+    if outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.memory_mut(|m| m.close_popup());
+    }
+    Some(shown.inner)
+}
+
+/// A menu at a point (a right-click), in the same card and rows as `menu`. Open it with `ui.memory_mut(|m| m.open_popup(id))`.
+pub fn menu_at<R>(ui: &mut Ui, id: egui::Id, at: Pos2, width: f32, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    if !ui.memory(|m| m.is_popup_open(id)) {
+        return None;
+    }
+    let shown = egui::Area::new(id.with("menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at)
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            glass_with(ui, RADIUS, 6.0, true, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                add(ui)
+            })
+        });
+    let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p)));
     if outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.memory_mut(|m| m.close_popup());
     }

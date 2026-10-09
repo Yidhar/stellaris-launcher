@@ -36,6 +36,24 @@ pub struct Mod {
     pub problem: Option<String>,
 }
 
+/// How much room a mod takes on the disk: its zip, or everything in its content folder. None when it has neither.
+pub fn disk_size(m: &Mod) -> Option<u64> {
+    fn walk(dir: &Path) -> u64 {
+        let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+        rd.flatten()
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => walk(&e.path()),
+                Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => 0,
+            })
+            .sum()
+    }
+    if let Some(a) = m.archive.as_ref().filter(|a| a.is_file()) {
+        return std::fs::metadata(a).ok().map(|x| x.len());
+    }
+    m.path.as_ref().filter(|p| p.is_dir()).map(|p| walk(p))
+}
+
 pub fn parse_descriptor(file: &Path, text: &str, data_dir: &Path) -> Mod {
     let s = script::parse(text);
     let file_name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
