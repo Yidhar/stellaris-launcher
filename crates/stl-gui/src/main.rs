@@ -2209,7 +2209,6 @@ impl App {
         let drag = self.ps_drag.clone();
         let from_s = drag.as_ref().and_then(|d| shown.iter().position(|&i| self.store.playsets[active].mods[i].id == d.id));
         let gen = self.ps_drag_gen;
-        let shift = ui.input(|i| i.modifiers.shift);
         let mut to_s: Option<usize> = None;
         let mut drag_start: Option<PsDrag> = None;
         let mut menu_open: Option<(String, egui::Pos2, Rect)> = None;
@@ -2268,7 +2267,7 @@ impl App {
                 let on_row = drag.is_none() && pointer.is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p));
                 let handle_t = ui.ctx().animate_bool_with_time(egui::Id::new(("ps-handle", &m.id)), lifted || on_row, 0.12);
                 if on_row && ui.input(|x| x.pointer.secondary_clicked()) {
-                    menu_open = pointer.map(|p| (m.id.clone(), p, Rect::NOTHING));
+                    menu_open = pointer.map(|p| (m.id.clone(), p, Rect::from_center_size(p, vec2(16.0, 16.0))));
                 }
                 let row_top = rect.top();
                 theme::row_contents(ui, rect, egui::Id::new(("ps-row", &m.id)), layer, 300.0, |ui| {
@@ -2300,24 +2299,27 @@ impl App {
                         });
                     });
                 }, |ui| {
-                    // right to left: the switch, up and down (Shift: all the way), what the check found, the version and the size, then remove
+                    // right to left: the switch, the version and the size (a column of its own), remove, what the check found — each at the
+                    // same place in every row, whatever the texts
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let mut on = enabled;
                     if theme::switch_keyed(ui, ("ps-mod", &m.id), &mut on).changed() {
                         acts.push(Act::ModFlag(i, on));
                     }
-                    // up/down and remove show only while the pointer is on the row (their room is kept, so nothing moves)
+                    ui.add_space(6.0);
+                    ui.allocate_ui_with_layout(vec2(150.0, ROW_H), Layout::right_to_left(Align::Center), |ui| {
+                        if !meta.is_empty() {
+                            ui.add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
+                        }
+                    });
+                    // remove: the red bin of the playset list, shown while the pointer is on the row (its room is kept)
                     ui.scope(|ui| {
                         ui.set_opacity(handle_t);
                         if handle_t < 0.5 {
                             ui.disable();
                         }
-                        let (up, down) = theme::up_down(ui, egui::Id::new(("ps-move", &m.id)), i > 0, i + 1 < total);
-                        if up.on_hover_text(tr(lang, "ps.up_hint")).clicked() {
-                            acts.push(if shift { Act::ModMoveTo(i, 0) } else { Act::ModMove(i, -1) });
-                        }
-                        if down.on_hover_text(tr(lang, "ps.down_hint")).clicked() {
-                            acts.push(if shift { Act::ModMoveTo(i, total) } else { Act::ModMove(i, 1) });
+                        if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "mods.remove")).clicked() {
+                            acts.push(Act::ModRemove(i));
                         }
                     });
                     if let Some((pos, n, _, wins, loses)) = found {
@@ -2325,21 +2327,6 @@ impl App {
                             acts.push(Act::OpenModCheck(pos));
                         }
                     }
-                    // a column of its own, so that remove stands at the same place in every row
-                    ui.add_space(6.0);
-                    ui.allocate_ui_with_layout(vec2(150.0, ROW_H), Layout::right_to_left(Align::Center), |ui| {
-                        if !meta.is_empty() {
-                            ui.add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
-                        }
-                    });
-                    // apart from the switch and the arrows, before what is only read
-                    ui.add_space(4.0);
-                    ui.scope(|ui| {
-                        ui.set_opacity(handle_t);
-                        if circle_button(ui, Icon::Close, theme::white(14), SECONDARY, handle_t >= 0.5).on_hover_text(tr(lang, "mods.remove")).clicked() {
-                            acts.push(Act::ModRemove(i));
-                        }
-                    });
                 });
             }
             if let (Some(_), Some(p)) = (&drag, pointer) {
