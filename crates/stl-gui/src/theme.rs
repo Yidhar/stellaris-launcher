@@ -619,8 +619,9 @@ pub fn menu_on<R>(ui: &mut Ui, id: egui::Id, anchor: &Response, width: f32, abov
     Some(shown.inner)
 }
 
-/// A menu at a point (a right-click), in the same card and rows as `menu`. Open it with `ui.memory_mut(|m| m.open_popup(id))`.
-pub fn menu_at<R>(ui: &mut Ui, id: egui::Id, at: Pos2, width: f32, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+/// A menu at a point (a right-click, or under a button: `button` is then that button's rectangle, whose clicks do not count as clicks
+/// outside), in the same card and rows as `menu`. Open it with `ui.memory_mut(|m| m.open_popup(id))`.
+pub fn menu_at<R>(ui: &mut Ui, id: egui::Id, at: Pos2, button: Rect, width: f32, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     if !ui.memory(|m| m.is_popup_open(id)) {
         return None;
     }
@@ -636,7 +637,7 @@ pub fn menu_at<R>(ui: &mut Ui, id: egui::Id, at: Pos2, width: f32, add: impl FnO
                 add(ui)
             })
         });
-    let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p)));
+    let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p) && !button.contains(p)));
     if outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.memory_mut(|m| m.close_popup());
     }
@@ -850,6 +851,8 @@ pub enum Icon {
     Upload,
     Download,
     Info,
+    /// three dots in a row: more actions
+    More,
     Trash,
     ViewList,
     ViewCompact,
@@ -925,6 +928,11 @@ impl Icon {
                 closed(vec![at(-0.27, -0.24), at(0.27, -0.24), at(0.21, 0.38), at(-0.21, 0.38)]);
                 line(vec![at(-0.07, -0.08), at(-0.06, 0.24)]);
                 line(vec![at(0.07, -0.08), at(0.06, 0.24)]);
+            }
+            Icon::More => {
+                for dx in [-0.26f32, 0.0, 0.26] {
+                    p.circle_filled(at(dx, 0.0), width * 1.05, color);
+                }
             }
             Icon::Info => {
                 p.circle_stroke(c, 0.4 * s, st);

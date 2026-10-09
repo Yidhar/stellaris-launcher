@@ -369,7 +369,7 @@ struct App {
     /// counts the drags: the rows' sliding is keyed by it, so that after a drop they start still at their new places
     ps_drag_gen: u64,
     /// the mod (its id) whose right-click menu is open, and where
-    ps_menu: Option<(String, egui::Pos2)>,
+    ps_menu: Option<(String, egui::Pos2, Rect)>,
     /// how much room each mod takes (by id), worked out in the background
     mod_sizes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     mod_sizes_started: bool,
@@ -582,7 +582,7 @@ impl App {
             } else if let Some(v) = a.strip_prefix("--row-menu=") {
                 // development: the right-click menu of the n-th mod, open at a point
                 if let Some(m) = app.store.playsets.get(app.store.active_index()).and_then(|p| p.mods.get(v.parse::<usize>().unwrap_or(0))) {
-                    app.ps_menu = Some((m.id.clone(), pos2(900.0, 300.0)));
+                    app.ps_menu = Some((m.id.clone(), pos2(900.0, 300.0), Rect::NOTHING));
                     app.dev_menu = true;
                 }
             } else if let Some(v) = a.strip_prefix("--drag-demo=") {
@@ -2150,7 +2150,11 @@ impl App {
                     self.check.sheet = CheckSheet::Sort;
                 }
             } else {
-                ui.label(RichText::new(tr(lang, "ps.order_hint")).size(12.5).color(SECONDARY));
+                // the check button keeps its room: the hint is cut short rather than run under it
+                let room = (ui.available_width() - 120.0).max(40.0);
+                ui.allocate_ui_with_layout(vec2(room, 20.0), Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(tr(lang, "ps.order_hint")).size(12.5).color(SECONDARY)).truncate());
+                });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if self.check.result.is_some() && current.is_none() { tr(lang, "chk.stale") } else { tr(lang, "chk.run") };
@@ -2205,10 +2209,10 @@ impl App {
         let drag = self.ps_drag.clone();
         let from_s = drag.as_ref().and_then(|d| shown.iter().position(|&i| self.store.playsets[active].mods[i].id == d.id));
         let gen = self.ps_drag_gen;
-        let shift = ui.input(|i| i.modifiers.shift);
         let mut to_s: Option<usize> = None;
         let mut drag_start: Option<PsDrag> = None;
-        let mut menu_open: Option<(String, egui::Pos2)> = None;
+        let mut menu_open: Option<(String, egui::Pos2, Rect)> = None;
+        let menu_for = self.ps_menu.as_ref().map(|m| m.0.clone()).filter(|_| ui.memory(|mem| mem.is_popup_open(egui::Id::new("ps-row-menu"))));
         let mut floated = false;
         plain_rows(ui, "ps-mods", ROW_H, shown.len(), |ui, range| {
             let top0 = ui.cursor().top() - range.start as f32 * ROW_H;
@@ -2260,26 +2264,25 @@ impl App {
                 } else if k > 0 {
                     ui.painter().line_segment([pos2(rect.left() + 16.0, rect.top()), pos2(rect.right(), rect.top())], egui::Stroke::new(1.0, theme::white(22)));
                 }
-                // the handle, in the row's left margin: shown while the pointer is on the row, brighter on itself
-                let grip_rect = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(14.0, 30.0));
-                let grip = ui.interact(grip_rect, egui::Id::new(("ps-grip", &m.id)), Sense::drag());
+                // on the row (and not dragging another): its number gives way to the handle
                 let on_row = drag.is_none() && pointer.is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p));
-                let alpha = ui.ctx().animate_value_with_time(egui::Id::new(("ps-grip-a", &m.id)), if lifted || grip.hovered() { 0.9 } else if on_row { 0.45 } else { 0.0 }, 0.15);
-                let grip_painter = if lifted { ui.ctx().layer_painter(float_layer) } else { ui.painter().clone() };
-                theme::grip(&grip_painter, grip_rect.center(), alpha);
-                if grip.drag_started() {
-                    let at = ui.input(|x| x.pointer.press_origin()).or(pointer).map(|p| p.y - rect.top()).unwrap_or(ROW_H / 2.0);
-                    drag_start = Some(PsDrag { id: m.id.clone(), grab: at });
-                }
+                let handle_t = ui.ctx().animate_bool_with_time(egui::Id::new(("ps-handle", &m.id)), lifted || on_row, 0.12);
                 if on_row && ui.input(|x| x.pointer.secondary_clicked()) {
-                    menu_open = pointer.map(|p| (m.id.clone(), p));
+                    menu_open = pointer.map(|p| (m.id.clone(), p, Rect::NOTHING));
                 }
-                theme::row_contents(ui, rect, egui::Id::new(("ps-row", &m.id)), layer, 290.0, |ui| {
-                    let mut on = enabled;
-                    if theme::switch_keyed(ui, ("ps-mod", &m.id), &mut on).changed() {
-                        acts.push(Act::ModFlag(i, on));
+                let row_top = rect.top();
+                theme::row_contents(ui, rect, egui::Id::new(("ps-row", &m.id)), layer, 300.0, |ui| {
+                    // the first column: the place in the order, or (under the pointer) the handle that drags the row
+                    let (col, _) = ui.allocate_exact_size(vec2(28.0, ROW_H), Sense::hover());
+                    let grip = ui.interact(col.shrink2(vec2(0.0, 12.0)), egui::Id::new(("ps-grip", &m.id)), Sense::drag());
+                    let number = Color32::from_white_alpha((90.0 * (1.0 - handle_t)) as u8);
+                    ui.painter().text(col.center(), egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::new(12.5, egui::FontFamily::Proportional), number);
+                    theme::grip(ui.painter(), col.center(), handle_t * if lifted || grip.hovered() { 0.95 } else { 0.55 });
+                    if grip.drag_started() {
+                        let at = ui.input(|x| x.pointer.press_origin()).or(pointer).map(|p| p.y - row_top).unwrap_or(ROW_H / 2.0);
+                        drag_start = Some(PsDrag { id: m.id.clone(), grab: at });
                     }
-                    ui.label(RichText::new(format!("{:>3}", i + 1)).size(12.0).color(theme::TERTIARY).monospace());
+                    ui.add_space(6.0);
                     stack(ui, ROW_H, 42.0, |ui| {
                         let color = if problem.is_some() { RED } else if enabled { LABEL } else { SECONDARY };
                         ui.add(egui::Label::new(RichText::new(&name).size(15.0).color(color)).truncate());
@@ -2297,24 +2300,25 @@ impl App {
                         });
                     });
                 }, |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    // right to left: more (the menu), the switch, what the check found, then the version and the size
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let open_here = menu_for.as_deref() == Some(m.id.as_str());
+                    let more = circle_button(ui, Icon::More, theme::white(if open_here { 40 } else { 18 }), LABEL, true);
+                    if more.clicked() {
+                        menu_open = Some((m.id.clone(), pos2(more.rect.right() - 200.0, more.rect.bottom() + 6.0), more.rect));
+                    }
+                    ui.add_space(4.0);
+                    let mut on = enabled;
+                    if theme::switch_keyed(ui, ("ps-mod", &m.id), &mut on).changed() {
+                        acts.push(Act::ModFlag(i, on));
+                    }
                     if let Some((pos, n, _, wins, loses)) = found {
-                        if n + wins + loses > 0 && circle_button(ui, Icon::Info, theme::white(24), LABEL, true).on_hover_text(tr(lang, "chk.details")).clicked() {
+                        if n + wins + loses > 0 && circle_button(ui, Icon::Info, theme::white(18), LABEL, true).on_hover_text(tr(lang, "chk.details")).clicked() {
                             acts.push(Act::OpenModCheck(pos));
                         }
                     }
-                    if circle_button(ui, Icon::Close, theme::white(24), SECONDARY, true).on_hover_text(tr(lang, "mods.remove")).clicked() {
-                        acts.push(Act::ModRemove(i));
-                    }
-                    // Shift: all the way
-                    if circle_button(ui, Icon::Down, theme::white(24), LABEL, i + 1 < total).on_hover_text(tr(lang, "ps.down_hint")).clicked() {
-                        acts.push(if shift { Act::ModMoveTo(i, total) } else { Act::ModMove(i, 1) });
-                    }
-                    if circle_button(ui, Icon::Up, theme::white(24), LABEL, i > 0).on_hover_text(tr(lang, "ps.up_hint")).clicked() {
-                        acts.push(if shift { Act::ModMoveTo(i, 0) } else { Act::ModMove(i, -1) });
-                    }
                     if !meta.is_empty() {
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         ui.add(egui::Label::new(RichText::new(meta.join("  ·  ")).size(12.0).color(theme::TERTIARY)).truncate());
                     }
                 });
@@ -2367,17 +2371,29 @@ impl App {
             ui.memory_mut(|mem| mem.open_popup(menu_id));
         }
         if let Some(m) = menu_open {
-            self.ps_menu = Some(m);
-            ui.memory_mut(|mem| mem.open_popup(menu_id));
+            // the ⋯ of the row whose menu is open closes it again
+            if m.2 != Rect::NOTHING && menu_for.as_deref() == Some(m.0.as_str()) {
+                ui.memory_mut(|mem| mem.close_popup());
+                self.ps_menu = None;
+            } else {
+                self.ps_menu = Some(m);
+                ui.memory_mut(|mem| mem.open_popup(menu_id));
+            }
         }
-        if let Some((id, at)) = self.ps_menu.clone() {
+        if let Some((id, at, button)) = self.ps_menu.clone() {
             let index = self.store.playsets[active].mods.iter().position(|x| x.id == id);
-            let shown_menu = theme::menu_at(ui, menu_id, at, 200.0, |ui| {
+            let shown_menu = theme::menu_at(ui, menu_id, at, button, 200.0, |ui| {
                 if let Some(i) = index {
-                    if theme::menu_item(ui, tr(lang, "ps.to_top"), false).clicked() {
+                    if i > 0 && theme::menu_item(ui, tr(lang, "ps.move_up"), false).clicked() {
+                        acts.push(Act::ModMove(i, -1));
+                    }
+                    if i + 1 < total && theme::menu_item(ui, tr(lang, "ps.move_down"), false).clicked() {
+                        acts.push(Act::ModMove(i, 1));
+                    }
+                    if i > 0 && theme::menu_item(ui, tr(lang, "ps.to_top"), false).clicked() {
                         acts.push(Act::ModMoveTo(i, 0));
                     }
-                    if theme::menu_item(ui, tr(lang, "ps.to_bottom"), false).clicked() {
+                    if i + 1 < total && theme::menu_item(ui, tr(lang, "ps.to_bottom"), false).clicked() {
                         acts.push(Act::ModMoveTo(i, total));
                     }
                     if theme::menu_item(ui, tr(lang, "mods.remove"), false).clicked() {
