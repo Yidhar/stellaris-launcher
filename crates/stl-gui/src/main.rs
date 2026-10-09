@@ -4101,7 +4101,7 @@ impl App {
         }
         // the mark: the star alone, in white like the title (no coloured tile, which stood out against the artwork)
         let mark = Rect::from_center_size(pos2(rect.left() + 34.0 + 10.0, rect.center().y), Vec2::splat(20.0));
-        // painted as a convex shape on purpose: that fills the concave star into a ray (theme::in_mark), which the icons copy
+        // painted as a convex shape on purpose: egui fills the concave star as a fan, into a ray (tools/make_icon.py copies it for the icons)
         ui.painter().add(Shape::convex_polygon(theme::mark_points(mark.center(), 9.0), theme::white(225), egui::Stroke::NONE));
         ui.painter().text(pos2(mark.right() + 9.0, rect.center().y), egui::Align2::LEFT_CENTER, "Stellaris Launcher", egui::FontId::new(13.5, bold()), theme::white(200));
         // the buttons
@@ -4239,6 +4239,23 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::version_parts;
+
+    /// Writes the title bar's mark as egui draws it (its triangles, with the soft edge, at 150 % scaling) to the file `STL_DUMP_MARK`
+    /// names: `tools/make_icon.py` draws the icons from it, so that they show the same shape. Run again after changing the mark:
+    /// `STL_DUMP_MARK=crates/stl-gui/assets/mark-mesh.json cargo test -p stl-gui dump_the_mark -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_the_mark() {
+        use eframe::egui::epaint::{Mesh, TessellationOptions, Tessellator};
+        let Ok(out) = std::env::var("STL_DUMP_MARK") else { return };
+        let mut t = Tessellator::new(1.5, TessellationOptions::default(), [1, 1], vec![]);
+        let mut mesh = Mesh::default();
+        let shape = super::Shape::convex_polygon(super::theme::mark_points(super::pos2(0.0, 0.0), 9.0), super::Color32::WHITE, super::egui::Stroke::NONE);
+        t.tessellate_shape(shape, &mut mesh);
+        let vertices: Vec<String> = mesh.vertices.iter().map(|v| format!("[{},{},{}]", v.pos.x, v.pos.y, v.color.a() as f32 / 255.0)).collect();
+        let json = format!("{{\"radius\":9.0,\"ppp\":1.5,\"vertices\":[{}],\"indices\":{:?}}}\n", vertices.join(","), mesh.indices);
+        std::fs::write(out, json).unwrap();
+    }
 
     #[test]
     fn splits_the_game_version() {
