@@ -165,6 +165,8 @@ enum Act {
     ModFlag(usize, bool),
     ModRemove(usize),
     ModMove(usize, i32),
+    /// a mod (by its place) goes to a place in the list as it is now (0 = the top, the length = the bottom)
+    ModMoveTo(usize, usize),
     ModAdd(String),
     ModDrop(String),
     DlcFlag(String, bool),
@@ -362,6 +364,8 @@ struct App {
     confirm_delete: Option<usize>,
     /// the search over the mods of the playset on show
     ps_mod_filter: String,
+    /// the mod (its id) being dragged to another place in the playset
+    ps_drag: Option<String>,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
     playset_filter: String,
     ps_filter: String,
@@ -481,6 +485,7 @@ impl App {
             new_name: String::new(),
             confirm_delete: None,
             ps_mod_filter: String::new(),
+            ps_drag: None,
             playset_filter: String::new(),
             ps_filter: String::new(),
             focus_playset_filter: false,
@@ -1305,6 +1310,17 @@ impl App {
                 if i < self.store.playsets[active].mods.len() {
                     self.store.playsets[active].mods.remove(i);
                     self.save();
+                }
+            }
+            Act::ModMoveTo(from, at) => {
+                let mods = &mut self.store.playsets[active].mods;
+                if from < mods.len() && at <= mods.len() {
+                    let to = if at > from { at - 1 } else { at };
+                    if to != from {
+                        let m = mods.remove(from);
+                        mods.insert(to, m);
+                        self.save();
+                    }
                 }
             }
             Act::ModMove(i, by) => {
@@ -2136,8 +2152,16 @@ impl App {
             });
             return;
         }
+        // dragging a row: where it would go (a place in the whole list), and the drag that starts now
+        let pointer = ui.ctx().pointer_latest_pos();
+        let dragging = self.ps_drag.clone();
+        let shift = ui.input(|i| i.modifiers.shift);
+        let mut drop_at: Option<usize> = None;
+        let mut drag_start: Option<String> = None;
         plain_rows(ui, "ps-mods", 58.0, shown.len(), |ui, range| {
             let mut rows = Rows::starting_at(range.start);
+            let drop_layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("ps-drop"))).with_clip_rect(ui.clip_rect());
+            let mut last: Option<(usize, Rect)> = None;
             for i in range.map(|k| shown[k]) {
                 let m = &self.store.playsets[active].mods[i];
                 let info = self.mods.iter().find(|x| x.id == m.id);
@@ -2155,7 +2179,7 @@ impl App {
                     let s = &r.report.per_mod[pos];
                     (pos, mine.len(), worst == Some(Severity::Error), s.wins, s.loses)
                 });
-                rows.row(ui, 58.0, 146.0, false, |ui| {
+                let row = rows.row_with(ui, 58.0, 146.0, Some(egui::Id::new(("ps-row", &m.id))), Sense::click_and_drag(), |ui| {
                     let mut on = enabled;
                     if theme::switch_keyed(ui, ("ps-mod", &m.id), &mut on).changed() {
                         acts.push(Act::ModFlag(i, on));
@@ -2187,15 +2211,94 @@ impl App {
                     if circle_button(ui, Icon::Close, theme::white(24), SECONDARY, true).on_hover_text(tr(lang, "mods.remove")).clicked() {
                         acts.push(Act::ModRemove(i));
                     }
-                    if circle_button(ui, Icon::Down, theme::white(24), LABEL, i + 1 < total).clicked() {
-                        acts.push(Act::ModMove(i, 1));
+                    // Shift: all the way
+                    if circle_button(ui, Icon::Down, theme::white(24), LABEL, i + 1 < total).on_hover_text(tr(lang, "ps.down_hint")).clicked() {
+                        acts.push(if shift { Act::ModMoveTo(i, total) } else { Act::ModMove(i, 1) });
                     }
-                    if circle_button(ui, Icon::Up, theme::white(24), LABEL, i > 0).clicked() {
-                        acts.push(Act::ModMove(i, -1));
+                    if circle_button(ui, Icon::Up, theme::white(24), LABEL, i > 0).on_hover_text(tr(lang, "ps.up_hint")).clicked() {
+                        acts.push(if shift { Act::ModMoveTo(i, 0) } else { Act::ModMove(i, -1) });
                     }
                 });
+                // the row is dragged anywhere outside its buttons; right-click offers the top and the bottom
+                if row.drag_started() {
+                    drag_start = Some(m.id.clone());
+                }
+                if dragging.is_none() && row.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                }
+                row.context_menu(|ui| {
+                    ui.set_width(180.0);
+                    if theme::menu_item(ui, tr(lang, "ps.to_top"), false).clicked() {
+                        acts.push(Act::ModMoveTo(i, 0));
+                        ui.close_menu();
+                    }
+                    if theme::menu_item(ui, tr(lang, "ps.to_bottom"), false).clicked() {
+                        acts.push(Act::ModMoveTo(i, total));
+                        ui.close_menu();
+                    }
+                    if theme::menu_item(ui, tr(lang, "mods.remove"), false).clicked() {
+                        acts.push(Act::ModRemove(i));
+                        ui.close_menu();
+                    }
+                });
+                if let (Some(id), Some(p)) = (&dragging, pointer) {
+                    if *id == m.id {
+                        ui.painter().rect_filled(row.rect.shrink2(vec2(6.0, 2.0)), egui::CornerRadius::same(10), BLUE.gamma_multiply(0.22));
+                    }
+                    if row.rect.y_range().contains(p.y) {
+                        let before = p.y < row.rect.center().y;
+                        drop_at = Some(if before { i } else { i + 1 });
+                        let y = if before { row.rect.top() } else { row.rect.bottom() };
+                        drop_layer.hline(egui::Rangef::new(row.rect.left() + 10.0, row.rect.right() - 10.0), y, egui::Stroke::new(2.5, BLUE));
+                    }
+                }
+                last = Some((i, row.rect));
+            }
+            if let (Some(_), Some(p)) = (&dragging, pointer) {
+                // under the last row: to the end
+                if let Some((i, r)) = last {
+                    if drop_at.is_none() && p.y > r.bottom() {
+                        drop_at = Some(i + 1);
+                        drop_layer.hline(egui::Rangef::new(r.left() + 10.0, r.right() - 10.0), r.bottom(), egui::Stroke::new(2.5, BLUE));
+                    }
+                }
+                // near the top or the bottom of the list: it scrolls
+                let clip = ui.clip_rect();
+                let edge = 40.0;
+                if p.y < clip.top() + edge {
+                    ui.scroll_with_delta(vec2(0.0, 12.0 * (1.0 - (p.y - clip.top()).max(0.0) / edge)));
+                } else if p.y > clip.bottom() - edge {
+                    ui.scroll_with_delta(vec2(0.0, -12.0 * (1.0 - (clip.bottom() - p.y).max(0.0) / edge)));
+                }
+                ui.ctx().request_repaint();
             }
         });
+        if drag_start.is_some() {
+            self.ps_drag = drag_start;
+        }
+        if let Some(id) = self.ps_drag.clone() {
+            let (released, escape) = ui.input(|i| (i.pointer.any_released() || !i.pointer.any_down(), i.key_pressed(egui::Key::Escape)));
+            if escape {
+                self.ps_drag = None;
+            } else if released {
+                self.ps_drag = None;
+                let from = self.store.playsets[active].mods.iter().position(|x| x.id == id);
+                if let (Some(from), Some(at)) = (from, drop_at) {
+                    acts.push(Act::ModMoveTo(from, at));
+                }
+            } else if let Some(p) = pointer {
+                // the mod follows the pointer
+                let name = self.mods.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or(id);
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("ps-drag-ghost")));
+                let galley = painter.layout_no_wrap(name, egui::FontId::new(14.0, egui::FontFamily::Proportional), LABEL);
+                let rect = Rect::from_min_size(p + vec2(16.0, -galley.size().y / 2.0 - 9.0), galley.size() + vec2(28.0, 18.0));
+                painter.add(theme::lift(rect, 10.0));
+                painter.rect_filled(rect, egui::CornerRadius::same(10), Color32::from_rgb(52, 52, 56));
+                painter.rect_stroke(rect, egui::CornerRadius::same(10), egui::Stroke::new(1.0, BLUE), egui::StrokeKind::Inside);
+                painter.galley(rect.min + vec2(14.0, 9.0), galley, LABEL);
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            }
+        }
     }
 
     fn playset_dlc(&mut self, ui: &mut Ui, acts: &Acts) {

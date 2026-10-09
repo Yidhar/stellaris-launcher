@@ -278,7 +278,20 @@ impl Rows {
 
     /// One row: `left` fills the row up to a trailing area `trail_w` wide, in which `right` is laid out right to left.
     pub fn row(&mut self, ui: &mut Ui, height: f32, trail_w: f32, clickable: bool, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) -> Response {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), if clickable { Sense::click() } else { Sense::hover() });
+        self.row_with(ui, height, trail_w, None, if clickable { Sense::click() } else { Sense::hover() }, left, right)
+    }
+
+    /// `row`, with an id that stays with what the row shows (a list that builds only the rows in view gives its rows other automatic ids
+    /// as it scrolls) and any sense (a row that can be dragged). What is in the row is laid over it and keeps its own clicks.
+    pub fn row_with(&mut self, ui: &mut Ui, height: f32, trail_w: f32, id: Option<egui::Id>, sense: Sense, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) -> Response {
+        let clickable = sense.senses_click();
+        let (rect, resp) = match id {
+            Some(id) => {
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+                (rect, ui.interact(rect, id, sense))
+            }
+            None => ui.allocate_exact_size(vec2(ui.available_width(), height), sense),
+        };
         if std::mem::take(&mut self.mark) {
             ui.painter().rect_filled(rect.shrink2(vec2(6.0, 2.0)), cr(10.0), white(34));
         } else if clickable && resp.hovered() {
