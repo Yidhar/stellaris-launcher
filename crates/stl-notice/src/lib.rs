@@ -1,8 +1,9 @@
 //! `stl_notice.dll`: the launcher loads it into the game after the playset's DLL plugins. From inside the game it checks that each of them
-//! is loaded, then shows the result in a small card at the top right of the game window for a few seconds, and unloads itself.
+//! is loaded, then says how many are in a small capsule at the top right of the game window for a few seconds, and unloads itself. It does
+//! not name them: there may be many.
 //!
 //! - What to check and the words to show come from `%APPDATA%\stellaris-launcher\notice\<pid>.txt`, written by the launcher just before (one
-//!   line each, fields split by tabs): `title`, `all` and `some` (the summary when all / not all are loaded: `{0}` loaded, `{1}` in all),
+//!   line each, fields split by tabs): `all` and `some` (the summary when all / not all are loaded: `{0}` loaded, `{1}` in all),
 //!   `missing` (the reason for a plugin not found in the game), then `plugin <name> <dll path>` and `skipped <name> <reason>` lines.
 //! - The card is its own window (layered, click-through, never activated), drawn with GDI on this DLL's own thread: nothing of the game is
 //!   called. It shows only while the game is the foreground window; a game in exclusive full screen hides it (the launcher does not load
@@ -15,10 +16,9 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{BOOL, HMODULE, HWND, LPARAM, POINT, RECT, SIZE, TRUE};
 use windows_sys::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, DeleteDC, DeleteObject, DrawTextW, GetDC, LineTo, MoveToEx,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    CLEARTYPE_QUALITY, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_NORMAL,
-    FW_SEMIBOLD, HDC, HFONT, PS_SOLID, TRANSPARENT,
+    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    CLEARTYPE_QUALITY, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    FW_SEMIBOLD, HDC, HFONT, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, FreeLibraryAndExitThread, GetModuleHandleW};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
@@ -65,7 +65,6 @@ unsafe extern "system" fn worker(param: *mut c_void) -> u32 {
 
 /// What the card says.
 struct Notice {
-    title: String,
     summary: String,
     rows: Vec<(bool, String, String)>,
 }
@@ -123,7 +122,7 @@ fn parse(text: &str) -> Option<Notice> {
     }
     let template = if loaded == total { word("all") } else { word("some") };
     let summary = template.replace("{0}", &loaded.to_string()).replace("{1}", &total.to_string());
-    Some(Notice { title: word("title"), summary, rows })
+    Some(Notice { summary, rows })
 }
 
 struct Find {
@@ -191,21 +190,7 @@ unsafe fn text(dc: HDC, f: HFONT, s: &str, color: u32, mut r: RECT) {
     SelectObject(dc, old);
 }
 
-unsafe fn line(dc: HDC, color: u32, width: i32, pts: &[(i32, i32)]) {
-    let pen = CreatePen(PS_SOLID, width, color);
-    let old = SelectObject(dc, pen);
-    let mut it = pts.iter();
-    if let Some(&(x, y)) = it.next() {
-        MoveToEx(dc, x, y, null_mut());
-        for &(x, y) in it {
-            LineTo(dc, x, y);
-        }
-    }
-    SelectObject(dc, old);
-    DeleteObject(pen);
-}
-
-/// The card, drawn once into a 32-bit bitmap with its rounded corners in the alpha channel; shown with a fading opacity.
+/// The capsule, drawn once into a 32-bit bitmap with its rounded ends in the alpha channel; shown with a fading opacity.
 struct Card {
     dc: HDC,
     bitmap: *mut c_void,
@@ -213,6 +198,34 @@ struct Card {
     h: i32,
 }
 
+/// The mark of the title bar: a four-pointed star filled as a fan of triangles from its right-hand tip (as egui fills it there).
+unsafe fn mark(dc: HDC, cx: i32, cy: i32, r: f32) {
+    use windows_sys::Win32::Graphics::Gdi::{CreateSolidBrush, Polygon, GetStockObject, NULL_PEN};
+    let pts: Vec<POINT> = (0..16)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::TAU / 16.0;
+            let rr = if k % 4 == 0 { r } else { r * 3.2 / 9.0 };
+            POINT { x: cx + (a.cos() * rr).round() as i32, y: cy + (a.sin() * rr).round() as i32 }
+        })
+        .collect();
+    let brush = CreateSolidBrush(rgb(255, 255, 255));
+    let old_brush = SelectObject(dc, brush);
+    let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    if let Some(&first) = pts.first() {
+        for pair in pts.windows(2).skip(1) {
+            if let [a, b] = pair {
+                let tri = [first, *a, *b];
+                Polygon(dc, tri.as_ptr(), 3);
+            }
+        }
+    }
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    DeleteObject(brush);
+}
+
+/// A capsule: the mark, then one line (how many plugins are loaded); an orange dot when not all are. The plugins are not named: there may be
+/// many of them.
 unsafe fn draw(n: &Notice, scale: f32) -> Option<Card> {
     let px = |v: f32| (v * scale).round() as i32;
     let screen = GetDC(null_mut());
@@ -221,22 +234,11 @@ unsafe fn draw(n: &Notice, scale: f32) -> Option<Card> {
     if dc.is_null() {
         return None;
     }
-    let f_title = font(px(12.0), FW_NORMAL as i32);
-    let f_summary = font(px(15.0), FW_SEMIBOLD as i32);
-    let f_row = font(px(13.0), FW_NORMAL as i32);
-    let (pad, icon, gap) = (px(16.0), px(14.0), px(8.0));
-    let (h_title, h_summary, h_row) = (px(18.0), px(24.0), px(22.0));
-    // as wide as the longest line needs, within limits
-    let mut need = text_width(dc, f_title, &n.title).max(text_width(dc, f_summary, &n.summary));
-    for (_, name, why) in &n.rows {
-        let mut wr = icon + gap + text_width(dc, f_row, name);
-        if !why.is_empty() {
-            wr += gap + text_width(dc, f_row, why);
-        }
-        need = need.max(wr);
-    }
-    let w = (need + 2 * pad).clamp(px(280.0), px(560.0));
-    let h = pad + h_title + h_summary + px(6.0) + h_row * n.rows.len() as i32 + pad;
+    let all = n.rows.iter().all(|r| r.0);
+    let f_summary = font(px(14.0), FW_SEMIBOLD as i32);
+    let (pad, icon, gap, dot) = (px(16.0), px(18.0), px(10.0), if all { 0 } else { px(16.0) });
+    let h = px(40.0);
+    let w = pad + icon + gap + text_width(dc, f_summary, &n.summary) + dot + pad + px(4.0);
     let mut info: BITMAPINFO = std::mem::zeroed();
     info.bmiHeader = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -250,64 +252,50 @@ unsafe fn draw(n: &Notice, scale: f32) -> Option<Card> {
     let mut bits: *mut c_void = null_mut();
     let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
     if bitmap.is_null() || bits.is_null() {
+        DeleteObject(f_summary);
         DeleteDC(dc);
         return None;
     }
     SelectObject(dc, bitmap);
     let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
-    // the card's colour (0x00RRGGBB in the bitmap)
-    let (br, bg, bb) = (28u32, 30u32, 40u32);
+    // the capsule's colour (0x00RRGGBB in the bitmap)
+    let (br, bg, bb) = (24u32, 26u32, 36u32);
     for p in pixels.iter_mut() {
         *p = br << 16 | bg << 8 | bb;
     }
     SetBkMode(dc, TRANSPARENT as i32);
-    let mut y = pad;
-    text(dc, f_title, &n.title, rgb(150, 152, 165), RECT { left: pad, top: y, right: w - pad, bottom: y + h_title });
-    y += h_title;
-    text(dc, f_summary, &n.summary, rgb(255, 255, 255), RECT { left: pad, top: y, right: w - pad, bottom: y + h_summary });
-    y += h_summary + px(6.0);
-    for (ok, name, why) in &n.rows {
-        let cy = y + h_row / 2;
-        let x = pad;
-        if *ok {
-            line(dc, rgb(52, 199, 89), px(2.0), &[(x + px(1.0), cy), (x + px(5.0), cy + px(4.0)), (x + px(12.0), cy - px(4.0))]);
-        } else {
-            let c = rgb(255, 69, 58);
-            line(dc, c, px(2.0), &[(x + px(2.0), cy - px(5.0)), (x + px(11.0), cy + px(4.0))]);
-            line(dc, c, px(2.0), &[(x + px(11.0), cy - px(5.0)), (x + px(2.0), cy + px(4.0))]);
-        }
-        let tx = x + icon + gap;
-        let name_w = text_width(dc, f_row, name);
-        text(dc, f_row, name, rgb(235, 235, 240), RECT { left: tx, top: y, right: w - pad, bottom: y + h_row });
-        if !why.is_empty() {
-            let wx = tx + name_w + gap;
-            if wx < w - pad {
-                text(dc, f_row, why, rgb(150, 152, 165), RECT { left: wx, top: y, right: w - pad, bottom: y + h_row });
-            }
-        }
-        y += h_row;
+    mark(dc, pad + icon / 2, h / 2, icon as f32 / 2.0);
+    let tx = pad + icon + gap;
+    text(dc, f_summary, &n.summary, rgb(245, 245, 250), RECT { left: tx, top: 0, right: w - pad - dot, bottom: h });
+    if !all {
+        use windows_sys::Win32::Graphics::Gdi::{CreateSolidBrush, Ellipse, GetStockObject, NULL_PEN};
+        let brush = CreateSolidBrush(rgb(255, 159, 10));
+        let old_brush = SelectObject(dc, brush);
+        let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        let (cx, cy, r) = (w - pad - px(4.0), h / 2, px(4.0));
+        Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(brush);
     }
-    for f in [f_title, f_summary, f_row] {
-        DeleteObject(f);
-    }
-    // the rounded corners and a hairline rim into the alpha channel, colours premultiplied (as UpdateLayeredWindow wants them)
-    let radius = 12.0 * scale;
-    let opacity = 0.94f32;
+    DeleteObject(f_summary);
+    // fully rounded ends and a hairline rim into the alpha channel, colours premultiplied (as UpdateLayeredWindow wants them)
+    let radius = h as f32 / 2.0;
+    let opacity = 0.92f32;
     for yy in 0..h {
         for xx in 0..w {
             let (fx, fy) = (xx as f32 + 0.5, yy as f32 + 0.5);
             let dx = (radius - fx).max(fx - (w as f32 - radius)).max(0.0);
             let dy = (radius - fy).max(fy - (h as f32 - radius)).max(0.0);
             let dist = (dx * dx + dy * dy).sqrt() - radius;
-            let edge = (fx.min(w as f32 - fx).min(fy).min(h as f32 - fy)).min(-dist);
             let coverage = (0.5 - dist).clamp(0.0, 1.0);
             let Some(p) = pixels.get_mut((yy * w + xx) as usize) else { continue };
             let (mut r, mut g, mut b) = ((*p >> 16) & 255, (*p >> 8) & 255, *p & 255);
-            if edge < 1.0 * scale {
+            if dist > -1.0 * scale {
                 // the rim: a little lighter
-                r = (r + 40).min(255);
-                g = (g + 40).min(255);
-                b = (b + 48).min(255);
+                r = (r + 46).min(255);
+                g = (g + 46).min(255);
+                b = (b + 56).min(255);
             }
             let a = coverage * opacity;
             let pm = |c: u32| ((c as f32) * a).round() as u32;
