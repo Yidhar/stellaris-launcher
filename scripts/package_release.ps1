@@ -10,7 +10,7 @@ $name = "stellaris-launcher-$Version"
 $dir = Join-Path $Out $name
 if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
 New-Item -ItemType Directory -Force -Path "$dir/docs", "$dir/examples" | Out-Null
-foreach ($exe in "stellaris-launcher.exe", "stl.exe") {
+foreach ($exe in "stellaris-launcher.exe", "stl.exe", "stl_notice.dll") {
     $p = "target/release/$exe"
     if (-not (Test-Path $p)) { throw "missing build output: $p" }
     Copy-Item $p $dir

@@ -69,6 +69,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\stellaris-launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\stl.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\stl_notice.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion

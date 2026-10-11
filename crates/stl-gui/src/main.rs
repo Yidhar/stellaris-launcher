@@ -176,6 +176,7 @@ enum Act {
     /// start the game; true = continue the last save
     Start(bool),
     SetUsePlugins(bool),
+    SetIngameNotice(bool),
     SetAlternative(Option<usize>),
     CloseGame,
     RefreshNews,
@@ -741,7 +742,13 @@ impl App {
         let Ok(game) = self.game.clone() else { return };
         let store = self.store.clone();
         let alternative = self.store.alternative.filter(|&i| game.settings.alternative_executables.len() > i);
-        let opts = launch::Options { use_plugins: self.store.use_plugins != Some(false), continue_last, alternative, ..Default::default() };
+        let notice = (self.store.ingame_notice != Some(false)).then(|| launch::NoticeWords {
+            title: "Stellaris Launcher".into(),
+            all: tr(self.lang, "notice.all").into(),
+            some: tr(self.lang, "notice.some").into(),
+            missing: tr(self.lang, "notice.missing").into(),
+        });
+        let opts = launch::Options { use_plugins: self.store.use_plugins != Some(false), continue_last, alternative, notice, ..Default::default() };
         let (tx, rx) = channel();
         self.launching = Some(rx);
         self.log.clear();
@@ -1400,6 +1407,10 @@ impl App {
             Act::Start(continue_last) => self.start(continue_last),
             Act::SetUsePlugins(on) => {
                 self.store.use_plugins = Some(on);
+                self.save();
+            }
+            Act::SetIngameNotice(on) => {
+                self.store.ingame_notice = Some(on);
                 self.save();
             }
             Act::SetAlternative(i) => {
@@ -2806,6 +2817,17 @@ impl App {
                     let mut on = self.store.use_plugins != Some(false);
                     if switch(ui, &mut on).changed() {
                         acts.push(Act::SetUsePlugins(on));
+                    }
+                });
+                rows.row(ui, 64.0, 46.0, false, |ui| {
+                    stack(ui, 64.0, 38.0, |ui| {
+                        ui.label(tr(lang, "set.notice"));
+                        ui.label(RichText::new(tr(lang, "set.notice_hint")).size(12.0).color(SECONDARY));
+                    });
+                }, |ui| {
+                    let mut on = self.store.ingame_notice != Some(false);
+                    if switch(ui, &mut on).changed() {
+                        acts.push(Act::SetIngameNotice(on));
                     }
                 });
             });

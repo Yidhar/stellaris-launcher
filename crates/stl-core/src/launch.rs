@@ -21,11 +21,43 @@ pub struct Options {
     pub ready_timeout: Duration,
     /// start even if a game is running
     pub force: bool,
+    /// after the plugins, load `stl_notice.dll` (beside the launcher) to say in the game which of them are loaded, in these words
+    pub notice: Option<NoticeWords>,
+}
+
+/// The words of the in-game notice (`{0}` loaded, `{1}` in all).
+#[derive(Debug, Clone)]
+pub struct NoticeWords {
+    pub title: String,
+    pub all: String,
+    pub some: String,
+    pub missing: String,
+}
+
+impl Default for NoticeWords {
+    fn default() -> Self {
+        NoticeWords {
+            title: "Stellaris Launcher".into(),
+            all: "{0} DLL plugin(s) loaded in the game".into(),
+            some: "{0} of {1} DLL plugins loaded in the game".into(),
+            missing: "not found in the game".into(),
+        }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { playset: None, use_plugins: true, continue_last: false, alternative: None, extra_args: Vec::new(), dry_run: false, ready_timeout: Duration::from_secs(180), force: false }
+        Options {
+            playset: None,
+            use_plugins: true,
+            continue_last: false,
+            alternative: None,
+            extra_args: Vec::new(),
+            dry_run: false,
+            ready_timeout: Duration::from_secs(180),
+            force: false,
+            notice: Some(NoticeWords::default()),
+        }
     }
 }
 
@@ -211,5 +243,52 @@ pub fn launch(game: &Game, store: &Store, opts: &Options, say: &mut dyn FnMut(&s
             }
         }
     }
+    if let Some(words) = &opts.notice {
+        if !to_load.is_empty() || !report.skipped_plugins.is_empty() {
+            if let Err(e) = notice(game, pid, words, &to_load, &report.skipped_plugins, deadline) {
+                say(&format!("  in-game notice: {e:#}"));
+            } else {
+                say("  in-game notice: shown");
+            }
+        }
+    }
     Ok(report)
+}
+
+/// The in-game notice: the plugins to look for and the words go into `%APPDATA%\stellaris-launcher\notice\<pid>.txt`, then `stl_notice.dll`
+/// (beside the launcher) is loaded into the game; it checks each plugin from inside, shows the card and unloads itself.
+fn notice(game: &Game, pid: u32, words: &NoticeWords, plugins: &[plugins::Plugin], skipped: &[(String, String)], deadline: Instant) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let dll = exe.parent().map(|d| d.join("stl_notice.dll")).context("no folder for the launcher")?;
+    if !dll.is_file() {
+        bail!("stl_notice.dll is not beside the launcher");
+    }
+    // nothing can show over a game in exclusive full screen
+    if crate::gamesettings::read(&game.data_dir).display_mode == "fullscreen" {
+        bail!("the game is in exclusive full screen, where nothing can show over it");
+    }
+    if !wait_ready(pid, &plugins::LoadSpec::default(), deadline) {
+        bail!("the game exited or was not ready in time");
+    }
+    let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+    let mut text = format!("title\t{}\nall\t{}\nsome\t{}\nmissing\t{}\n", clean(&words.title), clean(&words.all), clean(&words.some), clean(&words.missing));
+    for p in plugins {
+        text += &format!("plugin\t{}\t{}\n", clean(&p.manifest.name), p.dll_path().display());
+    }
+    for (id, why) in skipped {
+        text += &format!("skipped\t{}\t{}\n", clean(id), clean(why));
+    }
+    let dir = paths::app_data_dir()?.join("notice");
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join(format!("{pid}.txt"));
+    std::fs::write(&file, text)?;
+    let r = process::inject(pid, &dll);
+    if r.is_err() {
+        let _ = std::fs::remove_file(&file);
+    }
+    // it unloads itself once shown, which `inject` may see as already gone
+    match r {
+        Err(e) if format!("{e:#}").contains("unloaded itself") => Ok(()),
+        r => r,
+    }
 }

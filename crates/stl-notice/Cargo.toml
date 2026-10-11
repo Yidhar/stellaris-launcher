@@ -1,0 +1,17 @@
+[package]
+name = "stl-notice"
+description = "Loaded into the game last by the launcher: checks from inside the game that the playset's DLL plugins are there, and says so in a small card over the game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "stl_notice"
+crate-type = ["cdylib"]
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation", "Win32_System_SystemServices", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_Security",
+] }

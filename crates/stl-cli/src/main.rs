@@ -106,6 +106,9 @@ enum Cmd {
         /// do not load DLL plugins
         #[arg(long)]
         no_plugins: bool,
+        /// do not show in the game which DLL plugins loaded
+        #[arg(long)]
+        no_notice: bool,
         /// continue the last save (the launcher's "continue")
         #[arg(long = "continue")]
         continue_last: bool,
@@ -847,7 +850,7 @@ fn run() -> Result<()> {
                 println!("{} {} in the playset {}", if on { "enabled" } else { "disabled" }, p.manifest.id, store.playsets[idx].name);
             }
         },
-        Cmd::Launch { playset, no_plugins, continue_last, alt, dry_run, force, timeout, args } => {
+        Cmd::Launch { playset, no_plugins, no_notice, continue_last, alt, dry_run, force, timeout, args } => {
             let game = open_game(&cli, &store)?;
             let opts = launch::Options {
                 playset: playset.clone(),
@@ -858,6 +861,7 @@ fn run() -> Result<()> {
                 dry_run: *dry_run,
                 ready_timeout: std::time::Duration::from_secs(*timeout),
                 force: *force,
+                notice: (!*no_notice).then(launch::NoticeWords::default),
             };
             let report = launch::launch(&game, &store, &opts, &mut |line| println!("{line}"))?;
             if !report.failed_plugins.is_empty() {

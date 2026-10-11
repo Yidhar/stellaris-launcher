@@ -25,7 +25,7 @@ pub const OWN_KEY: &str = "StellarisLauncher";
 const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths\stellaris-launcher.exe";
 pub const HOMEPAGE: &str = "https://github.com/Yidhar/stellaris-launcher";
 /// The files a release brings next to the exe: what the zip version's uninstall removes (nothing else in that folder is touched).
-pub const SHIPPED: &[&str] = &["stellaris-launcher.exe", "stl.exe", "README.md", "LICENSE", "docs", "examples"];
+pub const SHIPPED: &[&str] = &["stellaris-launcher.exe", "stl.exe", "stl_notice.dll", "README.md", "LICENSE", "docs", "examples"];
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

@@ -65,6 +65,9 @@ pub struct Store {
     /// load the playset's DLL plugins when starting; None = yes
     #[serde(default)]
     pub use_plugins: Option<bool>,
+    /// say in the game which DLL plugins are loaded; None = yes
+    #[serde(default)]
+    pub ingame_notice: Option<bool>,
     /// the alternative executable of `launcher-settings.json` to start (None = the standard one)
     #[serde(default)]
     pub alternative: Option<usize>,

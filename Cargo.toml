@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/stl-core", "crates/stl-cli", "crates/stl-gui"]
+members = ["crates/stl-core", "crates/stl-cli", "crates/stl-gui", "crates/stl-notice"]
 
 [workspace.package]
 version = "0.1.3"
