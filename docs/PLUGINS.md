@@ -86,11 +86,13 @@ Rules for the plugin:
   missing settings files; starts the game; waits for its window and `delay_ms`; loads each plugin with `LoadLibraryW` in a remote thread. A
   plugin already in the process is not loaded twice. The launcher never calls `FreeLibrary` in the game.
 - **In-game notice** (Settings, on by default; `stl launch --no-notice` turns it off): after the plugins, the launcher loads its own
-  `stl_notice.dll` into the game. From inside the game it looks for each plugin's module, shows a capsule at the game's top right for a few
-  seconds (a capsule saying how many of them are loaded — not their names, there may be many; an orange dot when not all are) and unloads
-  itself; the launcher's log says which. It draws its own click-through
-  window on its own thread and calls nothing of the game. It shows only while the game is in front, and not at all in exclusive full screen
-  (the launcher leaves it out then and says so in its log).
+  `stl_notice.dll` into the game. From inside the game it looks for each plugin's module and says how many are loaded in a capsule at the
+  game's top right for a few seconds (not their names — there may be many; an orange dot when not all are). While the game shows its title
+  screen, hovering the bottom-right corner of the game window fades in a small button that opens the list of the plugins: version, loaded or
+  why not, and a link to each one's settings folder. Once a game is loaded (the game's `time.log` gets its `Recalc cached data` line) the
+  button goes and the DLL unloads itself; going back to the title screen writes nothing, so the list is not there again until the next start.
+  It draws its own windows (never activated) on its own thread and calls nothing of the game; they show only while the game is in front, and
+  not at all in exclusive full screen (the launcher leaves it out then and says so in its log).
 - **Updates**: the Plugins page checks every plugin that has `update` once per session (and on *Check for updates*); a newer release shows
   a badge and an *Update* button, which downloads the zip, checks its SHA-256, and installs it like any plugin folder (the user's `config\`
   is kept). While the game runs, the update takes effect at its next start. A linked plugin is not updated. `stl plugin update [<id>] [--check]` does the same.

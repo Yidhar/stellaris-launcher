@@ -742,11 +742,16 @@ impl App {
         let Ok(game) = self.game.clone() else { return };
         let store = self.store.clone();
         let alternative = self.store.alternative.filter(|&i| game.settings.alternative_executables.len() > i);
+        let lang = self.lang;
         let notice = (self.store.ingame_notice != Some(false)).then(|| launch::NoticeWords {
-            title: "Stellaris Launcher".into(),
-            all: tr(self.lang, "notice.all").into(),
-            some: tr(self.lang, "notice.some").into(),
-            missing: tr(self.lang, "notice.missing").into(),
+            all: tr(lang, "notice.all").into(),
+            some: tr(lang, "notice.some").into(),
+            missing: tr(lang, "notice.missing").into(),
+            button: tr(lang, "notice.button").into(),
+            heading: tr(lang, "notice.heading").into(),
+            footer: tr(lang, "notice.footer").into(),
+            loaded: tr(lang, "notice.loaded").into(),
+            settings: tr(lang, "notice.settings").into(),
         });
         let opts = launch::Options { use_plugins: self.store.use_plugins != Some(false), continue_last, alternative, notice, ..Default::default() };
         let (tx, rx) = channel();

@@ -25,22 +25,32 @@ pub struct Options {
     pub notice: Option<NoticeWords>,
 }
 
-/// The words of the in-game notice (`{0}` loaded, `{1}` in all).
+/// The words of the in-game notice (`{0}` loaded, `{1}` in all) and of the plugin list on the title screen.
 #[derive(Debug, Clone)]
 pub struct NoticeWords {
-    pub title: String,
     pub all: String,
     pub some: String,
     pub missing: String,
+    /// the corner button of the title screen
+    pub button: String,
+    /// the list's heading, and what it says under the list
+    pub heading: String,
+    pub footer: String,
+    pub loaded: String,
+    pub settings: String,
 }
 
 impl Default for NoticeWords {
     fn default() -> Self {
         NoticeWords {
-            title: "Stellaris Launcher".into(),
             all: "{0} DLL plugin(s) loaded in the game".into(),
             some: "{0} of {1} DLL plugins loaded in the game".into(),
             missing: "not found in the game".into(),
+            button: "Plugins".into(),
+            heading: "DLL plugins".into(),
+            footer: "Stellaris Launcher · on the title screen only".into(),
+            loaded: "loaded".into(),
+            settings: "Settings".into(),
         }
     }
 }
@@ -256,7 +266,8 @@ pub fn launch(game: &Game, store: &Store, opts: &Options, say: &mut dyn FnMut(&s
 }
 
 /// The in-game notice: the plugins to look for and the words go into `%APPDATA%\stellaris-launcher\notice\<pid>.txt`, then `stl_notice.dll`
-/// (beside the launcher) is loaded into the game; it checks each plugin from inside, shows the card and unloads itself.
+/// (beside the launcher) is loaded into the game. It checks each plugin from inside and says how many are loaded; on the title screen a corner
+/// of the game opens the list of them; once a game is loaded (the game's `time.log` says so) it unloads itself.
 fn notice(game: &Game, pid: u32, words: &NoticeWords, plugins: &[plugins::Plugin], skipped: &[(String, String)], deadline: Instant) -> Result<()> {
     let exe = std::env::current_exe()?;
     let dll = exe.parent().map(|d| d.join("stl_notice.dll")).context("no folder for the launcher")?;
@@ -271,12 +282,31 @@ fn notice(game: &Game, pid: u32, words: &NoticeWords, plugins: &[plugins::Plugin
         bail!("the game exited or was not ready in time");
     }
     let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
-    let mut text = format!("title\t{}\nall\t{}\nsome\t{}\nmissing\t{}\n", clean(&words.title), clean(&words.all), clean(&words.some), clean(&words.missing));
-    for p in plugins {
-        text += &format!("plugin\t{}\t{}\n", clean(&p.manifest.name), p.dll_path().display());
+    let mut text = String::new();
+    for (k, v) in [
+        ("all", &words.all),
+        ("some", &words.some),
+        ("missing", &words.missing),
+        ("button", &words.button),
+        ("heading", &words.heading),
+        ("footer", &words.footer),
+        ("loaded", &words.loaded),
+        ("settings", &words.settings),
+    ] {
+        text += &format!("{k}\t{}\n", clean(v));
     }
+    // a game being played writes this into the game's time.log (and leaving it for the title screen writes nothing)
+    text += &format!("gamelog\t{}\n", game.data_dir.join("logs").join("time.log").display());
+    for p in plugins {
+        text += &format!("plugin\t{}\t{}\t{}\t{}\n", clean(&p.manifest.name), p.dll_path().display(), clean(&p.manifest.version), p.config_dir().display());
+    }
+    let installed = plugins::list().map(|(i, _)| i).unwrap_or_default();
     for (id, why) in skipped {
-        text += &format!("skipped\t{}\t{}\n", clean(id), clean(why));
+        let known = installed.iter().find(|p| &p.manifest.id == id);
+        let name = known.map(|p| p.manifest.name.clone()).unwrap_or_else(|| id.clone());
+        let version = known.map(|p| p.manifest.version.clone()).unwrap_or_default();
+        let config = known.map(|p| p.config_dir().display().to_string()).unwrap_or_default();
+        text += &format!("skipped\t{}\t{}\t{}\t{}\n", clean(&name), clean(why), clean(&version), config);
     }
     let dir = paths::app_data_dir()?.join("notice");
     std::fs::create_dir_all(&dir)?;
@@ -286,7 +316,7 @@ fn notice(game: &Game, pid: u32, words: &NoticeWords, plugins: &[plugins::Plugin
     if r.is_err() {
         let _ = std::fs::remove_file(&file);
     }
-    // it unloads itself once shown, which `inject` may see as already gone
+    // it unloads itself once a game is loaded, which `inject` may see as already gone
     match r {
         Err(e) if format!("{e:#}").contains("unloaded itself") => Ok(()),
         r => r,
