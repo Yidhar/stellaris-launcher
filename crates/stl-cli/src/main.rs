@@ -861,7 +861,7 @@ fn run() -> Result<()> {
                 dry_run: *dry_run,
                 ready_timeout: std::time::Duration::from_secs(*timeout),
                 force: *force,
-                notice: (!*no_notice).then(launch::NoticeWords::default),
+                notice: (!*no_notice).then(|| launch::NoticeWords::for_launch(&store, &game)),
             };
             let report = launch::launch(&game, &store, &opts, &mut |line| println!("{line}"))?;
             if !report.failed_plugins.is_empty() {

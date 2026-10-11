@@ -746,17 +746,8 @@ impl App {
         let Ok(game) = self.game.clone() else { return };
         let store = self.store.clone();
         let alternative = self.store.alternative.filter(|&i| game.settings.alternative_executables.len() > i);
-        let lang = self.lang;
-        let notice = (self.store.ingame_notice != Some(false)).then(|| launch::NoticeWords {
-            all: tr(lang, "notice.all").into(),
-            some: tr(lang, "notice.some").into(),
-            missing: tr(lang, "notice.missing").into(),
-            button: tr(lang, "notice.button").into(),
-            heading: tr(lang, "notice.heading").into(),
-            footer: tr(lang, "notice.footer").into(),
-            loaded: tr(lang, "notice.loaded").into(),
-            off: tr(lang, "notice.off").into(),
-        });
+        // in the language of this window
+        let notice = (self.store.ingame_notice != Some(false)).then(|| launch::NoticeWords::for_language(self.lang.code()));
         let opts = launch::Options { use_plugins: self.store.use_plugins != Some(false), continue_last, alternative, notice, ..Default::default() };
         let (tx, rx) = channel();
         self.launching = Some(rx);

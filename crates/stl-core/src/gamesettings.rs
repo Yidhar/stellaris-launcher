@@ -154,6 +154,16 @@ fn parse_res(s: &str) -> Option<(u32, u32)> {
 
 // ------------------------------------------------------------------ the two files
 
+/// The game's language as its settings say it (`l_simp_chinese`, …): `language` of `pdx_settings.txt`.
+pub fn language(data_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(data_dir.join("pdx_settings.txt")).ok()?;
+    let at = text.find("\"language\"")?;
+    let rest = text.get(at..)?;
+    let v = rest.find("value=\"")? + 7;
+    let end = rest.get(v..)?.find('"')?;
+    rest.get(v..v + end).map(str::to_string)
+}
+
 /// The current settings. What neither file says (the game has not written them yet) is the monitor's current mode for the size and the
 /// refresh rate, and the defaults for the rest.
 pub fn read(data_dir: &Path) -> Graphics {
@@ -412,6 +422,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("settings.txt"), SETTINGS).unwrap();
         std::fs::write(dir.join("pdx_settings.txt"), PDX).unwrap();
+        assert_eq!(language(&dir).as_deref(), Some("l_simp_chinese"));
         let mut g = read(&dir);
         assert_eq!(g.display_mode, "windowed");
         assert_eq!(g.windowed_resolution, (1920, 1080));
