@@ -20,6 +20,7 @@ pub mod news;
 pub mod official;
 pub mod paths;
 pub mod pe;
+pub mod pluginindex;
 pub mod plugins;
 pub mod process;
 pub mod saves;

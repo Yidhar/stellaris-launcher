@@ -362,10 +362,12 @@ pub fn install(src: &Path, link: bool) -> Result<Plugin> {
     let _ = std::fs::remove_dir_all(&staging);
     let prepared = (|| -> Result<()> {
         copy_dir(&src, &staging)?;
-        // an update keeps the user's settings: the installed config/ goes over the new defaults
-        let old_config = dst.join(CONFIG_DIR);
-        if old_config.is_dir() {
-            copy_dir(&old_config, &staging.join(CONFIG_DIR))?;
+        // an update keeps the user's settings: the installed config/ goes over the new defaults; and what the plugin wrote (logs/)
+        for kept in [CONFIG_DIR, "logs"] {
+            let old = dst.join(kept);
+            if old.is_dir() {
+                copy_dir(&old, &staging.join(kept))?;
+            }
         }
         load_dir(&staging, false)?.ensure_config()?;
         Ok(())

@@ -78,9 +78,14 @@ Rules for the plugin:
 ## What the launcher does
 
 - **Install** (`stl plugin install <folder>`, or the Plugins page): copies the folder to `plugins\<id>\`. Over an existing install it keeps the
-  files of `config\` (the user's settings win over new defaults), then makes the declared settings files that are missing. The new version is
+  files of `config\` and `logs\` (the user's settings win over new defaults), then makes the declared settings files that are missing. The new version is
   prepared in `plugins\.<id>.new\` and swapped in by renaming, so a failure leaves the installed plugin untouched. While the game runs it
   keeps the old DLL (the old folder waits as `.<id>.old` and is deleted once released); the new version loads at the next start.
+- **From a plugin index** (`stl plugin search`, `stl plugin get <id>`, or the Plugins page's *Browse* tab): the launcher reads the
+  `plugins.jsonl` files it subscribes to — by default github.com/Yidhar/stellaris-plugins; `stl plugin index --add/--remove/--reset`, or
+  Settings, change the list. Each line names a zip in a release of the plugin's own repository and the zip's SHA-256; the launcher downloads
+  it, insists on that SHA-256, checks that the zip is the plugin of that id, and installs it as above. A newer version in the index shows as
+  an update. To list a plugin there, see that repository's README (a pull request adding one line, checked by its CI).
 - **Link** (`--link`, "Link a plugin under development"): uses the folder where it is (for development); its `config\` is in that folder.
 - **Launch**: skips (and says why) a plugin that is not installed, whose DLL is missing, or that lists builds not including this one; makes
   missing settings files; starts the game; waits for its window and `delay_ms`; loads each plugin with `LoadLibraryW` in a remote thread. A

@@ -213,6 +213,19 @@ enum PluginCmd {
     /// load the plugin in the active playset
     Enable { id: String },
     Disable { id: String },
+    /// the plugins of the plugin indexes (whose names or descriptions hold QUERY), and which are installed
+    Search { query: Option<String> },
+    /// install (or update) a plugin from a plugin index
+    Get { id: String },
+    /// the plugin indexes read (plugins.jsonl URLs): list them, or --add / --remove one, or --reset to the default
+    Index {
+        #[arg(long)]
+        add: Option<String>,
+        #[arg(long)]
+        remove: Option<String>,
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 fn open_game(cli: &Cli, store: &Store) -> Result<Game> {
@@ -818,6 +831,91 @@ fn run() -> Result<()> {
                         }
                         Err(e) => println!("{}: {e:#}", p.manifest.id),
                     }
+                }
+            }
+            PluginCmd::Search { query } => {
+                use stl_core::pluginindex::{self as idx, Fit, State};
+                let game = open_game(&cli, &store).ok();
+                let (entries, failed) = idx::fetch_all(&idx::indexes(store.plugin_indexes.as_ref()));
+                for (url, why) in &failed {
+                    println!("cannot read {url}: {why}");
+                }
+                let (installed, _) = plugins::list()?;
+                let q = query.as_deref().unwrap_or("").to_lowercase();
+                let mut shown = 0;
+                for e in entries.iter().filter(|e| q.is_empty() || e.id.contains(&q) || e.name.to_lowercase().contains(&q) || e.description.to_lowercase().contains(&q)) {
+                    shown += 1;
+                    let state = match idx::state(e, &installed) {
+                        State::NotInstalled => String::new(),
+                        State::Installed => "  [installed]".into(),
+                        State::Older(v) => format!("  [installed {v}, update with: stl plugin get {}]", e.id),
+                        State::Linked => "  [linked]".into(),
+                    };
+                    let fit = match game.as_ref().map(|g| e.fits(g)) {
+                        Some(Fit::Ok) => "made for this game".to_string(),
+                        Some(Fit::Unchecked) | None => "builds not declared".to_string(),
+                        Some(Fit::Other(v)) => format!("made for another game version{}", v.map(|v| format!(" ({v})")).unwrap_or_default()),
+                    };
+                    println!("{} {}  {} by {}{state}", e.id, e.version, e.name, e.author);
+                    println!("  {}", e.description);
+                    println!("  {fit} · {}", e.page());
+                }
+                println!("{shown} plugin(s)");
+            }
+            PluginCmd::Get { id } => {
+                use stl_core::pluginindex as idx;
+                let (entries, failed) = idx::fetch_all(&idx::indexes(store.plugin_indexes.as_ref()));
+                let Some(e) = entries.iter().find(|e| e.id.eq_ignore_ascii_case(id)) else {
+                    for (url, why) in &failed {
+                        println!("cannot read {url}: {why}");
+                    }
+                    bail!("no plugin {id:?} in the plugin indexes (stl plugin search)");
+                };
+                if let Ok(g) = open_game(&cli, &store) {
+                    if let idx::Fit::Other(v) = e.fits(&g) {
+                        println!("note: {} is made for another game version{}", e.id, v.map(|v| format!(" ({v})")).unwrap_or_default());
+                    }
+                }
+                println!("downloading {} {} from {}", e.id, e.version, e.download);
+                let p = idx::install(e)?;
+                println!("installed {} {} into {}", p.manifest.id, p.manifest.version, p.dir.display());
+                println!("load it with: stl plugin enable {}", p.manifest.id);
+                if !process::find_processes("stellaris.exe").is_empty() {
+                    println!("the running game keeps what it has until it is started again");
+                }
+            }
+            PluginCmd::Index { add, remove, reset } => {
+                use stl_core::pluginindex as idx;
+                let mut list = idx::indexes(store.plugin_indexes.as_ref());
+                let mut changed = false;
+                if *reset {
+                    store.plugin_indexes = None;
+                    list = idx::indexes(None);
+                    changed = true;
+                }
+                if let Some(url) = add {
+                    if !url.starts_with("https://") {
+                        bail!("an index is an https:// address of a plugins.jsonl");
+                    }
+                    let n = idx::fetch(url)?.len();
+                    println!("{url}: {n} plugin(s)");
+                    if !list.contains(url) {
+                        list.push(url.clone());
+                    }
+                    changed = true;
+                }
+                if let Some(url) = remove {
+                    list.retain(|u| u != url);
+                    changed = true;
+                }
+                if changed && !*reset {
+                    store.plugin_indexes = Some(list.clone());
+                }
+                if changed {
+                    store.save()?;
+                }
+                for u in &list {
+                    println!("{u}");
                 }
             }
             PluginCmd::Info { id } => {

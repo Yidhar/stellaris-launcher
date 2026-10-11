@@ -68,6 +68,9 @@ pub struct Store {
     /// say in the game which DLL plugins are loaded; None = yes
     #[serde(default)]
     pub ingame_notice: Option<bool>,
+    /// the plugin indexes (`plugins.jsonl` URLs) to read; None = the default one (`pluginindex::DEFAULT_INDEX`)
+    #[serde(default)]
+    pub plugin_indexes: Option<Vec<String>>,
     /// the alternative executable of `launcher-settings.json` to start (None = the standard one)
     #[serde(default)]
     pub alternative: Option<usize>,

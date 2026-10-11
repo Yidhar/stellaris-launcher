@@ -117,7 +117,7 @@ pub fn check(p: &Plugin) -> Result<Option<Available>> {
 }
 
 /// The folder in an unpacked zip that holds `stl-plugin.json`: the root, or a single folder inside it.
-fn plugin_root(dir: &Path) -> Option<PathBuf> {
+pub fn plugin_root(dir: &Path) -> Option<PathBuf> {
     if dir.join(plugins::MANIFEST).is_file() {
         return Some(dir.to_path_buf());
     }
