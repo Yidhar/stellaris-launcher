@@ -88,6 +88,20 @@ struct PluginUpdates {
     message: Option<(String, bool)>,
 }
 
+/// The plugin indexes: what they list, read on a worker thread; a plugin being installed from them.
+#[derive(Default)]
+struct IndexView {
+    rx: Option<Receiver<(Vec<stl_core::pluginindex::Entry>, Vec<(String, String)>)>>,
+    entries: Vec<stl_core::pluginindex::Entry>,
+    /// the indexes that could not be read, and why
+    failed: Vec<(String, String)>,
+    loaded: bool,
+    getting: Option<(String, Receiver<Result<String, String>>)>,
+    message: Option<(String, bool)>,
+    /// an index address being typed in Settings
+    new_url: String,
+}
+
 enum UpMsg {
     Progress(workshop::Stage, u64, u64),
     Done(Result<workshop::Outcome, (String, Option<workshop::UploadError>)>),
@@ -197,6 +211,10 @@ enum Act {
     CreateMod,
     RescanMods,
     RescanPlugins,
+    LoadIndex,
+    GetPlugin(String),
+    /// the plugin indexes to read (None: the default one)
+    SetIndexes(Option<Vec<String>>),
     EditConfig(String),
     CheckUpdates,
     SetGraphics(Graphics),
@@ -392,6 +410,9 @@ struct App {
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
+    /// the Plugins page: 0 installed, 1 the plugin indexes
+    plugins_tab: usize,
+    index: IndexView,
     self_update: SelfUpdate,
     check: CheckState,
     /// the game's graphics settings, and the monitors (read when the Settings page is first shown)
@@ -515,6 +536,8 @@ impl App {
             make: None,
             config: None,
             updates: PluginUpdates::default(),
+            plugins_tab: 0,
+            index: IndexView::default(),
             self_update: SelfUpdate::default(),
             check: CheckState::default(),
             gfx: None,
@@ -583,6 +606,8 @@ impl App {
                 }
             } else if let Some(v) = a.strip_prefix("--ask-delete=") {
                 app.confirm_delete = v.parse().ok();
+            } else if let Some(v) = a.strip_prefix("--plugins-tab=") {
+                app.plugins_tab = v.parse().unwrap_or(0);
             } else if a == "--row-tools" {
                 app.dev_row_tools = true;
             } else if let Some(v) = a.strip_prefix("--row-menu=") {
@@ -943,6 +968,71 @@ impl App {
             let r = stl_core::updates::apply(&p, &a).map(|n| n.manifest.version).map_err(|e| format!("{e:#}"));
             let _ = tx.send(r);
         });
+    }
+
+    /// Reads the plugin indexes on a worker thread.
+    fn load_index(&mut self) {
+        if self.index.rx.is_some() {
+            return;
+        }
+        let urls = stl_core::pluginindex::indexes(self.store.plugin_indexes.as_ref());
+        let (tx, rx) = channel();
+        self.index.rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(stl_core::pluginindex::fetch_all(&urls));
+        });
+    }
+
+    /// Installs (or updates) a plugin of the indexes on a worker thread.
+    fn get_plugin(&mut self, id: &str) {
+        if self.index.getting.is_some() {
+            return;
+        }
+        let Some(e) = self.index.entries.iter().find(|e| e.id == id).cloned() else { return };
+        let (tx, rx) = channel();
+        self.index.getting = Some((id.to_string(), rx));
+        self.index.message = None;
+        std::thread::spawn(move || {
+            let r = stl_core::pluginindex::install(&e).map(|p| p.manifest.version).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(r);
+        });
+    }
+
+    fn drain_index(&mut self) {
+        let got = self.index.rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some((entries, failed)) = got {
+            self.index.rx = None;
+            self.index.entries = entries;
+            self.index.failed = failed;
+            self.index.loaded = true;
+        }
+        let mut finished = None;
+        if let Some((id, rx)) = &self.index.getting {
+            if let Ok(r) = rx.try_recv() {
+                finished = Some((id.clone(), r));
+            }
+        }
+        if let Some((id, r)) = finished {
+            self.index.getting = None;
+            match r {
+                Ok(v) => {
+                    let mut msg = tr_args(self.lang, "pl.got", &[&id, &v]);
+                    if !self.running.is_empty() {
+                        msg = format!("{msg} · {}", tr(self.lang, "pl.next_start"));
+                    }
+                    self.index.message = Some((msg, true));
+                    self.say(format!("installed {id} {v} from a plugin index"));
+                }
+                Err(e) => {
+                    self.index.message = Some((e.clone(), false));
+                    self.say(format!("could not install {id}: {e}"));
+                }
+            }
+            if let Ok((p, problems)) = plugins::list() {
+                self.plugins = p;
+                self.plugin_problems = problems;
+            }
+        }
     }
 
     fn drain_updates(&mut self) {
@@ -1577,6 +1667,14 @@ impl App {
                 if let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id) {
                     self.config = Some(ConfigEditor::open(p.clone()));
                 }
+            }
+            Act::LoadIndex => self.load_index(),
+            Act::GetPlugin(id) => self.get_plugin(&id),
+            Act::SetIndexes(list) => {
+                self.store.plugin_indexes = list;
+                self.save();
+                self.index.loaded = false;
+                self.load_index();
             }
             Act::RescanPlugins => match plugins::list() {
                 Ok((p, problems)) => {
@@ -2688,6 +2786,16 @@ impl App {
         let active = self.store.active_index();
         let rect = ui.available_rect_before_wrap();
         glass_pane(ui, rect, theme::RADIUS, 18.0, |ui| {
+            // installed | the plugin indexes
+            let labels = [tr(lang, "pl.tab_installed").to_string(), tr(lang, "pl.tab_browse").to_string()];
+            if let Some(i) = segmented(ui, &labels, self.plugins_tab, 300.0) {
+                self.plugins_tab = i;
+            }
+            ui.add_space(10.0);
+            if self.plugins_tab == 1 {
+                self.plugin_browse(ui, &acts, game.as_ref());
+                return;
+            }
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.label(RichText::new(tr(lang, "pl.title")).size(17.0).family(bold())).on_hover_text(tr(lang, "pl.hint"));
@@ -2801,6 +2909,106 @@ impl App {
         self.acts.extend(acts.take());
     }
 
+    /// The plugins of the plugin indexes: what each is, whether it is made for this game, and Install / Update.
+    fn plugin_browse(&self, ui: &mut Ui, acts: &Acts, game: Option<&Game>) {
+        use stl_core::pluginindex::{Fit, State};
+        let lang = self.lang;
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.label(RichText::new(tr(lang, "pl.browse_title")).size(17.0).family(bold())).on_hover_text(tr(lang, "pl.browse_hint"));
+            theme::count_badge(ui, self.index.entries.len());
+            let loading = self.index.rx.is_some();
+            if circle_button(ui, Icon::Refresh, theme::white(22), LABEL, !loading).on_hover_text(tr(lang, "mods.refresh")).clicked() {
+                acts.push(Act::LoadIndex);
+            }
+            if loading {
+                ui.label(RichText::new(tr(lang, "pl.browse_loading")).size(12.5).color(SECONDARY));
+            }
+            if let Some((msg, ok)) = &self.index.message {
+                ui.add(egui::Label::new(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED })).truncate());
+            }
+        });
+        theme::divider(ui);
+        for (url, why) in &self.index.failed {
+            ui.add(egui::Label::new(RichText::new(tr_args(lang, "pl.browse_failed", &[url])).size(12.5).color(RED)).truncate()).on_hover_text(why);
+        }
+        if self.index.loaded && self.index.entries.is_empty() {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(tr(lang, "pl.browse_empty")).size(15.0).color(SECONDARY));
+            });
+            return;
+        }
+        egui::ScrollArea::vertical().id_salt("plugins-browse").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let mut rows = Rows::new();
+            for e in &self.index.entries {
+                let state = stl_core::pluginindex::state(e, &self.plugins);
+                let getting = self.index.getting.as_ref().is_some_and(|(i, _)| i == &e.id);
+                let h = 92.0;
+                rows.row(ui, h, 240.0, false, |ui| {
+                    stack(ui, h, 70.0, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&e.name).size(15.5).family(bold()));
+                            ui.label(RichText::new(format!("v{}", e.version.trim_start_matches('v'))).size(12.5).color(SECONDARY));
+                            ui.label(RichText::new(tr_args(lang, "pl.by", &[&e.author])).size(12.5).color(theme::TERTIARY));
+                        });
+                        ui.add(egui::Label::new(RichText::new(&e.description).size(13.0).color(SECONDARY)).truncate()).on_hover_text(&e.description);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            match game.map(|g| e.fits(g)) {
+                                Some(Fit::Ok) => {
+                                    chip(ui, tr(lang, "pl.fits"), GREEN);
+                                }
+                                Some(Fit::Other(v)) => {
+                                    let text = match v {
+                                        Some(v) => tr_args(lang, "pl.fits_other_v", &[&v]),
+                                        None => tr(lang, "pl.fits_other").to_string(),
+                                    };
+                                    chip(ui, &text, ORANGE);
+                                }
+                                _ => {
+                                    chip(ui, tr(lang, "pl.fits_unchecked"), SECONDARY);
+                                }
+                            }
+                            for t in e.tags.iter().take(4) {
+                                chip(ui, t, SECONDARY);
+                            }
+                            ui.label(RichText::new(&e.id).size(11.5).color(theme::TERTIARY));
+                        });
+                    });
+                }, |ui| {
+                    if circle_button(ui, Icon::Globe, theme::white(26), LABEL, true).on_hover_text(e.page()).clicked() {
+                        acts.push(Act::Open(e.page().to_string()));
+                    }
+                    ui.add_space(4.0);
+                    let busy = self.index.getting.is_some();
+                    match &state {
+                        _ if getting => {
+                            pill_button(ui, tr(lang, "pl.getting"), ButtonStyle::Filled(BLUE), false);
+                        }
+                        State::NotInstalled => {
+                            if pill_button(ui, tr(lang, "pl.get"), ButtonStyle::Filled(BLUE), !busy).clicked() {
+                                acts.push(Act::GetPlugin(e.id.clone()));
+                            }
+                        }
+                        State::Older(_) => {
+                            if pill_button(ui, &tr_args(lang, "pl.get_update", &[e.version.trim_start_matches('v')]), ButtonStyle::Filled(BLUE), !busy).clicked() {
+                                acts.push(Act::GetPlugin(e.id.clone()));
+                            }
+                        }
+                        State::Installed => {
+                            pill_button(ui, tr(lang, "pl.got_already"), ButtonStyle::Plain(SECONDARY), false);
+                        }
+                        State::Linked => {
+                            pill_button(ui, tr(lang, "pl.linked"), ButtonStyle::Plain(PURPLE), false);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     // ---------------------------------------------------------------- Settings
     fn page_settings(&mut self, ui: &mut Ui) {
         let lang = self.lang;
@@ -2831,6 +3039,43 @@ impl App {
                     }
                 });
             });
+            // the plugin indexes read by the Plugins page's Browse tab
+            theme::section(ui, tr(lang, "set.indexes"));
+            glass(ui, 16.0, 0.0, |ui| {
+                let mut rows = Rows::new();
+                let list = stl_core::pluginindex::indexes(self.store.plugin_indexes.as_ref());
+                for url in &list {
+                    rows.row(ui, 48.0, 40.0, false, |ui| {
+                        ui.add(egui::Label::new(RichText::new(url).size(13.0)).truncate());
+                    }, |ui| {
+                        if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "set.index_remove")).clicked() {
+                            acts.push(Act::SetIndexes(Some(list.iter().filter(|u| *u != url).cloned().collect())));
+                        }
+                    });
+                }
+                // the field and the Add button both use what is typed: one after the other
+                let typed = std::cell::RefCell::new(std::mem::take(&mut self.index.new_url));
+                let customised = self.store.plugin_indexes.is_some();
+                rows.row(ui, 56.0, 220.0, false, |ui| {
+                    let w = ui.available_width();
+                    theme::text_field(ui, &mut typed.borrow_mut(), "https://…/plugins.jsonl", w);
+                }, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if customised && pill_button(ui, tr(lang, "set.index_reset"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        acts.push(Act::SetIndexes(None));
+                    }
+                    let url = typed.borrow().trim().to_string();
+                    let ok = url.starts_with("https://") && !list.contains(&url);
+                    if pill_button(ui, tr(lang, "set.index_add"), ButtonStyle::Tinted(BLUE), ok).clicked() {
+                        let mut l = list.clone();
+                        l.push(url);
+                        acts.push(Act::SetIndexes(Some(l)));
+                        typed.borrow_mut().clear();
+                    }
+                });
+                self.index.new_url = typed.into_inner();
+            });
+            theme::footnote(ui, tr(lang, "set.indexes_hint"));
             if let Ok(g) = &self.game {
                 if !g.settings.alternative_executables.is_empty() {
                     theme::section(ui, tr(lang, "play.mode"));
@@ -3110,12 +3355,17 @@ impl eframe::App for App {
         self.drain_check(ctx);
         self.drain_upload();
         self.drain_updates();
+        self.drain_index();
         self.drain_ironman();
         if self.ironman_rx.is_some() {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
-        if self.updates.checking.is_some() || self.updates.installing.is_some() {
+        if self.updates.checking.is_some() || self.updates.installing.is_some() || self.index.rx.is_some() || self.index.getting.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        // the indexes are read the first time their tab is shown
+        if self.page == Page::Plugins && self.plugins_tab == 1 && !self.index.loaded && self.index.rx.is_none() && self.store.news_online != Some(false) {
+            self.load_index();
         }
         // the plugins are checked for updates once, the first time their page is shown
         if self.page == Page::Plugins && self.updates.found.is_empty() && self.updates.checking.is_none() && self.store.news_online != Some(false) {
