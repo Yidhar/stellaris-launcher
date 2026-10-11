@@ -37,7 +37,8 @@ pub struct NoticeWords {
     pub heading: String,
     pub footer: String,
     pub loaded: String,
-    pub settings: String,
+    /// a plugin switched off in the playset
+    pub off: String,
 }
 
 impl Default for NoticeWords {
@@ -48,9 +49,9 @@ impl Default for NoticeWords {
             missing: "not found in the game".into(),
             button: "Plugins".into(),
             heading: "DLL plugins".into(),
-            footer: "Stellaris Launcher · on the title screen only".into(),
+            footer: "Changes take effect the next time the game starts".into(),
             loaded: "loaded".into(),
-            settings: "Settings".into(),
+            off: "off".into(),
         }
     }
 }
@@ -254,8 +255,10 @@ pub fn launch(game: &Game, store: &Store, opts: &Options, say: &mut dyn FnMut(&s
         }
     }
     if let Some(words) = &opts.notice {
-        if !to_load.is_empty() || !report.skipped_plugins.is_empty() {
-            if let Err(e) = notice(game, pid, words, &to_load, &report.skipped_plugins, deadline) {
+        // with any plugin installed: the title-screen list can switch them on even when none is now
+        let installed = plugins::list().map(|(i, _)| !i.is_empty()).unwrap_or(false);
+        if opts.use_plugins && (installed || !report.skipped_plugins.is_empty()) {
+            if let Err(e) = notice(game, pid, words, playset, &report.skipped_plugins, deadline) {
                 say(&format!("  in-game notice: {e:#}"));
             } else {
                 say("  in-game notice: shown");
@@ -268,7 +271,7 @@ pub fn launch(game: &Game, store: &Store, opts: &Options, say: &mut dyn FnMut(&s
 /// The in-game notice: the plugins to look for and the words go into `%APPDATA%\stellaris-launcher\notice\<pid>.txt`, then `stl_notice.dll`
 /// (beside the launcher) is loaded into the game. It checks each plugin from inside and says how many are loaded; on the title screen a corner
 /// of the game opens the list of them; once a game is loaded (the game's `time.log` says so) it unloads itself.
-fn notice(game: &Game, pid: u32, words: &NoticeWords, plugins: &[plugins::Plugin], skipped: &[(String, String)], deadline: Instant) -> Result<()> {
+fn notice(game: &Game, pid: u32, words: &NoticeWords, playset: &crate::store::Playset, skipped: &[(String, String)], deadline: Instant) -> Result<()> {
     let exe = std::env::current_exe()?;
     let dll = exe.parent().map(|d| d.join("stl_notice.dll")).context("no folder for the launcher")?;
     if !dll.is_file() {
@@ -291,22 +294,34 @@ fn notice(game: &Game, pid: u32, words: &NoticeWords, plugins: &[plugins::Plugin
         ("heading", &words.heading),
         ("footer", &words.footer),
         ("loaded", &words.loaded),
-        ("settings", &words.settings),
+        ("off", &words.off),
     ] {
         text += &format!("{k}\t{}\n", clean(v));
     }
     // a game being played writes this into the game's time.log (and leaving it for the title screen writes nothing)
     text += &format!("gamelog\t{}\n", game.data_dir.join("logs").join("time.log").display());
-    for p in plugins {
-        text += &format!("plugin\t{}\t{}\t{}\t{}\n", clean(&p.manifest.name), p.dll_path().display(), clean(&p.manifest.version), p.config_dir().display());
-    }
+    // where switches changed in the game go, for the launcher to take in
+    text += &format!("toggles\t{}\n", crate::store::Store::pending_toggles_path()?.display());
+    text += &format!("playset\t{}\n", playset.id);
+    // every installed plugin, with its switch in this playset; the reason when the launcher left one out
     let installed = plugins::list().map(|(i, _)| i).unwrap_or_default();
-    for (id, why) in skipped {
-        let known = installed.iter().find(|p| &p.manifest.id == id);
-        let name = known.map(|p| p.manifest.name.clone()).unwrap_or_else(|| id.clone());
-        let version = known.map(|p| p.manifest.version.clone()).unwrap_or_default();
-        let config = known.map(|p| p.config_dir().display().to_string()).unwrap_or_default();
-        text += &format!("skipped\t{}\t{}\t{}\t{}\n", clean(&name), clean(why), clean(&version), config);
+    let why = |id: &str| skipped.iter().find(|(s, _)| s == id).map(|(_, w)| w.clone()).unwrap_or_default();
+    for p in &installed {
+        let on = playset.plugins.iter().any(|x| x.id == p.manifest.id && x.enabled);
+        text += &format!(
+            "plugin\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            clean(&p.manifest.id),
+            clean(&p.manifest.name),
+            p.dll_path().display(),
+            clean(&p.manifest.version),
+            clean(&p.manifest.description),
+            on as u8,
+            clean(&why(&p.manifest.id))
+        );
+    }
+    // switched on in the playset but not installed
+    for x in playset.plugins.iter().filter(|x| x.enabled && !installed.iter().any(|p| p.manifest.id == x.id)) {
+        text += &format!("plugin\t{0}\t{0}\t\t\t\t1\t{1}\n", clean(&x.id), clean(&why(&x.id)));
     }
     let dir = paths::app_data_dir()?.join("notice");
     std::fs::create_dir_all(&dir)?;

@@ -726,6 +726,10 @@ impl App {
 
     fn poll_process(&mut self) {
         if self.last_poll.elapsed() > Duration::from_secs(1) {
+            // plugin switches changed in the game's title-screen list
+            if self.store.take_pending_toggles() {
+                self.save();
+            }
             let was_running = !self.running.is_empty();
             self.running = process::find_processes("stellaris.exe");
             self.last_poll = Instant::now();
@@ -751,7 +755,7 @@ impl App {
             heading: tr(lang, "notice.heading").into(),
             footer: tr(lang, "notice.footer").into(),
             loaded: tr(lang, "notice.loaded").into(),
-            settings: tr(lang, "notice.settings").into(),
+            off: tr(lang, "notice.off").into(),
         });
         let opts = launch::Options { use_plugins: self.store.use_plugins != Some(false), continue_last, alternative, notice, ..Default::default() };
         let (tx, rx) = channel();

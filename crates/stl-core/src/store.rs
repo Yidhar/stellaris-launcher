@@ -90,7 +90,37 @@ impl Store {
     }
 
     pub fn load() -> Result<Store> {
-        Store::load_from(&Store::default_path()?)
+        let mut s = Store::load_from(&Store::default_path()?)?;
+        if s.take_pending_toggles() {
+            s.save()?;
+        }
+        Ok(s)
+    }
+
+    /// Plugin switches changed in the game (the title-screen list of `stl_notice.dll`) and not taken in yet: `<playset id>\t<plugin id>\t1|0`
+    /// per line, the last one for a plugin wins.
+    pub fn pending_toggles_path() -> Result<PathBuf> {
+        Ok(crate::paths::app_data_dir()?.join("plugin-toggles.txt"))
+    }
+
+    /// Takes in the switches changed in the game, and removes their file. True when a playset changed (then it wants saving).
+    pub fn take_pending_toggles(&mut self) -> bool {
+        let Ok(path) = Store::pending_toggles_path() else { return false };
+        let Ok(text) = std::fs::read_to_string(&path) else { return false };
+        let _ = std::fs::remove_file(&path);
+        let mut changed = false;
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            let (Some(playset), Some(plugin), Some(on)) = (f.first(), f.get(1), f.get(2)) else { continue };
+            if let Some(ps) = self.playsets.iter_mut().find(|p| &p.id == playset) {
+                let on = *on == "1";
+                if ps.plugins.iter().find(|p| &p.id == plugin).map(|p| p.enabled) != Some(on) {
+                    ps.set_plugin(plugin, on);
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub fn load_from(path: &Path) -> Result<Store> {

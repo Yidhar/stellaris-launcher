@@ -1,12 +1,14 @@
 //! `stl_notice.dll`: the launcher loads it into the game after the playset's DLL plugins. From inside the game it checks that each of them
 //! is loaded and says how many are, in a small capsule at the top right of the game window for a few seconds (not their names: there may be
-//! many). While the game shows its title screen, the bottom-right corner of the game window opens their list: hovering the corner fades in a
-//! small button, which opens a panel with each plugin's version, whether it is loaded (or why not), and a link to its settings folder. Once a
-//! game is loaded it goes away and unloads itself.
+//! many). While the game shows its title screen, the bottom-right corner of the game window opens the plugin list: hovering the corner fades
+//! in a small button, which opens a panel in the middle of the game with every installed plugin — name, version, description, whether it is
+//! loaded — and a switch for it in this playset, taking effect at the next start. Once a game is loaded it goes away and unloads itself.
 //!
-//! - What to check and the words come from `%APPDATA%\stellaris-launcher\notice\<pid>.txt`, written by the launcher just before (one line
-//!   each, fields split by tabs): words (`all`, `some` — `{0}` loaded, `{1}` in all —, `missing`, `button`, `heading`, `footer`, `loaded`,
-//!   `settings`), `gamelog <path>`, `plugin <name> <dll> <version> <config folder>` and `skipped <name> <reason> <version> <config folder>`.
+//! - What to show comes from `%APPDATA%\stellaris-launcher\notice\<pid>.txt`, written by the launcher just before (one line each, fields
+//!   split by tabs): words (`all`, `some` — `{0}` loaded, `{1}` switched on —, `missing`, `button`, `heading`, `footer`, `loaded`, `off`),
+//!   `gamelog <path>`, `toggles <path>`, `playset <id>`, then `plugin <id> <name> <dll> <version> <description> <on 1|0> <why left out>`.
+//! - A switch flipped here appends `<playset id>\t<plugin id>\t1|0` to the `toggles` file; the launcher takes it into the playset (it does
+//!   not touch the launcher's own files, which a running launcher would write over). A plugin in the game stays there until the game ends.
 //! - A loaded game: the game writes `gamestate… Recalc cached data` into its `time.log` when a game is loaded or started (the log starts
 //!   empty with each run of the game). Going back to the title screen writes nothing, so the list does not come back until the next run.
 //! - Its windows are its own (layered, never activated; the capsule lets clicks through), drawn with GDI on this DLL's own thread: nothing
@@ -32,19 +34,18 @@ use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::{CreateThread, GetCurrentProcessId, Sleep};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindow,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, LoadCursorW, PeekMessageW, RegisterClassW, ShowWindow, TranslateMessage,
-    UnregisterClassW, UpdateLayeredWindow, GW_OWNER, IDC_ARROW, MSG, PM_REMOVE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, ULW_ALPHA, WM_LBUTTONUP,
+    UnregisterClassW, UpdateLayeredWindow, GW_OWNER, IDC_ARROW, MSG, PM_REMOVE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEWHEEL,
     WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const FADE_IN_MS: f32 = 220.0;
 const HOLD_MS: f32 = 6000.0;
 const FADE_OUT_MS: f32 = 500.0;
-/// the corner button fades in and out this fast
-const BUTTON_FADE_MS: f32 = 140.0;
+/// the corner button and the list fade in and out this fast
+const FADE_MS: f32 = 140.0;
 /// how long to wait for the game's window before giving up
 const WAIT_FOR_GAME_MS: u32 = 180_000;
 const TICK_MS: u32 = 16;
@@ -78,19 +79,25 @@ unsafe extern "system" fn worker(param: *mut c_void) -> u32 {
 // ------------------------------------------------------------------ what the launcher says
 
 struct Plugin {
+    id: String,
     name: String,
     version: String,
+    description: String,
+    /// switched on in the playset when the game started
+    was_on: bool,
+    /// its switch now (flipped in the list)
+    on: bool,
     loaded: bool,
-    /// why it is not loaded
+    /// why it is not loaded although switched on
     why: String,
-    /// its settings folder ("" when it has none)
-    config: String,
 }
 
 struct Notice {
     words: std::collections::HashMap<String, String>,
     plugins: Vec<Plugin>,
     gamelog: Option<std::path::PathBuf>,
+    toggles: Option<std::path::PathBuf>,
+    playset: String,
 }
 
 impl Notice {
@@ -102,18 +109,36 @@ impl Notice {
         self.plugins.iter().filter(|p| p.loaded).count()
     }
 
+    /// switched on when the game started
+    fn wanted(&self) -> usize {
+        self.plugins.iter().filter(|p| p.was_on).count()
+    }
+
     fn all(&self) -> bool {
-        self.loaded() == self.plugins.len()
+        self.loaded() >= self.wanted()
     }
 
     fn summary(&self) -> String {
         let template = if self.all() { self.word("all") } else { self.word("some") };
-        template.replace("{0}", &self.loaded().to_string()).replace("{1}", &self.plugins.len().to_string())
+        template.replace("{0}", &self.loaded().to_string()).replace("{1}", &self.wanted().to_string())
     }
 
     /// The game has loaded a game (its time.log says so).
     fn in_game(&self) -> bool {
         self.gamelog.as_ref().and_then(|p| std::fs::read(p).ok()).is_some_and(|b| String::from_utf8_lossy(&b).contains(GAME_LOADED))
+    }
+
+    /// Flips a plugin's switch, and tells the launcher.
+    fn flip(&mut self, i: usize) {
+        let Some(p) = self.plugins.get_mut(i) else { return };
+        p.on = !p.on;
+        let line = format!("{}\t{}\t{}\n", self.playset, p.id, p.on as u8);
+        if let Some(path) = &self.toggles {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
     }
 }
 
@@ -133,18 +158,21 @@ fn read_notice() -> Option<Notice> {
 
 /// A notice file's lines, each plugin checked in this process.
 fn parse(text: &str) -> Option<Notice> {
-    let mut n = Notice { words: Default::default(), plugins: Vec::new(), gamelog: None };
+    let mut n = Notice { words: Default::default(), plugins: Vec::new(), gamelog: None, toggles: None, playset: String::new() };
+    let path = |s: String| Some(std::path::PathBuf::from(s)).filter(|p| !p.as_os_str().is_empty());
     for line in text.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         let get = |i: usize| f.get(i).copied().unwrap_or("").to_string();
         match f.first().copied() {
             Some("plugin") => {
-                let dll = get(2);
+                let dll = get(3);
+                let on = get(6) == "1";
                 let loaded = !dll.is_empty() && unsafe { !GetModuleHandleW(wide(&dll).as_ptr()).is_null() };
-                n.plugins.push(Plugin { name: get(1), version: get(3), loaded, why: String::new(), config: get(4) });
+                n.plugins.push(Plugin { id: get(1), name: get(2), version: get(4), description: get(5), was_on: on, on, loaded, why: get(7) });
             }
-            Some("skipped") => n.plugins.push(Plugin { name: get(1), version: get(3), loaded: false, why: get(2), config: get(4) }),
-            Some("gamelog") => n.gamelog = Some(std::path::PathBuf::from(get(1))).filter(|p| !p.as_os_str().is_empty()),
+            Some("gamelog") => n.gamelog = path(get(1)),
+            Some("toggles") => n.toggles = path(get(1)),
+            Some("playset") => n.playset = get(1),
             Some(k) if !k.is_empty() => {
                 n.words.insert(k.to_string(), get(1));
             }
@@ -152,7 +180,7 @@ fn parse(text: &str) -> Option<Notice> {
         }
     }
     let missing = n.word("missing");
-    for p in n.plugins.iter_mut().filter(|p| !p.loaded && p.why.is_empty()) {
+    for p in n.plugins.iter_mut().filter(|p| p.was_on && !p.loaded && p.why.is_empty()) {
         p.why = missing.clone();
     }
     (!n.plugins.is_empty()).then_some(n)
@@ -182,13 +210,10 @@ unsafe extern "system" fn each_window(hwnd: HWND, data: LPARAM) -> BOOL {
     TRUE
 }
 
-/// The game's main window: its largest visible top-level window that is not one of ours.
-fn game_window(ours: &[HWND]) -> HWND {
+/// The game's main window: its largest visible top-level window.
+fn game_window() -> HWND {
     let mut find = Find { pid: unsafe { GetCurrentProcessId() }, best: null_mut(), area: 0 };
     unsafe { EnumWindows(Some(each_window), &mut find as *mut Find as LPARAM) };
-    if ours.contains(&find.best) {
-        return null_mut();
-    }
     find.best
 }
 
@@ -337,6 +362,11 @@ impl Card {
         }
     }
 
+    /// A round dot.
+    unsafe fn dot(&self, cx: i32, cy: i32, r: i32, color: (u8, u8, u8)) {
+        self.round_rect(RECT { left: cx - r, top: cy - r, right: cx + r, bottom: cy + r }, r as f32, color, 1.0);
+    }
+
     /// The card's shape into the alpha channel (rounded corners of `radius`, a lighter hairline rim), colours premultiplied.
     unsafe fn finish(&self, radius: f32, opacity: f32, scale: f32) {
         let (w, h) = (self.w as f32, self.h as f32);
@@ -365,6 +395,8 @@ impl Card {
 }
 
 const CARD_BG: (u8, u8, u8) = (24, 26, 36);
+const GREEN: (u8, u8, u8) = (52, 199, 89);
+const ORANGE: (u8, u8, u8) = (255, 159, 10);
 
 /// The capsule that says how many plugins are loaded: the mark, one line, an orange dot when not all are.
 unsafe fn toast_card(n: &Notice, scale: f32) -> Option<Card> {
@@ -381,8 +413,7 @@ unsafe fn toast_card(n: &Notice, scale: f32) -> Option<Card> {
     mark(card.dc, pad + icon / 2, h / 2, icon as f32 / 2.0);
     text(card.dc, f, &summary, rgb(245, 245, 250), RECT { left: pad + icon + gap, top: 0, right: w - pad - dot, bottom: h }, false);
     if !all {
-        let (cx, cy, r) = (w - pad - px(4.0), h / 2, px(4.0));
-        card.round_rect(RECT { left: cx - r, top: cy - r, right: cx + r, bottom: cy + r }, r as f32, (255, 159, 10), 1.0);
+        card.dot(w - pad - px(4.0), h / 2, px(4.0), ORANGE);
     }
     DeleteObject(f);
     card.finish(h as f32 / 2.0, 0.92, scale);
@@ -399,89 +430,132 @@ unsafe fn button_card(n: &Notice, scale: f32, hot: bool) -> Option<Card> {
     let h = px(32.0);
     let w = pad + icon + gap + text_width(probe.dc, f, &label) + pad + px(2.0);
     drop(probe);
-    let bg = if hot { (44, 47, 62) } else { CARD_BG };
-    let card = Card::new(w, h, bg)?;
+    let card = Card::new(w, h, if hot { (44, 47, 62) } else { CARD_BG })?;
     mark(card.dc, pad + icon / 2, h / 2, icon as f32 / 2.0);
     text(card.dc, f, &label, rgb(240, 240, 245), RECT { left: pad + icon + gap, top: 0, right: w - pad, bottom: h }, false);
-    if !n.all() {
-        let (cx, cy, r) = (w - px(6.0), px(6.0), px(3.5));
-        card.round_rect(RECT { left: cx - r, top: cy - r, right: cx + r, bottom: cy + r }, r as f32, (255, 159, 10), 1.0);
-    }
     DeleteObject(f);
     card.finish(h as f32 / 2.0, 0.94, scale);
     Some(card)
 }
 
-/// The list: a heading, a row per plugin (a dot, its name, its version and whether it is loaded or why not, a Settings link), a footer.
-/// Returns the card and, per row shown, the Settings link's rectangle in the card (None when the plugin has no settings folder).
-unsafe fn panel_card(n: &Notice, scale: f32, hover: Option<usize>, max_h: i32) -> Option<(Card, Vec<Option<RECT>>)> {
+/// What is under the pointer in the list.
+#[derive(Clone, Copy, PartialEq)]
+enum Hot {
+    Nothing,
+    Close,
+    Switch(usize),
+}
+
+/// Where things are in the list's card.
+#[derive(Default)]
+struct PanelHits {
+    close: Option<RECT>,
+    /// (plugin, its switch)
+    switches: Vec<(usize, RECT)>,
+    /// how far the rows can scroll
+    max_scroll: i32,
+}
+
+/// The list: the mark and a heading, a close button; a row per plugin (its name and version, its description, whether it is loaded, and
+/// its switch); what the switches do, at the bottom. `scroll` moves the rows up.
+unsafe fn panel_card(n: &Notice, scale: f32, w: i32, max_h: i32, hot: Hot, scroll: i32) -> Option<(Card, PanelHits)> {
     let px = |v: f32| (v * scale).round() as i32;
-    let f_head = font(px(15.0), FW_SEMIBOLD as i32);
-    let f_name = font(px(14.0), FW_NORMAL as i32);
-    let f_meta = font(px(12.0), FW_NORMAL as i32);
-    let f_link = font(px(13.0), FW_SEMIBOLD as i32);
-    let fonts = [f_head, f_name, f_meta, f_link];
-    let (pad, head_h, row_h, foot_h) = (px(18.0), px(48.0), px(52.0), px(34.0));
-    let settings = n.word("settings");
-    let probe = Card::new(1, 1, CARD_BG)?;
-    let link_w = text_width(probe.dc, f_link, &settings) + px(20.0);
-    let mut need = text_width(probe.dc, f_head, &n.word("heading"));
-    let meta = |p: &Plugin| {
-        let state = if p.loaded { n.word("loaded") } else { p.why.clone() };
-        if p.version.is_empty() { state } else { format!("v{}  ·  {}", p.version.trim_start_matches('v'), state) }
-    };
-    for p in &n.plugins {
-        need = need.max(px(18.0) + text_width(probe.dc, f_name, &p.name).max(text_width(probe.dc, f_meta, &meta(p))) + px(12.0) + link_w);
-    }
-    drop(probe);
-    let w = (need + 2 * pad).clamp(px(320.0), px(560.0));
-    let fit = ((max_h - head_h - foot_h) / row_h).max(1) as usize;
-    let shown = n.plugins.len().min(fit);
-    let h = head_h + row_h * shown as i32 + foot_h;
+    let f_head = font(px(18.0), FW_SEMIBOLD as i32);
+    let f_name = font(px(15.0), FW_SEMIBOLD as i32);
+    let f_small = font(px(12.5), FW_NORMAL as i32);
+    let fonts = [f_head, f_name, f_small];
+    let (pad, head_h, row_h, foot_h) = (px(24.0), px(68.0), px(76.0), px(48.0));
+    let rows_h = row_h * n.plugins.len() as i32;
+    let h = (head_h + rows_h + foot_h).min(max_h).max(head_h + row_h + foot_h);
+    let view_h = h - head_h - foot_h;
+    let max_scroll = (rows_h - view_h).max(0);
+    let scroll = scroll.clamp(0, max_scroll);
     let card = Card::new(w, h, CARD_BG)?;
-    text(card.dc, f_head, &n.word("heading"), rgb(250, 250, 252), RECT { left: pad, top: 0, right: w - pad, bottom: head_h }, false);
-    let count = format!("{} / {}", n.loaded(), n.plugins.len());
-    text(card.dc, f_meta, &count, rgb(150, 152, 165), RECT { left: pad, top: 0, right: w - pad, bottom: head_h }, true);
-    let mut links = Vec::new();
-    for (i, p) in n.plugins.iter().take(shown).enumerate() {
-        let top = head_h + row_h * i as i32;
-        // a hairline above each row
-        card.round_rect(RECT { left: pad, top, right: w - pad, bottom: top + px(1.0).max(1) }, 0.0, (60, 63, 78), 1.0);
-        let dot = if p.loaded { (52, 199, 89) } else { (255, 159, 10) };
-        let (cx, cy, r) = (pad + px(4.0), top + px(17.0), px(4.0));
-        card.round_rect(RECT { left: cx - r, top: cy - r, right: cx + r, bottom: cy + r }, r as f32, dot, 1.0);
-        let tx = pad + px(18.0);
-        let right = w - pad - link_w - px(12.0);
-        text(card.dc, f_name, &p.name, rgb(240, 240, 245), RECT { left: tx, top: top + px(6.0), right, bottom: top + px(28.0) }, false);
-        let meta_color = if p.loaded { rgb(150, 152, 165) } else { rgb(255, 179, 64) };
-        text(card.dc, f_meta, &meta(p), meta_color, RECT { left: tx, top: top + px(27.0), right, bottom: top + px(45.0) }, false);
-        let link = (!p.config.is_empty() && std::path::Path::new(&p.config).is_dir()).then(|| RECT {
-            left: w - pad - link_w,
-            top: top + (row_h - px(28.0)) / 2,
-            right: w - pad,
-            bottom: top + (row_h + px(28.0)) / 2,
-        });
-        if let Some(l) = link {
-            if hover == Some(i) {
-                card.round_rect(l, px(14.0) as f32, (64, 120, 220), 0.35);
-            }
-            // centred in its pill
-            let inset = (l.right - l.left - text_width(card.dc, f_link, &settings)) / 2;
-            text(card.dc, f_link, &settings, rgb(64, 156, 255), RECT { left: l.left + inset, ..l }, false);
+    let mut hits = PanelHits { max_scroll, ..Default::default() };
+    // the heading
+    mark(card.dc, pad + px(11.0), head_h / 2, px(11.0) as f32);
+    let title_x = pad + px(32.0);
+    text(card.dc, f_head, &n.word("heading"), rgb(250, 250, 252), RECT { left: title_x, top: 0, right: w - pad - px(120.0), bottom: head_h }, false);
+    let count = format!("{} / {}  {}", n.loaded(), n.wanted(), n.word("loaded"));
+    let close = RECT { left: w - pad - px(32.0), top: (head_h - px(32.0)) / 2, right: w - pad, bottom: (head_h + px(32.0)) / 2 };
+    text(card.dc, f_small, &count, rgb(150, 152, 165), RECT { left: title_x, top: 0, right: close.left - px(14.0), bottom: head_h }, true);
+    card.dot(close.left + px(16.0), close.top + px(16.0), px(16.0), if hot == Hot::Close { (62, 65, 82) } else { (40, 43, 56) });
+    // the ×, as two strokes of dots
+    for k in -5..=5 {
+        let d = px(k as f32 * 0.9);
+        let (cx, cy) = (close.left + px(16.0), close.top + px(16.0));
+        card.dot(cx + d, cy + d, px(1.1).max(1), (210, 212, 220));
+        card.dot(cx + d, cy - d, px(1.1).max(1), (210, 212, 220));
+    }
+    hits.close = Some(close);
+    card.round_rect(RECT { left: 0, top: head_h - 1, right: w, bottom: head_h }, 0.0, (52, 55, 70), 1.0);
+    // the rows, clipped to their area
+    for (i, p) in n.plugins.iter().enumerate() {
+        let top = head_h + row_h * i as i32 - scroll;
+        if top + row_h <= head_h || top >= head_h + view_h {
+            continue;
         }
-        links.push(link);
+        let row = RECT { left: 0, top: top.max(head_h), right: w, bottom: (top + row_h).min(head_h + view_h) };
+        if i > 0 && top > head_h {
+            card.round_rect(RECT { left: pad, top, right: w - pad, bottom: top + 1 }, 0.0, (44, 47, 60), 1.0);
+        }
+        let sw = (px(46.0), px(28.0));
+        let switch = RECT { left: w - pad - sw.0, top: top + (row_h - sw.1) / 2, right: w - pad, bottom: top + (row_h + sw.1) / 2 };
+        let text_right = switch.left - px(20.0);
+        // name and version
+        let name_w = text_width(card.dc, f_name, &p.name);
+        let name_rect = RECT { left: pad, top: top + px(10.0), right: text_right, bottom: top + px(32.0) };
+        if name_rect.top >= row.top && name_rect.bottom <= row.bottom {
+            text(card.dc, f_name, &p.name, rgb(245, 245, 250), name_rect, false);
+            if !p.version.is_empty() && pad + name_w + px(10.0) < text_right {
+                let v = format!("v{}", p.version.trim_start_matches('v'));
+                text(card.dc, f_small, &v, rgb(130, 133, 148), RECT { left: pad + name_w + px(10.0), ..name_rect }, false);
+            }
+        }
+        // the description
+        let desc_rect = RECT { left: pad, top: top + px(32.0), right: text_right, bottom: top + px(51.0) };
+        if desc_rect.top >= row.top && desc_rect.bottom <= row.bottom {
+            text(card.dc, f_small, &p.description, rgb(160, 163, 178), desc_rect, false);
+        }
+        // its state: loaded, switched off, or why it is not loaded
+        let (state, color, dot) = if !p.was_on {
+            (n.word("off"), rgb(130, 133, 148), (90, 93, 108))
+        } else if p.loaded {
+            (n.word("loaded"), rgb(120, 214, 140), GREEN)
+        } else {
+            (p.why.clone(), rgb(255, 179, 64), ORANGE)
+        };
+        let state_rect = RECT { left: pad + px(14.0), top: top + px(52.0), right: text_right, bottom: top + px(68.0) };
+        if state_rect.top >= row.top && state_rect.bottom <= row.bottom {
+            card.dot(pad + px(4.0), (state_rect.top + state_rect.bottom) / 2, px(3.5), dot);
+            text(card.dc, f_small, &state, color, state_rect, false);
+        }
+        // the switch: green with the knob at the right when on
+        if switch.top >= row.top && switch.bottom <= row.bottom {
+            let lit = hot == Hot::Switch(i);
+            let track = if p.on { (48, 190, 84) } else if lit { (92, 95, 112) } else { (72, 75, 90) };
+            card.round_rect(switch, sw.1 as f32 / 2.0, track, 1.0);
+            let r = sw.1 / 2 - px(3.0);
+            let kx = if p.on { switch.right - sw.1 / 2 } else { switch.left + sw.1 / 2 };
+            card.dot(kx, (switch.top + switch.bottom) / 2, r, (250, 250, 252));
+            hits.switches.push((i, switch));
+        }
     }
-    let mut footer = n.word("footer");
-    if shown < n.plugins.len() {
-        footer = format!("+{}  ·  {}", n.plugins.len() - shown, footer);
+    // what the switches do
+    card.round_rect(RECT { left: 0, top: h - foot_h, right: w, bottom: h - foot_h + 1 }, 0.0, (52, 55, 70), 1.0);
+    let changed = n.plugins.iter().any(|p| p.on != p.was_on);
+    let foot_color = if changed { rgb(255, 196, 92) } else { rgb(130, 133, 148) };
+    text(card.dc, f_small, &n.word("footer"), foot_color, RECT { left: pad, top: h - foot_h, right: w - pad, bottom: h }, false);
+    text(card.dc, f_small, "Stellaris Launcher", rgb(96, 99, 114), RECT { left: pad, top: h - foot_h, right: w - pad, bottom: h }, true);
+    // a hint of more rows below or above
+    if scroll < max_scroll {
+        card.round_rect(RECT { left: w / 2 - px(18.0), top: h - foot_h - px(6.0), right: w / 2 + px(18.0), bottom: h - foot_h - px(3.0) }, px(1.5) as f32, (90, 93, 108), 1.0);
     }
-    card.round_rect(RECT { left: pad, top: h - foot_h, right: w - pad, bottom: h - foot_h + px(1.0).max(1) }, 0.0, (60, 63, 78), 1.0);
-    text(card.dc, f_meta, &footer, rgb(120, 122, 135), RECT { left: pad, top: h - foot_h, right: w - pad, bottom: h }, false);
     for f in fonts {
         DeleteObject(f);
     }
-    card.finish(px(14.0) as f32, 0.95, scale);
-    Some((card, links))
+    card.finish(px(18.0) as f32, 0.97, scale);
+    Some((card, hits))
 }
 
 // ------------------------------------------------------------------ the windows
@@ -489,6 +563,8 @@ unsafe fn panel_card(n: &Notice, scale: f32, hover: Option<usize>, max_h: i32) -
 thread_local! {
     /// clicks on our windows: (window, x, y in it)
     static CLICKS: RefCell<Vec<(HWND, i32, i32)>> = const { RefCell::new(Vec::new()) };
+    /// the wheel turned over our windows, in notches (120 a notch)
+    static WHEEL: RefCell<i32> = const { RefCell::new(0) };
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize {
@@ -497,6 +573,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: usize, l: isize) 
         CLICKS.with(|c| {
             if let Ok(mut c) = c.try_borrow_mut() {
                 c.push((hwnd, x, y));
+            }
+        });
+        return 0;
+    }
+    if msg == WM_MOUSEWHEEL {
+        let delta = ((w >> 16) & 0xffff) as i16 as i32;
+        WHEEL.with(|d| {
+            if let Ok(mut d) = d.try_borrow_mut() {
+                *d += delta;
             }
         });
         return 0;
@@ -527,8 +612,12 @@ impl Layer {
         self.shown = None;
     }
 
+    fn size(&self) -> (i32, i32) {
+        self.card.as_ref().map(|c| (c.w, c.h)).unwrap_or((0, 0))
+    }
+
     fn rect(&self, at: POINT) -> RECT {
-        let (w, h) = self.card.as_ref().map(|c| (c.w, c.h)).unwrap_or((0, 0));
+        let (w, h) = self.size();
         RECT { left: at.x, top: at.y, right: at.x + w, bottom: at.y + h }
     }
 
@@ -566,14 +655,22 @@ fn approach(now: f32, target: f32, step: f32) -> f32 {
     }
 }
 
+/// The list's size for the game's client area: wide and tall enough to read, within the game.
+fn panel_size(client: &RECT, scale: f32) -> (i32, i32) {
+    let (cw, ch) = (client.right - client.left, client.bottom - client.top);
+    let w = ((cw as f32 * 0.5) as i32).clamp((560.0 * scale) as i32, (760.0 * scale) as i32).min(cw - (40.0 * scale) as i32);
+    let h = ((ch as f32 * 0.78) as i32).max((240.0 * scale) as i32);
+    (w.max(1), h.max(1))
+}
+
 fn run(module: HMODULE) {
-    let Some(notice) = read_notice() else { return };
+    let Some(mut notice) = read_notice() else { return };
     unsafe {
         SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // the game's window
         let mut waited = 0;
         let game = loop {
-            let g = game_window(&[]);
+            let g = game_window();
             if !g.is_null() {
                 break g;
             }
@@ -595,17 +692,22 @@ fn run(module: HMODULE) {
         };
         RegisterClassW(&wc);
         let mut toast = Layer::new(module, &class, true);
-        toast.set(toast_card(&notice, scale));
+        // the capsule when any plugin was to be loaded
+        if notice.wanted() > 0 {
+            toast.set(toast_card(&notice, scale));
+        }
         let mut button = Layer::new(module, &class, false);
         let mut panel = Layer::new(module, &class, false);
         // the list is for the title screen: not when a game is loaded already (the game was started into a save)
         let mut title_screen = !notice.in_game();
         let mut button_hot = false;
         button.set(button_card(&notice, scale, false));
-        let mut links: Vec<Option<RECT>> = Vec::new();
+        let mut hits = PanelHits::default();
         let mut panel_open = false;
-        let mut hover: Option<usize> = None;
-        let (mut toast_ms, mut button_t, mut was_down) = (0.0f32, 0.0f32, false);
+        let mut hot = Hot::Nothing;
+        let mut scroll = 0;
+        let mut panel_dirty = false;
+        let (mut toast_ms, mut button_t, mut panel_t, mut was_down) = (0.0f32, 0.0f32, 0.0f32, false);
         let mut last = Instant::now();
         let mut last_log_check = Instant::now();
         let mut msg: MSG = std::mem::zeroed();
@@ -633,7 +735,6 @@ fn run(module: HMODULE) {
             GetCursorPos(&mut cursor);
 
             // the capsule: fades in, stays, fades out (the time runs only while the game is in front)
-            let toast_total = FADE_IN_MS + HOLD_MS + FADE_OUT_MS;
             if toast.card.is_some() {
                 if front {
                     toast_ms += dt;
@@ -645,65 +746,65 @@ fn run(module: HMODULE) {
                 } else {
                     1.0
                 };
-                let w = toast.card.as_ref().map(|c| c.w).unwrap_or(0);
+                let (w, _) = toast.size();
                 toast.present(POINT { x: client.right - w - px(24.0), y: client.top + px(24.0) }, if front { t } else { 0.0 });
-                if toast_ms >= toast_total {
+                if toast_ms >= FADE_IN_MS + HOLD_MS + FADE_OUT_MS {
                     toast.destroy();
                 }
             }
 
             // the corner of the title screen: hovering it shows the button, the button opens the list
-            let (bw, bh) = button.card.as_ref().map(|c| (c.w, c.h)).unwrap_or((0, 0));
+            let (bw, bh) = button.size();
             let margin = px(16.0);
             let button_at = POINT { x: client.right - bw - margin, y: client.bottom - bh - margin };
             let button_rect = button.rect(button_at);
             let zone = RECT { left: client.right - px(96.0), top: client.bottom - px(80.0), right: client.right, bottom: client.bottom };
-            let panel_at = panel
-                .card
-                .as_ref()
-                .map(|c| POINT { x: client.right - c.w - margin, y: button_at.y - c.h - px(8.0) })
-                .unwrap_or(POINT { x: 0, y: 0 });
-            let panel_rect = panel.rect(panel_at);
             if !title_screen || !front {
                 panel_open = false;
             }
             let want = title_screen && front && (panel_open || contains(&zone, cursor) || contains(&button_rect, cursor));
-            button_t = approach(button_t, if want { 1.0 } else { 0.0 }, dt / BUTTON_FADE_MS);
-            let hot = want && contains(&button_rect, cursor);
-            if hot != button_hot {
-                button_hot = hot;
-                button.set(button_card(&notice, scale, hot || panel_open));
+            button_t = approach(button_t, if want { 1.0 } else { 0.0 }, dt / FADE_MS);
+            let now_hot = want && (contains(&button_rect, cursor) || panel_open);
+            if now_hot != button_hot {
+                button_hot = now_hot;
+                button.set(button_card(&notice, scale, now_hot));
             }
             button.present(button_at, button_t);
+
+            // the list: in the middle of the game
+            let (pw, ph) = panel_size(&client, scale);
+            let (cur_w, cur_h) = panel.size();
+            let panel_at = POINT { x: (client.left + client.right - cur_w) / 2, y: (client.top + client.bottom - cur_h) / 2 };
+            let panel_rect = panel.rect(panel_at);
+            let local = POINT { x: cursor.x - panel_at.x, y: cursor.y - panel_at.y };
 
             // clicks on our windows
             let clicks: Vec<(HWND, i32, i32)> = CLICKS.with(|c| c.try_borrow_mut().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default());
             for (hwnd, x, y) in clicks {
+                let at = POINT { x, y };
                 if hwnd == button.hwnd && button_t > 0.5 {
                     panel_open = !panel_open;
                     if panel_open {
-                        let max_h = (button_at.y - client.top - px(32.0)).max(px(160.0));
-                        match panel_card(&notice, scale, None, max_h) {
-                            Some((card, l)) => {
-                                panel.set(Some(card));
-                                links = l;
-                            }
-                            None => panel_open = false,
-                        }
-                        hover = None;
+                        scroll = 0;
+                        hot = Hot::Nothing;
+                        panel_dirty = true;
                     }
-                    button.set(button_card(&notice, scale, true));
                 } else if hwnd == panel.hwnd && panel_open {
-                    let at = POINT { x, y };
-                    for (i, l) in links.iter().enumerate() {
-                        if let (Some(r), Some(p)) = (l, notice.plugins.get(i)) {
-                            if contains(r, at) {
-                                let (verb, path) = (wide("open"), wide(&p.config));
-                                ShellExecuteW(null_mut(), verb.as_ptr(), path.as_ptr(), null(), null(), SW_SHOWNORMAL);
-                            }
-                        }
+                    if hits.close.as_ref().is_some_and(|r| contains(r, at)) {
+                        panel_open = false;
+                    }
+                    let flip = hits.switches.iter().find(|(_, r)| contains(r, at)).map(|(i, _)| *i);
+                    if let Some(i) = flip {
+                        notice.flip(i);
+                        panel_dirty = true;
                     }
                 }
+            }
+            // the wheel scrolls the rows
+            let wheel = WHEEL.with(|d| d.try_borrow_mut().map(|mut d| std::mem::take(&mut *d)).unwrap_or(0));
+            if wheel != 0 && panel_open {
+                scroll = (scroll - wheel * px(76.0) / 120).clamp(0, hits.max_scroll);
+                panel_dirty = true;
             }
             // a click anywhere else closes the list
             let down = (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0;
@@ -712,31 +813,31 @@ fn run(module: HMODULE) {
             }
             was_down = down;
 
-            // the list: its Settings links light up under the pointer
             if panel_open {
-                let at = panel.rect(panel_at);
-                let local = POINT { x: cursor.x - at.left, y: cursor.y - at.top };
-                let now = links.iter().position(|l| l.as_ref().is_some_and(|r| contains(r, local)));
-                if now != hover {
-                    hover = now;
-                    let max_h = (button_at.y - client.top - px(32.0)).max(px(160.0));
-                    if let Some((card, l)) = panel_card(&notice, scale, hover, max_h) {
+                let now_hot = if hits.close.as_ref().is_some_and(|r| contains(r, local)) {
+                    Hot::Close
+                } else if let Some((i, _)) = hits.switches.iter().find(|(_, r)| contains(r, local)) {
+                    Hot::Switch(*i)
+                } else {
+                    Hot::Nothing
+                };
+                if now_hot != hot || panel_dirty || (pw, ph) != (cur_w, cur_h.max(ph)) && panel.card.is_none() {
+                    hot = now_hot;
+                    panel_dirty = false;
+                    if let Some((card, h)) = panel_card(&notice, scale, pw, ph, hot, scroll) {
                         panel.set(Some(card));
-                        links = l;
+                        hits = h;
                     }
                 }
-                let panel_at = panel
-                    .card
-                    .as_ref()
-                    .map(|c| POINT { x: client.right - c.w - margin, y: button_at.y - c.h - px(8.0) })
-                    .unwrap_or(panel_at);
-                panel.present(panel_at, 1.0);
-            } else {
-                panel.present(panel_at, 0.0);
+            }
+            panel_t = approach(panel_t, if panel_open { 1.0 } else { 0.0 }, dt / FADE_MS);
+            if panel.card.is_some() {
+                let (w, h) = panel.size();
+                panel.present(POINT { x: (client.left + client.right - w) / 2, y: (client.top + client.bottom - h) / 2 }, panel_t);
             }
 
             // done: the capsule has been shown and the title screen is over
-            if toast.card.is_none() && !title_screen && button_t <= 0.0 {
+            if toast.card.is_none() && !title_screen && button_t <= 0.0 && panel_t <= 0.0 {
                 break;
             }
             Sleep(if front { TICK_MS } else { IDLE_TICK_MS });
@@ -754,10 +855,11 @@ fn run(module: HMODULE) {
 // ------------------------------------------------------------------ a look without the game
 
 /// For a look at the pictures without the game (development): draws the capsule (`what` 0), the corner button (1, 2 under the pointer)
-/// or the list (3, 4 with the first Settings link under the pointer) of a notice file into a 32-bit BMP (premultiplied alpha) at
-/// `scale_percent`. Returns 1 when written. The caller holds its own reference to the DLL (its loading thread lets go of one).
+/// or the list (3, 4 with the second switch under the pointer and the first one flipped) of a notice file into a 32-bit BMP
+/// (premultiplied alpha) at `scale_percent`, the list for a game area of `area_w` × `area_h`. Returns 1 when written. The caller holds its
+/// own reference to the DLL (its loading thread lets go of one).
 #[no_mangle]
-pub unsafe extern "C" fn stl_notice_preview(notice: *const u16, out: *const u16, scale_percent: u32, what: u32) -> i32 {
+pub unsafe extern "C" fn stl_notice_preview(notice: *const u16, out: *const u16, scale_percent: u32, what: u32, area_w: i32, area_h: i32) -> i32 {
     let read = |p: *const u16| {
         if p.is_null() {
             return None;
@@ -766,12 +868,19 @@ pub unsafe extern "C" fn stl_notice_preview(notice: *const u16, out: *const u16,
         Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, len)))
     };
     let (Some(notice), Some(out)) = (read(notice), read(out)) else { return 0 };
-    let Some(n) = std::fs::read_to_string(notice).ok().and_then(|t| parse(&t)) else { return 0 };
+    let Some(mut n) = std::fs::read_to_string(notice).ok().and_then(|t| parse(&t)) else { return 0 };
     let scale = scale_percent.max(50) as f32 / 100.0;
     let card = match what {
         0 => toast_card(&n, scale),
         1 | 2 => button_card(&n, scale, what == 2),
-        _ => panel_card(&n, scale, (what == 4).then_some(0), 2000).map(|(c, _)| c),
+        _ => {
+            n.toggles = None;
+            if what == 4 {
+                n.flip(0);
+            }
+            let (w, h) = panel_size(&RECT { left: 0, top: 0, right: area_w, bottom: area_h }, scale);
+            panel_card(&n, scale, w, h, if what == 4 { Hot::Switch(1) } else { Hot::Nothing }, 0).map(|(c, _)| c)
+        }
     };
     let Some(card) = card else { return 0 };
     let size = (card.w * card.h * 4) as usize;

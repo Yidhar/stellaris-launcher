@@ -88,8 +88,10 @@ Rules for the plugin:
 - **In-game notice** (Settings, on by default; `stl launch --no-notice` turns it off): after the plugins, the launcher loads its own
   `stl_notice.dll` into the game. From inside the game it looks for each plugin's module and says how many are loaded in a capsule at the
   game's top right for a few seconds (not their names — there may be many; an orange dot when not all are). While the game shows its title
-  screen, hovering the bottom-right corner of the game window fades in a small button that opens the list of the plugins: version, loaded or
-  why not, and a link to each one's settings folder. Once a game is loaded (the game's `time.log` gets its `Recalc cached data` line) the
+  screen, hovering the bottom-right corner of the game window fades in a small button that opens a list of every installed plugin in the
+  middle of the game: name, version, description, loaded / switched off / why not, and a switch for it in this playset. A switch takes effect
+  at the next start: it goes into `%APPDATA%\stellaris-launcher\plugin-toggles.txt`, which the launcher takes into the playset (at its next
+  start, or within a second when its window is open). Once a game is loaded (the game's `time.log` gets its `Recalc cached data` line) the
   button goes and the DLL unloads itself; going back to the title screen writes nothing, so the list is not there again until the next start.
   It draws its own windows (never activated) on its own thread and calls nothing of the game; they show only while the game is in front, and
   not at all in exclusive full screen (the launcher leaves it out then and says so in its log).
