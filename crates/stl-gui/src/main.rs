@@ -4020,12 +4020,14 @@ impl App {
         }
     }
 
-    /// The rules of what uploads leave out, as a table a page at a time: on/off, leave out or keep, the pattern, built in or the user's own
-    /// (only those can be edited and removed); a row to add one; back to the defaults.
+    /// The rules of what uploads leave out, as a table: on/off, leave out or keep, the pattern, built in or the user's own (only those can be
+    /// edited and removed). Its head stays put while the rows scroll; a row to add one under them; back to the defaults.
     fn ignore_sheet(&mut self, ctx: &egui::Context) {
         let Some(edit) = self.ignore_edit.as_mut() else { return };
         let lang = self.lang;
         let (mut close, mut save) = (false, false);
+        // the rows get what the window has room for besides the rest of the sheet
+        let list_h = (ctx.screen_rect().height() - 420.0).clamp(160.0, 520.0);
         let resp = egui::Modal::new(egui::Id::new("upload-ignore")).frame(Self::sheet_frame()).show(ctx, |ui| {
             ui.set_width(620.0);
             ui.label(RichText::new(tr(lang, "up.ignore_title")).size(22.0).family(bold()));
@@ -4039,112 +4041,102 @@ impl App {
             }
             const ON_W: f32 = 58.0;
             const KIND_W: f32 = 70.0;
-            const ROW_H: f32 = 48.0;
-            // the rows a page: what the window has room for besides the rest of the sheet (about 430 points)
-            let room = ((ui.ctx().screen_rect().height() - 430.0) / ROW_H).floor() as usize;
-            let top_row = edit.page * edit.per_page;
-            edit.per_page = room.clamp(4, 10);
-            // the page that holds the row that was at the top
-            edit.page = top_row / edit.per_page;
-            let pages = edit.pages();
-            edit.page = edit.page.min(pages - 1);
-            let first = edit.page * edit.per_page;
-            let mut remove = None;
-            glass(ui, 14.0, 0.0, |ui| {
-                let mut rows = Rows::new();
-                // the head of the table
-                rows.row(ui, 34.0, 120.0, false, |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    for (w, k) in [(ON_W, "up.ignore_col_on"), (KIND_W, "up.ignore_col_kind")] {
-                        cell(ui, w, 34.0, |ui| {
-                            ui.label(RichText::new(tr(lang, k)).size(12.0).color(SECONDARY));
-                        });
-                    }
-                    ui.label(RichText::new(tr(lang, "up.ignore_col_rule")).size(12.0).color(SECONDARY));
-                }, |ui| {
-                    ui.add_space(44.0);
-                    ui.label(RichText::new(tr(lang, "up.ignore_col_source")).size(12.0).color(SECONDARY));
-                });
-                let end = (first + edit.per_page).min(edit.rows.len());
-                for i in first..end {
-                    let Some(row) = edit.rows.get_mut(i) else { continue };
-                    rows.row(ui, ROW_H, 120.0, false, |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        cell(ui, ON_W, ROW_H, |ui| {
-                            theme::switch_keyed(ui, ("upload-rule", i), &mut row.on);
-                        });
-                        cell(ui, KIND_W, ROW_H, |ui| {
-                            let (label, color) = if row.keep { (tr(lang, "up.ignore_keep"), GREEN) } else { (tr(lang, "up.ignore_leave"), ORANGE) };
-                            if row.builtin {
-                                chip(ui, label, color);
-                            } else if theme::chip_button(ui, label, color).on_hover_text(tr(lang, "up.ignore_flip")).clicked() {
-                                row.keep = !row.keep;
-                            }
-                        });
-                        let color = if row.on { LABEL } else { theme::TERTIARY };
-                        if row.builtin {
-                            ui.label(RichText::new(&row.pattern).size(13.5).monospace().color(color));
-                        } else {
-                            let w = ui.available_width();
-                            theme::text_field(ui, &mut row.pattern, "", w);
-                        }
-                    }, |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if row.builtin {
-                            ui.add_space(36.0);
-                            chip(ui, tr(lang, "up.ignore_builtin_tag"), SECONDARY);
-                        } else {
-                            if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "up.ignore_remove")).clicked() {
-                                remove = Some(i);
-                            }
-                            chip(ui, tr(lang, "up.ignore_custom_tag"), BLUE);
-                        }
+            const ROW_H: f32 = 42.0;
+            const TRAIL_W: f32 = 108.0;
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // the head of the table
+            Rows::new().row(ui, 30.0, TRAIL_W, false, |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (w, k) in [(ON_W, "up.ignore_col_on"), (KIND_W, "up.ignore_col_kind")] {
+                    cell(ui, w, 30.0, |ui| {
+                        ui.label(RichText::new(tr(lang, k)).size(12.0).color(SECONDARY));
                     });
                 }
-                // a new rule: Enter or Add
-                let can_add = !edit.new.trim().is_empty();
-                let add = std::cell::Cell::new(false);
-                rows.row(ui, 56.0, 96.0, false, |ui| {
-                    let w = ui.available_width();
-                    let r = theme::text_field(ui, &mut edit.new, "*.md   drafts/   docs/*.md", w);
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        add.set(true);
-                        r.request_focus();
+                ui.label(RichText::new(tr(lang, "up.ignore_col_rule")).size(12.0).color(SECONDARY));
+            }, |ui| {
+                ui.add_space(38.0);
+                ui.label(RichText::new(tr(lang, "up.ignore_col_source")).size(12.0).color(SECONDARY));
+            });
+            theme::divider(ui);
+            // the rows, scrolling under it
+            let mut remove = None;
+            let scroll_to_end = std::mem::take(&mut edit.added);
+            egui::ScrollArea::vertical()
+                .id_salt("upload-ignore-rows")
+                .max_height(list_h)
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .stick_to_bottom(scroll_to_end)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let mut rows = Rows::new();
+                    for (i, row) in edit.rows.iter_mut().enumerate() {
+                        rows.row(ui, ROW_H, TRAIL_W, false, |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            cell(ui, ON_W, ROW_H, |ui| {
+                                theme::switch_keyed(ui, ("upload-rule", i), &mut row.on);
+                            });
+                            cell(ui, KIND_W, ROW_H, |ui| {
+                                let (label, color) = if row.keep { (tr(lang, "up.ignore_keep"), GREEN) } else { (tr(lang, "up.ignore_leave"), ORANGE) };
+                                if row.builtin {
+                                    chip(ui, label, color);
+                                } else if theme::chip_button(ui, label, color).on_hover_text(tr(lang, "up.ignore_flip")).clicked() {
+                                    row.keep = !row.keep;
+                                }
+                            });
+                            let color = if row.on { LABEL } else { theme::TERTIARY };
+                            if row.builtin {
+                                ui.label(RichText::new(&row.pattern).size(13.5).monospace().color(color));
+                            } else {
+                                let w = ui.available_width();
+                                theme::text_field(ui, &mut row.pattern, "", w);
+                            }
+                        }, |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if row.builtin {
+                                ui.add_space(36.0);
+                                chip(ui, tr(lang, "up.ignore_builtin_tag"), SECONDARY);
+                            } else {
+                                if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "up.ignore_remove")).clicked() {
+                                    remove = Some(i);
+                                }
+                                chip(ui, tr(lang, "up.ignore_custom_tag"), BLUE);
+                            }
+                        });
                     }
-                }, |ui| {
-                    if pill_button(ui, tr(lang, "set.index_add"), ButtonStyle::Tinted(BLUE), can_add).clicked() {
-                        add.set(true);
+                    if scroll_to_end {
+                        ui.scroll_to_cursor(Some(Align::BOTTOM));
                     }
                 });
-                if add.get() {
-                    edit.add();
-                }
-            });
             if let Some(i) = remove {
                 edit.rows.remove(i);
             }
-            // the pages
+            theme::divider(ui);
+            // a new rule: Enter or Add
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(tr_args(lang, "up.ignore_count", &[&edit.rows.len().to_string()])).size(12.5).color(SECONDARY));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if circle_button(ui, Icon::Right, theme::white(22), LABEL, edit.page + 1 < pages).clicked() {
-                        edit.page += 1;
-                    }
-                    ui.label(RichText::new(format!("{} / {}", edit.page + 1, pages)).size(12.5).color(LABEL));
-                    if circle_button(ui, Icon::Left, theme::white(22), LABEL, edit.page > 0).clicked() {
-                        edit.page -= 1;
-                    }
-                });
+            let can_add = !edit.new.trim().is_empty();
+            let add = std::cell::Cell::new(false);
+            Rows::new().row(ui, 44.0, 96.0, false, |ui| {
+                let w = ui.available_width();
+                let r = theme::text_field(ui, &mut edit.new, "*.md   drafts/   docs/*.md", w);
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    add.set(true);
+                    r.request_focus();
+                }
+            }, |ui| {
+                if pill_button(ui, tr(lang, "set.index_add"), ButtonStyle::Tinted(BLUE), can_add).clicked() {
+                    add.set(true);
+                }
             });
-            ui.add_space(14.0);
+            if add.get() {
+                edit.add();
+            }
+            ui.add_space(16.0);
             ui.horizontal(|ui| {
                 if pill_button(ui, tr(lang, "up.ignore_reset"), ButtonStyle::Plain(SECONDARY), true).on_hover_text(tr(lang, "up.ignore_reset_hint")).clicked() {
-                    let per_page = edit.per_page;
                     *edit = IgnoreEdit::from_store(&[], &[]);
-                    edit.per_page = per_page;
                 }
+                ui.label(RichText::new(tr_args(lang, "up.ignore_count", &[&edit.rows.len().to_string()])).size(12.5).color(SECONDARY));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), true).clicked() {
                         save = true;
@@ -4800,9 +4792,8 @@ struct IgnoreEdit {
     rows: Vec<RuleRow>,
     /// a rule being typed in, to add
     new: String,
-    page: usize,
-    /// rows a page: as many as the window has room for
-    per_page: usize,
+    /// a rule was just added: the list scrolls down to it
+    added: bool,
 }
 
 impl IgnoreEdit {
@@ -4825,7 +4816,7 @@ impl IgnoreEdit {
                 rows.push(RuleRow { builtin: false, on, keep, pattern: l.to_string() });
             }
         }
-        IgnoreEdit { rows, new: String::new(), page: 0, per_page: 8 }
+        IgnoreEdit { rows, new: String::new(), added: false }
     }
 
     fn user_lines(&self) -> Vec<String> {
@@ -4840,17 +4831,12 @@ impl IgnoreEdit {
         self.rows.iter().filter(|r| r.builtin && !r.on).map(|r| r.pattern.clone()).collect()
     }
 
-    fn pages(&self) -> usize {
-        self.rows.len().div_ceil(self.per_page.max(1)).max(1)
-    }
-
     fn add(&mut self) {
         let t = self.new.trim().to_string();
         if !t.is_empty() {
             self.rows.push(RuleRow { builtin: false, on: true, keep: false, pattern: t });
             self.new.clear();
-            // to the page that shows it
-            self.page = self.pages() - 1;
+            self.added = true;
         }
     }
 }
