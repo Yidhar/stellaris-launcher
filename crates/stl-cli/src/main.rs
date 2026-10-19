@@ -531,7 +531,7 @@ fn run() -> Result<()> {
                         println!("  item: {}", stl_core::workshop::item_url(id));
                     }
                     // the checks: on the disk, then with Steam
-                    let rules = uc::Rules::new(&store.upload_ignore);
+                    let rules = uc::Rules::with(&store.upload_ignore, &store.upload_builtin_off);
                     let mut pre = uc::local(&m, &up, None, &rules);
                     uc::remote(&game.dir, &mut pre, existing);
                     let mut found = pre.findings.clone();

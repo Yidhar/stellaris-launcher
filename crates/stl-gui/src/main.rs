@@ -401,6 +401,10 @@ struct App {
     dev_row_tools: bool,
     /// the upload rules being edited, while their sheet is open
     ignore_edit: Option<IgnoreEdit>,
+    /// the settings page: where it shows and how far it has scrolled
+    settings_view: Option<(Rect, f32)>,
+    /// development: the settings page opens scrolled this far (`--settings-scroll=N`)
+    dev_scroll: Option<f32>,
     /// the window moved or changed size this long ago: its place is saved once it has kept still a moment
     window_moved: Option<Instant>,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
@@ -534,6 +538,8 @@ impl App {
             dev_menu: false,
             dev_row_tools: false,
             ignore_edit: None,
+            settings_view: None,
+            dev_scroll: None,
             window_moved: None,
             playset_filter: String::new(),
             ps_filter: String::new(),
@@ -616,6 +622,8 @@ impl App {
                 app.confirm_delete = v.parse().ok();
             } else if let Some(v) = a.strip_prefix("--plugins-tab=") {
                 app.plugins_tab = v.parse().unwrap_or(0);
+            } else if let Some(v) = a.strip_prefix("--settings-scroll=") {
+                app.dev_scroll = v.parse().ok();
             } else if a == "--upload-ignore" {
                 app.acts.push(Act::EditUploadIgnore);
             } else if a == "--row-tools" {
@@ -826,7 +834,7 @@ impl App {
 
     /// Runs the checks of the upload form (on the disk, then with Steam) on a worker thread.
     fn check_upload(&mut self) {
-        let rules = uploadcheck::Rules::new(&self.store.upload_ignore);
+        let rules = uploadcheck::Rules::with(&self.store.upload_ignore, &self.store.upload_builtin_off);
         let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
         if f.pre_rx.is_some() {
             return;
@@ -866,7 +874,7 @@ impl App {
     }
 
     fn upload_now(&mut self) {
-        let rules = uploadcheck::Rules::new(&self.store.upload_ignore);
+        let rules = uploadcheck::Rules::with(&self.store.upload_ignore, &self.store.upload_builtin_off);
         let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
         let Some((mut up, typed)) = Self::form_upload(f) else { return };
         // a contributor cannot change the cover: it is not sent
@@ -1651,7 +1659,7 @@ impl App {
             }
             Act::StartUpload => self.start_upload(),
             Act::CheckUpload => self.check_upload(),
-            Act::EditUploadIgnore => self.ignore_edit = Some(IgnoreEdit::from_lines(&self.store.upload_ignore)),
+            Act::EditUploadIgnore => self.ignore_edit = Some(IgnoreEdit::from_store(&self.store.upload_ignore, &self.store.upload_builtin_off)),
             Act::RescanMods => {
                 if let Ok(g) = &self.game {
                     self.mods = mods::scan(&g.data_dir);
@@ -3027,7 +3035,11 @@ impl App {
         let lang = self.lang;
         let acts = Acts::default();
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
+        let mut area = egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]);
+        if let Some(o) = self.dev_scroll.take() {
+            area = area.vertical_scroll_offset(o);
+        }
+        let out = area.show(ui, |ui| {
             let w = ui.available_width().min(820.0);
             ui.set_max_width(w);
             // launch
@@ -3283,6 +3295,8 @@ impl App {
             // the page runs on under the tab bar: room at its end to scroll the last rows up above the bar
             ui.add_space(110.0);
         });
+        // where the page shows and how far it has scrolled, for the fade at its top
+        self.settings_view = Some((out.inner_rect, out.state.offset.y));
         self.acts.extend(acts.take());
     }
 
@@ -3442,11 +3456,17 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("tabs").exact_height(room).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |_| {});
         let screen = ctx.screen_rect();
         if under_bar {
+            // under the bar (which is on the layer above): the page blurs away at the bottom, and at the top once it has scrolled
+            let (view, scrolled) = self.settings_view.unwrap_or((Rect::NOTHING, 0.0));
             egui::Area::new(egui::Id::new("page-fade")).order(egui::Order::Middle).interactable(false).fixed_pos(screen.left_bottom()).show(ctx, |ui| {
-                theme::fade_to_backdrop(ui.ctx(), ui.painter(), Rect::from_min_max(pos2(screen.left(), screen.bottom() - 150.0), screen.max));
+                theme::fade_to_backdrop(ui.ctx(), ui.painter(), Rect::from_min_max(pos2(screen.left(), screen.bottom() - 150.0), screen.max), true, 1.0);
+                if view.is_positive() {
+                    let top = Rect::from_min_max(pos2(screen.left(), view.top()), pos2(screen.right(), view.top() + 56.0));
+                    theme::fade_to_backdrop(ui.ctx(), ui.painter(), top, false, (scrolled / 40.0).clamp(0.0, 1.0));
+                }
             });
         }
-        egui::Area::new(egui::Id::new("tab-bar")).order(egui::Order::Middle).fixed_pos(pos2(screen.left(), screen.bottom() - 76.0)).show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("tab-bar")).order(egui::Order::Foreground).fixed_pos(pos2(screen.left(), screen.bottom() - 76.0)).show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(screen.width(), 76.0), Sense::hover());
             let mut bar = ui.new_child(UiBuilder::new().max_rect(rect));
             let items: Vec<(Icon, String)> = Page::ALL.iter().map(|p| (p.icon(), tr(self.lang, p.key()).to_string())).collect();
@@ -4000,43 +4020,86 @@ impl App {
         }
     }
 
-    /// The rules of what uploads leave out, as a list: each row leaves out (or puts back) what its pattern matches; the built-in list under it.
+    /// The rules of what uploads leave out, as a table a page at a time: on/off, leave out or keep, the pattern, built in or the user's own
+    /// (only those can be edited and removed); a row to add one; back to the defaults.
     fn ignore_sheet(&mut self, ctx: &egui::Context) {
         let Some(edit) = self.ignore_edit.as_mut() else { return };
         let lang = self.lang;
         let (mut close, mut save) = (false, false);
         let resp = egui::Modal::new(egui::Id::new("upload-ignore")).frame(Self::sheet_frame()).show(ctx, |ui| {
-            ui.set_width(540.0);
+            ui.set_width(620.0);
             ui.label(RichText::new(tr(lang, "up.ignore_title")).size(22.0).family(bold()));
             ui.add_space(6.0);
             ui.add(egui::Label::new(RichText::new(tr(lang, "up.ignore_hint")).size(12.5).color(SECONDARY)).wrap());
             ui.add_space(12.0);
-            // the user's rules: leave out / put back, the pattern, remove
+            // a fixed-width cell of a row
+            fn cell(ui: &mut Ui, w: f32, h: f32, add: impl FnOnce(&mut Ui)) {
+                let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                add(&mut ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::left_to_right(Align::Center))));
+            }
+            const ON_W: f32 = 58.0;
+            const KIND_W: f32 = 70.0;
+            const ROW_H: f32 = 48.0;
+            // the rows a page: what the window has room for besides the rest of the sheet (about 430 points)
+            let room = ((ui.ctx().screen_rect().height() - 430.0) / ROW_H).floor() as usize;
+            let top_row = edit.page * edit.per_page;
+            edit.per_page = room.clamp(4, 10);
+            // the page that holds the row that was at the top
+            edit.page = top_row / edit.per_page;
+            let pages = edit.pages();
+            edit.page = edit.page.min(pages - 1);
+            let first = edit.page * edit.per_page;
+            let mut remove = None;
             glass(ui, 14.0, 0.0, |ui| {
                 let mut rows = Rows::new();
-                let mut remove = None;
-                if edit.rules.is_empty() {
-                    rows.row(ui, 48.0, 0.0, false, |ui| {
-                        ui.label(RichText::new(tr(lang, "up.ignore_none")).size(13.0).color(SECONDARY));
-                    }, |_| {});
-                }
-                for (i, (keep, pattern)) in edit.rules.iter_mut().enumerate() {
-                    rows.row(ui, 52.0, 40.0, false, |ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
-                        let (label, color) = if *keep { (tr(lang, "up.ignore_keep"), GREEN) } else { (tr(lang, "up.ignore_leave"), ORANGE) };
-                        if theme::chip_button(ui, label, color).on_hover_text(tr(lang, "up.ignore_flip")).clicked() {
-                            *keep = !*keep;
+                // the head of the table
+                rows.row(ui, 34.0, 120.0, false, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    for (w, k) in [(ON_W, "up.ignore_col_on"), (KIND_W, "up.ignore_col_kind")] {
+                        cell(ui, w, 34.0, |ui| {
+                            ui.label(RichText::new(tr(lang, k)).size(12.0).color(SECONDARY));
+                        });
+                    }
+                    ui.label(RichText::new(tr(lang, "up.ignore_col_rule")).size(12.0).color(SECONDARY));
+                }, |ui| {
+                    ui.add_space(44.0);
+                    ui.label(RichText::new(tr(lang, "up.ignore_col_source")).size(12.0).color(SECONDARY));
+                });
+                let end = (first + edit.per_page).min(edit.rows.len());
+                for i in first..end {
+                    let Some(row) = edit.rows.get_mut(i) else { continue };
+                    rows.row(ui, ROW_H, 120.0, false, |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        cell(ui, ON_W, ROW_H, |ui| {
+                            theme::switch_keyed(ui, ("upload-rule", i), &mut row.on);
+                        });
+                        cell(ui, KIND_W, ROW_H, |ui| {
+                            let (label, color) = if row.keep { (tr(lang, "up.ignore_keep"), GREEN) } else { (tr(lang, "up.ignore_leave"), ORANGE) };
+                            if row.builtin {
+                                chip(ui, label, color);
+                            } else if theme::chip_button(ui, label, color).on_hover_text(tr(lang, "up.ignore_flip")).clicked() {
+                                row.keep = !row.keep;
+                            }
+                        });
+                        let color = if row.on { LABEL } else { theme::TERTIARY };
+                        if row.builtin {
+                            ui.label(RichText::new(&row.pattern).size(13.5).monospace().color(color));
+                        } else {
+                            let w = ui.available_width();
+                            theme::text_field(ui, &mut row.pattern, "", w);
                         }
-                        let w = ui.available_width();
-                        theme::text_field(ui, pattern, "", w);
                     }, |ui| {
-                        if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "up.ignore_remove")).clicked() {
-                            remove = Some(i);
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if row.builtin {
+                            ui.add_space(36.0);
+                            chip(ui, tr(lang, "up.ignore_builtin_tag"), SECONDARY);
+                        } else {
+                            if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "up.ignore_remove")).clicked() {
+                                remove = Some(i);
+                            }
+                            chip(ui, tr(lang, "up.ignore_custom_tag"), BLUE);
                         }
                     });
-                }
-                if let Some(i) = remove {
-                    edit.rules.remove(i);
                 }
                 // a new rule: Enter or Add
                 let can_add = !edit.new.trim().is_empty();
@@ -4053,37 +4116,50 @@ impl App {
                         add.set(true);
                     }
                 });
-                if add.get() && !edit.new.trim().is_empty() {
-                    edit.rules.push((false, edit.new.trim().to_string()));
-                    edit.new.clear();
+                if add.get() {
+                    edit.add();
                 }
             });
-            ui.add_space(12.0);
-            // what is always left out
-            ui.label(RichText::new(tr(lang, "up.ignore_builtin")).size(12.0).color(SECONDARY));
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
-                for b in uploadcheck::BUILT_IN.split_whitespace() {
-                    chip(ui, b, SECONDARY);
-                }
+            if let Some(i) = remove {
+                edit.rows.remove(i);
+            }
+            // the pages
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr_args(lang, "up.ignore_count", &[&edit.rows.len().to_string()])).size(12.5).color(SECONDARY));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if circle_button(ui, Icon::Right, theme::white(22), LABEL, edit.page + 1 < pages).clicked() {
+                        edit.page += 1;
+                    }
+                    ui.label(RichText::new(format!("{} / {}", edit.page + 1, pages)).size(12.5).color(LABEL));
+                    if circle_button(ui, Icon::Left, theme::white(22), LABEL, edit.page > 0).clicked() {
+                        edit.page -= 1;
+                    }
+                });
             });
-            ui.add_space(16.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), true).clicked() {
-                    save = true;
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if pill_button(ui, tr(lang, "up.ignore_reset"), ButtonStyle::Plain(SECONDARY), true).on_hover_text(tr(lang, "up.ignore_reset_hint")).clicked() {
+                    let per_page = edit.per_page;
+                    *edit = IgnoreEdit::from_store(&[], &[]);
+                    edit.per_page = per_page;
                 }
-                if pill_button(ui, tr(lang, "common.cancel"), ButtonStyle::Plain(SECONDARY), true).clicked() {
-                    close = true;
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), true).clicked() {
+                        save = true;
+                    }
+                    if pill_button(ui, tr(lang, "common.cancel"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                        close = true;
+                    }
+                });
             });
         });
         if save {
             // what is typed but not added yet counts too
-            if !edit.new.trim().is_empty() {
-                edit.rules.push((false, edit.new.trim().to_string()));
-            }
-            self.store.upload_ignore = edit.lines();
+            edit.add();
+            self.store.upload_ignore = edit.user_lines();
+            self.store.upload_builtin_off = edit.builtin_off();
             self.save();
             self.ignore_edit = None;
             // what is left out has changed: the checks say so again
@@ -4301,7 +4377,7 @@ impl App {
             open_link(&url);
         }
         if edit_rules {
-            self.ignore_edit = Some(IgnoreEdit::from_lines(&self.store.upload_ignore));
+            self.ignore_edit = Some(IgnoreEdit::from_store(&self.store.upload_ignore, &self.store.upload_builtin_off));
             return;
         }
         if (close || resp.should_close()) && !running && self.ignore_edit.is_none() {
@@ -4709,31 +4785,73 @@ mod tests {
     }
 }
 
-/// The rules of what uploads leave out, as a list being edited: each a pattern that leaves out (or, kept, puts back) what it matches.
+/// A rule of what uploads leave out, in the table being edited: built in (switched on or off) or the user's own (also editable).
+#[derive(Clone)]
+struct RuleRow {
+    builtin: bool,
+    on: bool,
+    /// puts back what is left out (`!`)
+    keep: bool,
+    pattern: String,
+}
+
+/// The table of upload rules being edited: the built-in ones, then the user's; a page of it at a time.
 struct IgnoreEdit {
-    /// (keeps: puts back what is left out, pattern)
-    rules: Vec<(bool, String)>,
+    rows: Vec<RuleRow>,
     /// a rule being typed in, to add
     new: String,
+    page: usize,
+    /// rows a page: as many as the window has room for
+    per_page: usize,
 }
 
 impl IgnoreEdit {
-    fn from_lines(lines: &[String]) -> IgnoreEdit {
-        let rules = lines
+    /// From the store: the user's lines (`#` before one switched off, `!` before one that puts back) and the built-in ones switched off.
+    fn from_store(user: &[String], builtin_off: &[String]) -> IgnoreEdit {
+        let mut rows: Vec<RuleRow> = uploadcheck::BUILT_IN
             .iter()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|l| match l.strip_prefix('!') {
-                Some(rest) => (true, rest.trim().to_string()),
-                None => (false, l.to_string()),
-            })
+            .map(|b| RuleRow { builtin: true, on: !builtin_off.iter().any(|o| o.trim().eq_ignore_ascii_case(b)), keep: false, pattern: b.to_string() })
             .collect();
-        IgnoreEdit { rules, new: String::new() }
+        for l in user.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+            let (on, l) = match l.strip_prefix('#') {
+                Some(rest) => (false, rest.trim()),
+                None => (true, l),
+            };
+            let (keep, l) = match l.strip_prefix('!') {
+                Some(rest) => (true, rest.trim()),
+                None => (false, l),
+            };
+            if !l.is_empty() {
+                rows.push(RuleRow { builtin: false, on, keep, pattern: l.to_string() });
+            }
+        }
+        IgnoreEdit { rows, new: String::new(), page: 0, per_page: 8 }
     }
 
-    /// As the store keeps them: one a line, `!` before one that puts back.
-    fn lines(&self) -> Vec<String> {
-        self.rules.iter().filter(|(_, r)| !r.trim().is_empty()).map(|(keep, r)| format!("{}{}", if *keep { "!" } else { "" }, r.trim())).collect()
+    fn user_lines(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|r| !r.builtin && !r.pattern.trim().is_empty())
+            .map(|r| format!("{}{}{}", if r.on { "" } else { "#" }, if r.keep { "!" } else { "" }, r.pattern.trim()))
+            .collect()
+    }
+
+    fn builtin_off(&self) -> Vec<String> {
+        self.rows.iter().filter(|r| r.builtin && !r.on).map(|r| r.pattern.clone()).collect()
+    }
+
+    fn pages(&self) -> usize {
+        self.rows.len().div_ceil(self.per_page.max(1)).max(1)
+    }
+
+    fn add(&mut self) {
+        let t = self.new.trim().to_string();
+        if !t.is_empty() {
+            self.rows.push(RuleRow { builtin: false, on: true, keep: false, pattern: t });
+            self.new.clear();
+            // to the page that shows it
+            self.page = self.pages() - 1;
+        }
     }
 }
 

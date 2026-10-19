@@ -92,6 +92,9 @@ pub struct Store {
     /// what Workshop uploads leave out besides the built-in list, one pattern a line (`uploadcheck::Rules`)
     #[serde(default)]
     pub upload_ignore: Vec<String>,
+    /// entries of the built-in upload list (`uploadcheck::BUILT_IN`) switched off
+    #[serde(default)]
+    pub upload_builtin_off: Vec<String>,
     /// where the launcher's window was when it was last moved or resized
     #[serde(default)]
     pub window: Option<WindowPlace>,

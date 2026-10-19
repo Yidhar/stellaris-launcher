@@ -95,24 +95,32 @@ impl Preflight {
     }
 }
 
-/// Files and folders that do not belong in an upload: version control, editors, source art, archives, system litter.
+/// What does not belong in an upload, built in: version control, editors, source art, archives, system litter. Each can be switched off.
+pub const BUILT_IN: &[&str] = &[
+    ".git/", ".svn/", ".hg/", ".vs/", ".vscode/", ".idea/", ".github/", "__MACOSX/", "node_modules/", ".cache/", "__pycache__/", "Thumbs.db",
+    "desktop.ini", ".DS_Store", ".gitignore", ".gitattributes", ".gitmodules", ".editorconfig", "*.psd", "*.psb", "*.xcf", "*.kra", "*.sai",
+    "*.clip", "*.pdn", "*.ai", "*.blend", "*.blend1", "*.max", "*.spp", "*.zip", "*.7z", "*.rar", "*.bak", "*.tmp", "*.orig",
+];
+
+/// Whether the built-in list alone leaves an entry out.
 pub fn is_excluded(name: &str, dir: bool) -> bool {
-    let n = name.to_lowercase();
-    if dir {
-        return matches!(n.as_str(), ".git" | ".svn" | ".hg" | ".vs" | ".vscode" | ".idea" | ".github" | "__macosx" | "node_modules" | ".cache" | "__pycache__");
-    }
-    matches!(n.as_str(), "thumbs.db" | "desktop.ini" | ".ds_store" | ".gitignore" | ".gitattributes" | ".gitmodules" | ".editorconfig")
-        || [".psd", ".psb", ".xcf", ".kra", ".sai", ".clip", ".pdn", ".ai", ".blend", ".blend1", ".max", ".spp", ".zip", ".7z", ".rar", ".bak", ".tmp", ".orig"]
-            .iter()
-            .any(|e| n.ends_with(e))
+    Rules::default().excluded(name, name, dir)
 }
 
-/// What an upload leaves out: the built-in list (`is_excluded`), then the user's patterns in order, the last that matches deciding — like
-/// `.gitignore`: `*.psd` (a name, at any depth), `drafts/` (folders only), `docs/*.md` (with a `/`: a path from the mod folder's root),
-/// `**` (any folders), `!keep.zip` (put back what an earlier rule or the built-in list left out). Case does not matter; `#` starts a comment.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// What an upload leaves out: the built-in list (but those switched off), then the user's patterns, in order — the last that matches
+/// deciding, like `.gitignore`: `*.psd` (a name, at any depth), `drafts/` (folders only), `docs/*.md` (with a `/`: a path from the mod
+/// folder's root), `**` (any folders), `!keep.zip` (put back what an earlier rule left out). Case does not matter; `#` starts a comment (a
+/// rule switched off).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Rules {
     patterns: Vec<Pattern>,
+}
+
+impl Default for Rules {
+    /// The built-in list.
+    fn default() -> Rules {
+        Rules::with(&[], &[])
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,31 +132,44 @@ struct Pattern {
     glob: String,
 }
 
+fn pattern(line: &str) -> Option<Pattern> {
+    let l = line.trim();
+    if l.is_empty() || l.starts_with('#') {
+        return None;
+    }
+    let (keep, l) = match l.strip_prefix('!') {
+        Some(rest) => (true, rest.trim()),
+        None => (false, l),
+    };
+    let l = l.replace('\\', "/");
+    let dir_only = l.ends_with('/');
+    let l = l.trim_end_matches('/');
+    let anchored = l.contains('/');
+    let glob = l.trim_start_matches('/').to_lowercase();
+    (!glob.is_empty()).then_some(Pattern { keep, dir_only, anchored, glob })
+}
+
 impl Rules {
-    pub fn new(lines: &[String]) -> Rules {
-        let patterns = lines
-            .iter()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|l| {
-                let (keep, l) = match l.strip_prefix('!') {
-                    Some(rest) => (true, rest),
-                    None => (false, l),
-                };
-                let l = l.replace('\\', "/");
-                let dir_only = l.ends_with('/');
-                let l = l.trim_end_matches('/');
-                let anchored = l.contains('/');
-                Pattern { keep, dir_only, anchored, glob: l.trim_start_matches('/').to_lowercase() }
-            })
-            .filter(|p| !p.glob.is_empty())
-            .collect();
+    /// The built-in list and the user's lines.
+    pub fn new(user: &[String]) -> Rules {
+        Rules::with(user, &[])
+    }
+
+    /// The built-in list but `builtin_off` (its entries as `BUILT_IN` writes them), then the user's lines.
+    pub fn with(user: &[String], builtin_off: &[String]) -> Rules {
+        let off = |b: &str| builtin_off.iter().any(|o| o.trim().eq_ignore_ascii_case(b));
+        let patterns = BUILT_IN.iter().filter(|b| !off(b)).filter_map(|b| pattern(b)).chain(user.iter().filter_map(|l| pattern(l))).collect();
         Rules { patterns }
+    }
+
+    /// No rules at all: everything counts.
+    pub fn none() -> Rules {
+        Rules { patterns: Vec::new() }
     }
 
     /// Whether an entry is left out: `rel` its path from the mod folder's root (with `/`), `name` its name.
     pub fn excluded(&self, rel: &str, name: &str, dir: bool) -> bool {
-        let mut out = is_excluded(name, dir);
+        let mut out = false;
         let (rel, name) = (rel.replace('\\', "/").to_lowercase(), name.to_lowercase());
         for p in &self.patterns {
             if p.dir_only && !dir {
@@ -160,10 +181,6 @@ impl Rules {
             }
         }
         out
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
     }
 }
 
@@ -197,10 +214,6 @@ fn glob(pat: &str, text: &str) -> bool {
     let t: Vec<char> = text.chars().collect();
     go(&p, &t)
 }
-
-/// The built-in list, for people (what `is_excluded` leaves out).
-pub const BUILT_IN: &str = ".git/ .svn/ .hg/ .vs/ .vscode/ .idea/ .github/ __MACOSX/ node_modules/ .cache/ __pycache__/ Thumbs.db desktop.ini .DS_Store \
-.gitignore .gitattributes .gitmodules .editorconfig *.psd *.psb *.xcf *.kra *.sai *.clip *.pdn *.ai *.blend *.blend1 *.max *.spp *.zip *.7z *.rar *.bak *.tmp *.orig";
 
 pub fn human(bytes: u64) -> String {
     match bytes {
@@ -246,7 +259,7 @@ fn walk(base: &Path, dir: &Path, w: &mut Walk, rules: &Rules) {
         if rules.excluded(&rel, &name, ft.is_dir()) {
             if ft.is_dir() {
                 let mut sub = Walk { files: 0, bytes: 0, excluded: Vec::new(), excluded_bytes: 0, long: Vec::new() };
-                walk(&p, &p, &mut sub, &Rules::default());
+                walk(&p, &p, &mut sub, &Rules::none());
                 w.excluded_bytes += sub.bytes + sub.excluded_bytes;
                 w.excluded.push(format!("{rel}/"));
             } else {
@@ -1207,6 +1220,12 @@ mod tests {
         assert!(r.excluded("other.zip", "other.zip", false));
         assert!(r.excluded(".git", ".git", true));
         assert!(!Rules::default().excluded("common/x.txt", "x.txt", false));
+        // a built-in rule switched off, a user rule switched off (a comment)
+        let off = Rules::with(&["#*.md".into()], &["*.zip".into()]);
+        assert!(!off.excluded("a.zip", "a.zip", false));
+        assert!(!off.excluded("a.md", "a.md", false));
+        assert!(off.excluded(".git", ".git", true));
+        assert!(is_excluded("Thumbs.db", false) && is_excluded("art.PSD", false) && !is_excluded("x.txt", false));
     }
 
     #[test]

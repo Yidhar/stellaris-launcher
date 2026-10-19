@@ -206,7 +206,7 @@ pub fn glass_shapes(ctx: &egui::Context, rect: Rect, radius: f32) -> Shape {
 
 /// The bottom of a page that runs on under the tab bar: from nothing at the top of `rect` to the blurred, darkened backdrop of the glass at its
 /// bottom, so what scrolls there blurs and fades away instead of being cut off by a line.
-pub fn fade_to_backdrop(ctx: &egui::Context, painter: &egui::Painter, rect: Rect) {
+pub fn fade_to_backdrop(ctx: &egui::Context, painter: &egui::Painter, rect: Rect, downwards: bool, strength: f32) {
     let g = ctx.data(|d| d.get_temp::<GlassCtx>(glass_id()));
     // how much of the backdrop, down the strip (eased: it starts gently)
     let stops = [(0.0f32, 0.0f32), (0.35, 0.28), (0.7, 0.72), (1.0, 0.96)];
@@ -222,9 +222,14 @@ pub fn fade_to_backdrop(ctx: &egui::Context, painter: &egui::Painter, rect: Rect
         _ => (egui::TextureId::default(), Box::new(|_| egui::epaint::WHITE_UV)),
     };
     mesh.texture_id = tex;
+    if strength <= 0.0 {
+        return;
+    }
     for (k, (at, a)) in stops.iter().enumerate() {
-        let y = egui::lerp(rect.top()..=rect.bottom(), *at);
-        let alpha = (a * 255.0) as u8;
+        // downwards: nothing at the top to the backdrop at the bottom; upwards the other way
+        let at = if downwards { *at } else { 1.0 - *at };
+        let y = egui::lerp(rect.top()..=rect.bottom(), at);
+        let alpha = (a * strength * 255.0) as u8;
         let color = if g.as_ref().is_some_and(|g| g.tex.is_some()) {
             Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha)
         } else {
