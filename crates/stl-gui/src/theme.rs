@@ -204,6 +204,45 @@ pub fn glass_shapes(ctx: &egui::Context, rect: Rect, radius: f32) -> Shape {
     Shape::Vec(shapes)
 }
 
+/// The bottom of a page that runs on under the tab bar: from nothing at the top of `rect` to the blurred, darkened backdrop of the glass at its
+/// bottom, so what scrolls there blurs and fades away instead of being cut off by a line.
+pub fn fade_to_backdrop(ctx: &egui::Context, painter: &egui::Painter, rect: Rect) {
+    let g = ctx.data(|d| d.get_temp::<GlassCtx>(glass_id()));
+    // how much of the backdrop, down the strip (eased: it starts gently)
+    let stops = [(0.0f32, 0.0f32), (0.35, 0.28), (0.7, 0.72), (1.0, 0.96)];
+    let mut mesh = egui::Mesh::default();
+    let (tex, map): (egui::TextureId, Box<dyn Fn(Pos2) -> Pos2>) = match g {
+        Some(GlassCtx { tex: Some(tex), window, uv }) => (
+            tex,
+            Box::new(move |p: Pos2| {
+                let t = vec2((p.x - window.left()) / window.width().max(1.0), (p.y - window.top()) / window.height().max(1.0));
+                pos2(uv.left() + uv.width() * t.x, uv.top() + uv.height() * t.y)
+            }),
+        ),
+        _ => (egui::TextureId::default(), Box::new(|_| egui::epaint::WHITE_UV)),
+    };
+    mesh.texture_id = tex;
+    for (k, (at, a)) in stops.iter().enumerate() {
+        let y = egui::lerp(rect.top()..=rect.bottom(), *at);
+        let alpha = (a * 255.0) as u8;
+        let color = if g.as_ref().is_some_and(|g| g.tex.is_some()) {
+            Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha)
+        } else {
+            Color32::from_rgba_unmultiplied(22, 22, 28, alpha)
+        };
+        for x in [rect.left(), rect.right()] {
+            let pos = pos2(x, y);
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv: map(pos), color });
+        }
+        if k > 0 {
+            let i = (k as u32) * 2;
+            mesh.add_triangle(i - 2, i - 1, i);
+            mesh.add_triangle(i - 1, i, i + 1);
+        }
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
 /// A glass card around whatever `add` puts in it.
 pub fn glass<R>(ui: &mut Ui, radius: f32, margin: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
     glass_with(ui, radius, margin, false, add)

@@ -399,8 +399,8 @@ struct App {
     dev_menu: bool,
     /// development: every row shows what it shows under the pointer (`--row-tools`)
     dev_row_tools: bool,
-    /// the upload rules being edited (one pattern a line), while their sheet is open
-    ignore_edit: Option<String>,
+    /// the upload rules being edited, while their sheet is open
+    ignore_edit: Option<IgnoreEdit>,
     /// the window moved or changed size this long ago: its place is saved once it has kept still a moment
     window_moved: Option<Instant>,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
@@ -1651,8 +1651,7 @@ impl App {
             }
             Act::StartUpload => self.start_upload(),
             Act::CheckUpload => self.check_upload(),
-            Act::EditUploadIgnore => self.ignore_edit = Some(self.store.upload_ignore.join("
-")),
+            Act::EditUploadIgnore => self.ignore_edit = Some(IgnoreEdit::from_lines(&self.store.upload_ignore)),
             Act::RescanMods => {
                 if let Ok(g) = &self.game {
                     self.mods = mods::scan(&g.data_dir);
@@ -3281,7 +3280,8 @@ impl App {
                     }
                 });
             });
-            ui.add_space(20.0);
+            // the page runs on under the tab bar: room at its end to scroll the last rows up above the bar
+            ui.add_space(110.0);
         });
         self.acts.extend(acts.take());
     }
@@ -3436,8 +3436,16 @@ impl eframe::App for App {
         let sink = ctx.animate_bool_with_time(egui::Id::new("tab-bar-sink"), sunk, 0.35);
         // the room kept for the tab bar follows it: all of it while it shows, the edge that peeks out once it has sunk — so the pages end just
         // above it either way, rather than at a line far above a sunk bar
-        egui::TopBottomPanel::bottom("tabs").exact_height(egui::lerp(76.0..=40.0, sink)).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |_| {});
+        // the settings page runs on under the bar (it fades out into the blurred backdrop there)
+        let under_bar = self.page == Page::Settings && self.prev_page.is_none();
+        let room = if under_bar { 0.0 } else { egui::lerp(76.0..=40.0, sink) };
+        egui::TopBottomPanel::bottom("tabs").exact_height(room).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |_| {});
         let screen = ctx.screen_rect();
+        if under_bar {
+            egui::Area::new(egui::Id::new("page-fade")).order(egui::Order::Middle).interactable(false).fixed_pos(screen.left_bottom()).show(ctx, |ui| {
+                theme::fade_to_backdrop(ui.ctx(), ui.painter(), Rect::from_min_max(pos2(screen.left(), screen.bottom() - 150.0), screen.max));
+            });
+        }
         egui::Area::new(egui::Id::new("tab-bar")).order(egui::Order::Middle).fixed_pos(pos2(screen.left(), screen.bottom() - 76.0)).show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(screen.width(), 76.0), Sense::hover());
             let mut bar = ui.new_child(UiBuilder::new().max_rect(rect));
@@ -3992,31 +4000,74 @@ impl App {
         }
     }
 
-    /// The rules of what uploads leave out: the built-in list, and the user's patterns over it (one a line, like .gitignore).
+    /// The rules of what uploads leave out, as a list: each row leaves out (or puts back) what its pattern matches; the built-in list under it.
     fn ignore_sheet(&mut self, ctx: &egui::Context) {
-        let Some(text) = self.ignore_edit.as_mut() else { return };
+        let Some(edit) = self.ignore_edit.as_mut() else { return };
         let lang = self.lang;
         let (mut close, mut save) = (false, false);
         let resp = egui::Modal::new(egui::Id::new("upload-ignore")).frame(Self::sheet_frame()).show(ctx, |ui| {
-            ui.set_width(520.0);
+            ui.set_width(540.0);
             ui.label(RichText::new(tr(lang, "up.ignore_title")).size(22.0).family(bold()));
             ui.add_space(6.0);
             ui.add(egui::Label::new(RichText::new(tr(lang, "up.ignore_hint")).size(12.5).color(SECONDARY)).wrap());
-            ui.add_space(10.0);
-            egui::Frame::new().fill(theme::white(14)).corner_radius(egui::CornerRadius::same(12)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add(
-                    egui::TextEdit::multiline(text)
-                        .font(egui::FontId::new(13.0, egui::FontFamily::Monospace))
-                        .hint_text("*.md\ndrafts/\n!keep.zip")
-                        .desired_rows(8)
-                        .desired_width(f32::INFINITY)
-                        .frame(false),
-                );
+            ui.add_space(12.0);
+            // the user's rules: leave out / put back, the pattern, remove
+            glass(ui, 14.0, 0.0, |ui| {
+                let mut rows = Rows::new();
+                let mut remove = None;
+                if edit.rules.is_empty() {
+                    rows.row(ui, 48.0, 0.0, false, |ui| {
+                        ui.label(RichText::new(tr(lang, "up.ignore_none")).size(13.0).color(SECONDARY));
+                    }, |_| {});
+                }
+                for (i, (keep, pattern)) in edit.rules.iter_mut().enumerate() {
+                    rows.row(ui, 52.0, 40.0, false, |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let (label, color) = if *keep { (tr(lang, "up.ignore_keep"), GREEN) } else { (tr(lang, "up.ignore_leave"), ORANGE) };
+                        if theme::chip_button(ui, label, color).on_hover_text(tr(lang, "up.ignore_flip")).clicked() {
+                            *keep = !*keep;
+                        }
+                        let w = ui.available_width();
+                        theme::text_field(ui, pattern, "", w);
+                    }, |ui| {
+                        if theme::delete_button(ui, false, "").on_hover_text(tr(lang, "up.ignore_remove")).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    edit.rules.remove(i);
+                }
+                // a new rule: Enter or Add
+                let can_add = !edit.new.trim().is_empty();
+                let add = std::cell::Cell::new(false);
+                rows.row(ui, 56.0, 96.0, false, |ui| {
+                    let w = ui.available_width();
+                    let r = theme::text_field(ui, &mut edit.new, "*.md   drafts/   docs/*.md", w);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        add.set(true);
+                        r.request_focus();
+                    }
+                }, |ui| {
+                    if pill_button(ui, tr(lang, "set.index_add"), ButtonStyle::Tinted(BLUE), can_add).clicked() {
+                        add.set(true);
+                    }
+                });
+                if add.get() && !edit.new.trim().is_empty() {
+                    edit.rules.push((false, edit.new.trim().to_string()));
+                    edit.new.clear();
+                }
             });
-            ui.add_space(10.0);
+            ui.add_space(12.0);
+            // what is always left out
             ui.label(RichText::new(tr(lang, "up.ignore_builtin")).size(12.0).color(SECONDARY));
-            ui.add(egui::Label::new(RichText::new(uploadcheck::BUILT_IN).size(11.5).color(theme::TERTIARY).monospace()).wrap());
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
+                for b in uploadcheck::BUILT_IN.split_whitespace() {
+                    chip(ui, b, SECONDARY);
+                }
+            });
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), true).clicked() {
@@ -4028,8 +4079,11 @@ impl App {
             });
         });
         if save {
-            let lines: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-            self.store.upload_ignore = lines;
+            // what is typed but not added yet counts too
+            if !edit.new.trim().is_empty() {
+                edit.rules.push((false, edit.new.trim().to_string()));
+            }
+            self.store.upload_ignore = edit.lines();
             self.save();
             self.ignore_edit = None;
             // what is left out has changed: the checks say so again
@@ -4247,7 +4301,7 @@ impl App {
             open_link(&url);
         }
         if edit_rules {
-            self.ignore_edit = Some(self.store.upload_ignore.join("\n"));
+            self.ignore_edit = Some(IgnoreEdit::from_lines(&self.store.upload_ignore));
             return;
         }
         if (close || resp.should_close()) && !running && self.ignore_edit.is_none() {
@@ -4652,6 +4706,34 @@ mod tests {
         assert_eq!(version_parts("v3.14.2"), ("".into(), "3.14.2".into(), "".into()));
         assert_eq!(version_parts("Some Name"), ("".into(), "Some Name".into(), "".into()));
         assert_eq!(version_parts(""), ("".into(), "".into(), "".into()));
+    }
+}
+
+/// The rules of what uploads leave out, as a list being edited: each a pattern that leaves out (or, kept, puts back) what it matches.
+struct IgnoreEdit {
+    /// (keeps: puts back what is left out, pattern)
+    rules: Vec<(bool, String)>,
+    /// a rule being typed in, to add
+    new: String,
+}
+
+impl IgnoreEdit {
+    fn from_lines(lines: &[String]) -> IgnoreEdit {
+        let rules = lines
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| match l.strip_prefix('!') {
+                Some(rest) => (true, rest.trim().to_string()),
+                None => (false, l.to_string()),
+            })
+            .collect();
+        IgnoreEdit { rules, new: String::new() }
+    }
+
+    /// As the store keeps them: one a line, `!` before one that puts back.
+    fn lines(&self) -> Vec<String> {
+        self.rules.iter().filter(|(_, r)| !r.trim().is_empty()).map(|(keep, r)| format!("{}{}", if *keep { "!" } else { "" }, r.trim())).collect()
     }
 }
 
