@@ -531,7 +531,8 @@ fn run() -> Result<()> {
                         println!("  item: {}", stl_core::workshop::item_url(id));
                     }
                     // the checks: on the disk, then with Steam
-                    let mut pre = uc::local(&m, &up, None);
+                    let rules = uc::Rules::new(&store.upload_ignore);
+                    let mut pre = uc::local(&m, &up, None, &rules);
                     uc::remote(&game.dir, &mut pre, existing);
                     let mut found = pre.findings.clone();
                     found.sort_by(|a, b| b.level.cmp(&a.level));
@@ -557,7 +558,7 @@ fn run() -> Result<()> {
                     if pre.contributor() {
                         up.preview = None;
                     }
-                    let copy = if pre.excluded.is_empty() { None } else { Some(uc::clean_copy(&content)?) };
+                    let copy = if pre.excluded.is_empty() { None } else { Some(uc::clean_copy(&content, &rules)?) };
                     if let Some(c) = &copy {
                         up.content = c.clone();
                     }

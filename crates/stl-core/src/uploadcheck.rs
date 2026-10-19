@@ -107,6 +107,101 @@ pub fn is_excluded(name: &str, dir: bool) -> bool {
             .any(|e| n.ends_with(e))
 }
 
+/// What an upload leaves out: the built-in list (`is_excluded`), then the user's patterns in order, the last that matches deciding — like
+/// `.gitignore`: `*.psd` (a name, at any depth), `drafts/` (folders only), `docs/*.md` (with a `/`: a path from the mod folder's root),
+/// `**` (any folders), `!keep.zip` (put back what an earlier rule or the built-in list left out). Case does not matter; `#` starts a comment.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Rules {
+    patterns: Vec<Pattern>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Pattern {
+    keep: bool,
+    dir_only: bool,
+    /// matched against the path from the root, not only the name
+    anchored: bool,
+    glob: String,
+}
+
+impl Rules {
+    pub fn new(lines: &[String]) -> Rules {
+        let patterns = lines
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let (keep, l) = match l.strip_prefix('!') {
+                    Some(rest) => (true, rest),
+                    None => (false, l),
+                };
+                let l = l.replace('\\', "/");
+                let dir_only = l.ends_with('/');
+                let l = l.trim_end_matches('/');
+                let anchored = l.contains('/');
+                Pattern { keep, dir_only, anchored, glob: l.trim_start_matches('/').to_lowercase() }
+            })
+            .filter(|p| !p.glob.is_empty())
+            .collect();
+        Rules { patterns }
+    }
+
+    /// Whether an entry is left out: `rel` its path from the mod folder's root (with `/`), `name` its name.
+    pub fn excluded(&self, rel: &str, name: &str, dir: bool) -> bool {
+        let mut out = is_excluded(name, dir);
+        let (rel, name) = (rel.replace('\\', "/").to_lowercase(), name.to_lowercase());
+        for p in &self.patterns {
+            if p.dir_only && !dir {
+                continue;
+            }
+            let hit = if p.anchored { glob(&p.glob, &rel) } else { glob(&p.glob, &name) };
+            if hit {
+                out = !p.keep;
+            }
+        }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+}
+
+/// `*` any characters but `/`, `**` any characters, `?` one character but `/`.
+fn glob(pat: &str, text: &str) -> bool {
+    fn go(p: &[char], t: &[char]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some('*') if p.get(1) == Some(&'*') => {
+                // `**/` also matches no folder at all
+                let rest = if p.get(2) == Some(&'/') { &p[3..] } else { &p[2..] };
+                (0..=t.len()).any(|i| go(rest, &t[i..])) || (p.get(2) == Some(&'/') && (0..=t.len()).any(|i| go(&p[2..], &t[i..])))
+            }
+            Some('*') => {
+                let mut i = 0;
+                loop {
+                    if go(&p[1..], &t[i..]) {
+                        return true;
+                    }
+                    if i >= t.len() || t[i] == '/' {
+                        return false;
+                    }
+                    i += 1;
+                }
+            }
+            Some('?') => t.first().is_some_and(|c| *c != '/') && go(&p[1..], &t[1..]),
+            Some(c) => t.first() == Some(c) && go(&p[1..], &t[1..]),
+        }
+    }
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    go(&p, &t)
+}
+
+/// The built-in list, for people (what `is_excluded` leaves out).
+pub const BUILT_IN: &str = ".git/ .svn/ .hg/ .vs/ .vscode/ .idea/ .github/ __MACOSX/ node_modules/ .cache/ __pycache__/ Thumbs.db desktop.ini .DS_Store \
+.gitignore .gitattributes .gitmodules .editorconfig *.psd *.psb *.xcf *.kra *.sai *.clip *.pdn *.ai *.blend *.blend1 *.max *.spp *.zip *.7z *.rar *.bak *.tmp *.orig";
+
 pub fn human(bytes: u64) -> String {
     match bytes {
         b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
@@ -141,17 +236,17 @@ struct Walk {
     long: Vec<String>,
 }
 
-fn walk(base: &Path, dir: &Path, w: &mut Walk) {
+fn walk(base: &Path, dir: &Path, w: &mut Walk, rules: &Rules) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         let Ok(ft) = e.file_type() else { continue };
         let name = e.file_name().to_string_lossy().to_string();
         let rel = p.strip_prefix(base).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-        if is_excluded(&name, ft.is_dir()) {
+        if rules.excluded(&rel, &name, ft.is_dir()) {
             if ft.is_dir() {
                 let mut sub = Walk { files: 0, bytes: 0, excluded: Vec::new(), excluded_bytes: 0, long: Vec::new() };
-                walk(&p, &p, &mut sub);
+                walk(&p, &p, &mut sub, &Rules::default());
                 w.excluded_bytes += sub.bytes + sub.excluded_bytes;
                 w.excluded.push(format!("{rel}/"));
             } else {
@@ -161,7 +256,7 @@ fn walk(base: &Path, dir: &Path, w: &mut Walk) {
             continue;
         }
         if ft.is_dir() {
-            walk(base, &p, w);
+            walk(base, &p, w, rules);
         } else {
             w.files += 1;
             w.bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -173,7 +268,7 @@ fn walk(base: &Path, dir: &Path, w: &mut Walk) {
 }
 
 /// The checks that need nothing but the disk. `typed_item` is an item id the user typed (for a mod whose descriptor names none).
-pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
+pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>, rules: &Rules) -> Preflight {
     let mut p = Preflight::default();
     let push = |p: &mut Preflight, f: Finding| p.findings.push(f);
     // the content
@@ -181,7 +276,7 @@ pub fn local(m: &Mod, u: &Upload, typed_item: Option<&str>) -> Preflight {
         push(&mut p, finding(Level::Error, "pf.content_missing", &[&u.content.display()]));
     } else {
         let mut w = Walk { files: 0, bytes: 0, excluded: Vec::new(), excluded_bytes: 0, long: Vec::new() };
-        walk(&u.content, &u.content, &mut w);
+        walk(&u.content, &u.content, &mut w, rules);
         p.files = w.files;
         p.bytes = w.bytes;
         p.excluded = w.excluded;
@@ -380,27 +475,29 @@ pub fn remote(game_dir: &Path, p: &mut Preflight, item: Option<u64>) {
     }
 }
 
-/// A copy of the content without what `is_excluded` names, in the temporary folder; what is uploaded when anything was left out. The caller
+/// A copy of the content without what the rules leave out, in the temporary folder; what is uploaded when anything was left out. The caller
 /// removes it (`remove_clean_copy`) after the upload.
-pub fn clean_copy(content: &Path) -> Result<PathBuf> {
+pub fn clean_copy(content: &Path, rules: &Rules) -> Result<PathBuf> {
     let to = std::env::temp_dir().join(format!("stl-upload-{}", std::process::id())).join(content.file_name().unwrap_or_default());
     let _ = std::fs::remove_dir_all(&to);
-    fn copy(from: &Path, to: &Path) -> Result<()> {
+    fn copy(base: &Path, from: &Path, to: &Path, rules: &Rules) -> Result<()> {
         std::fs::create_dir_all(to)?;
         for e in std::fs::read_dir(from)?.flatten() {
             let ft = e.file_type()?;
-            if is_excluded(&e.file_name().to_string_lossy(), ft.is_dir()) {
+            let p = e.path();
+            let rel = p.strip_prefix(base).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            if rules.excluded(&rel, &e.file_name().to_string_lossy(), ft.is_dir()) {
                 continue;
             }
             if ft.is_dir() {
-                copy(&e.path(), &to.join(e.file_name()))?;
+                copy(base, &p, &to.join(e.file_name()), rules)?;
             } else {
-                std::fs::copy(e.path(), to.join(e.file_name()))?;
+                std::fs::copy(&p, to.join(e.file_name()))?;
             }
         }
         Ok(())
     }
-    copy(content, &to)?;
+    copy(content, content, &to, rules)?;
     Ok(to)
 }
 
@@ -1070,7 +1167,7 @@ mod tests {
         std::fs::write(c.join("art.psd"), vec![0u8; 100]).unwrap();
         // a "PNG" that is really a JPEG
         std::fs::write(c.join("thumbnail.png"), b"\xFF\xD8\xFFrest").unwrap();
-        let p = local(&m, &upload_of(&m), None);
+        let p = local(&m, &upload_of(&m), None, &Rules::default());
         let keys: Vec<&str> = p.findings.iter().map(|f| f.key).collect();
         assert!(keys.contains(&"pf.title_too_long"));
         assert_eq!(p.has("pf.title_too_long").unwrap().args, vec!["150", "22"]);
@@ -1082,17 +1179,34 @@ mod tests {
         assert_eq!(p.files, 3, "descriptor.mod, a.txt and the thumbnail; not .git or the psd");
         assert!(p.excluded.contains(&".git/".to_string()) && p.excluded.contains(&"art.psd".to_string()));
         // the clean copy leaves them out and keeps the rest
-        let copy = clean_copy(&c).unwrap();
+        let copy = clean_copy(&c, &Rules::default()).unwrap();
         assert!(copy.join("common/x/a.txt").is_file() && copy.join("descriptor.mod").is_file());
         assert!(!copy.join(".git").exists() && !copy.join("art.psd").exists());
         remove_clean_copy(&copy);
         assert!(!copy.exists());
         // an empty folder without a descriptor
         let empty = a_mod(&dir.join("e"), "Fine", "");
-        let pe = local(&empty, &upload_of(&empty), Some("abc"));
+        let pe = local(&empty, &upload_of(&empty), Some("abc"), &Rules::default());
         let ek: Vec<&str> = pe.findings.iter().map(|f| f.key).collect();
         assert!(ek.contains(&"pf.content_empty") && ek.contains(&"pf.descriptor_missing") && ek.contains(&"pf.bad_item_id"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn user_rules_go_over_the_built_in_ones() {
+        let r = Rules::new(&["# drafts".into(), "*.md".into(), "drafts/".into(), "gfx/**/*.tga".into(), "!keep.zip".into(), "!README.md".into()]);
+        assert!(r.excluded("notes.md", "notes.md", false));
+        assert!(r.excluded("common/notes.md", "notes.md", false));
+        assert!(!r.excluded("README.md", "README.md", false));
+        assert!(r.excluded("drafts", "drafts", true));
+        assert!(!r.excluded("drafts", "drafts", false));
+        assert!(r.excluded("gfx/a/b/x.tga", "x.tga", false));
+        assert!(r.excluded("gfx/x.tga", "x.tga", false));
+        assert!(!r.excluded("other/x.tga", "x.tga", false));
+        assert!(!r.excluded("keep.zip", "keep.zip", false));
+        assert!(r.excluded("other.zip", "other.zip", false));
+        assert!(r.excluded(".git", ".git", true));
+        assert!(!Rules::default().excluded("common/x.txt", "x.txt", false));
     }
 
     #[test]

@@ -344,6 +344,13 @@ pub struct Display {
 }
 
 /// The attached monitors in system order (the game's `display_index` counts them the same way), with the modes each offers.
+/// Whether a point of the screen (in pixels) is on one of the monitors attached now.
+pub fn on_a_monitor(x: i32, y: i32) -> bool {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+    unsafe { !MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL).is_null() }
+}
+
 pub fn displays() -> Vec<Display> {
     use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS};
     const ATTACHED: u32 = 0x1;

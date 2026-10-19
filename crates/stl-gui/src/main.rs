@@ -225,6 +225,8 @@ enum Act {
     OpenUpload(String),
     StartUpload,
     CheckUpload,
+    /// the sheet of what uploads leave out
+    EditUploadIgnore,
 }
 
 /// The requests of a page; shared by the closures that build one row, so it uses a cell.
@@ -397,6 +399,10 @@ struct App {
     dev_menu: bool,
     /// development: every row shows what it shows under the pointer (`--row-tools`)
     dev_row_tools: bool,
+    /// the upload rules being edited (one pattern a line), while their sheet is open
+    ignore_edit: Option<String>,
+    /// the window moved or changed size this long ago: its place is saved once it has kept still a moment
+    window_moved: Option<Instant>,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
     playset_filter: String,
     ps_filter: String,
@@ -527,6 +533,8 @@ impl App {
             dev_drag: None,
             dev_menu: false,
             dev_row_tools: false,
+            ignore_edit: None,
+            window_moved: None,
             playset_filter: String::new(),
             ps_filter: String::new(),
             focus_playset_filter: false,
@@ -608,6 +616,8 @@ impl App {
                 app.confirm_delete = v.parse().ok();
             } else if let Some(v) = a.strip_prefix("--plugins-tab=") {
                 app.plugins_tab = v.parse().unwrap_or(0);
+            } else if a == "--upload-ignore" {
+                app.acts.push(Act::EditUploadIgnore);
             } else if a == "--row-tools" {
                 app.dev_row_tools = true;
             } else if let Some(v) = a.strip_prefix("--row-menu=") {
@@ -816,6 +826,7 @@ impl App {
 
     /// Runs the checks of the upload form (on the disk, then with Steam) on a worker thread.
     fn check_upload(&mut self) {
+        let rules = uploadcheck::Rules::new(&self.store.upload_ignore);
         let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
         if f.pre_rx.is_some() {
             return;
@@ -830,7 +841,7 @@ impl App {
         let (tx, rx) = channel();
         f.pre_rx = Some(rx);
         std::thread::spawn(move || {
-            let mut p = uploadcheck::local(&m, &up, typed.as_deref());
+            let mut p = uploadcheck::local(&m, &up, typed.as_deref(), &rules);
             uploadcheck::remote(&game.dir, &mut p, up.existing);
             let _ = tx.send(p);
         });
@@ -855,6 +866,7 @@ impl App {
     }
 
     fn upload_now(&mut self) {
+        let rules = uploadcheck::Rules::new(&self.store.upload_ignore);
         let (Ok(game), Some(f)) = (self.game.clone(), self.upload.as_mut()) else { return };
         let Some((mut up, typed)) = Self::form_upload(f) else { return };
         // a contributor cannot change the cover: it is not sent
@@ -875,7 +887,7 @@ impl App {
             let tx_p = tx.clone();
             let original = up.content.clone();
             let copy = if excluded {
-                match uploadcheck::clean_copy(&original) {
+                match uploadcheck::clean_copy(&original, &rules) {
                     Ok(c) => {
                         up.content = c.clone();
                         Some(c)
@@ -1639,6 +1651,8 @@ impl App {
             }
             Act::StartUpload => self.start_upload(),
             Act::CheckUpload => self.check_upload(),
+            Act::EditUploadIgnore => self.ignore_edit = Some(self.store.upload_ignore.join("
+")),
             Act::RescanMods => {
                 if let Ok(g) = &self.game {
                     self.mods = mods::scan(&g.data_dir);
@@ -3409,6 +3423,7 @@ impl eframe::App for App {
             }
         }
 
+        self.note_window_place(ctx);
         egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
         let near_bottom = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y > ctx.screen_rect().bottom() - 130.0);
         if near_bottom || self.page != self.shown_page || ctx.memory(|m| m.any_popup_open()) {
@@ -3419,10 +3434,16 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(1600));
         }
         let sink = ctx.animate_bool_with_time(egui::Id::new("tab-bar-sink"), sunk, 0.35);
-        egui::TopBottomPanel::bottom("tabs").exact_height(76.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| {
+        // the room kept for the tab bar follows it: all of it while it shows, the edge that peeks out once it has sunk — so the pages end just
+        // above it either way, rather than at a line far above a sunk bar
+        egui::TopBottomPanel::bottom("tabs").exact_height(egui::lerp(76.0..=40.0, sink)).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |_| {});
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("tab-bar")).order(egui::Order::Middle).fixed_pos(pos2(screen.left(), screen.bottom() - 76.0)).show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(screen.width(), 76.0), Sense::hover());
+            let mut bar = ui.new_child(UiBuilder::new().max_rect(rect));
             let items: Vec<(Icon, String)> = Page::ALL.iter().map(|p| (p.icon(), tr(self.lang, p.key()).to_string())).collect();
             let current = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
-            if let Some(i) = theme::tab_bar(ui, &items, current, sink) {
+            if let Some(i) = theme::tab_bar(&mut bar, &items, current, sink) {
                 self.page = Page::ALL[i];
             }
         });
@@ -3440,7 +3461,7 @@ impl eframe::App for App {
         } else {
             self.prev_page = None;
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 16 })).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 4 })).show(ctx, |ui| {
             // a cross-fade: the old page slides out the other way while the new one slides in; what the old one asks for is dropped
             if let Some(old) = self.prev_page {
                 let rect = ui.max_rect().translate(vec2(-self.page_dir * 44.0 * ease, 0.0));
@@ -3461,6 +3482,7 @@ impl eframe::App for App {
         self.self_update_sheet(ctx);
         self.check_sheet(ctx);
         self.upload_sheet(ctx);
+        self.ignore_sheet(ctx);
         self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
             self.apply(ctx, act);
@@ -3943,6 +3965,82 @@ impl App {
         }
     }
 
+    /// Notes where the window is (its normal place, and whether it is maximized), and saves it once it has kept still for a second.
+    fn note_window_place(&mut self, ctx: &egui::Context) {
+        let (outer, maximized, minimized, scale) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.maximized.unwrap_or(false), v.minimized.unwrap_or(false), i.pixels_per_point)
+        });
+        if let (Some(r), false) = (outer, minimized) {
+            let mut place = self.store.window.unwrap_or(stl_core::store::WindowPlace { x: r.min.x, y: r.min.y, w: r.width(), h: r.height(), maximized, scale });
+            if !maximized {
+                place = stl_core::store::WindowPlace { x: r.min.x, y: r.min.y, w: r.width(), h: r.height(), maximized, scale };
+            }
+            place.maximized = maximized;
+            if self.store.window != Some(place) {
+                self.store.window = Some(place);
+                self.window_moved = Some(Instant::now());
+            }
+        }
+        if let Some(t) = self.window_moved {
+            if t.elapsed() > Duration::from_secs(1) {
+                self.window_moved = None;
+                self.save();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(1100));
+            }
+        }
+    }
+
+    /// The rules of what uploads leave out: the built-in list, and the user's patterns over it (one a line, like .gitignore).
+    fn ignore_sheet(&mut self, ctx: &egui::Context) {
+        let Some(text) = self.ignore_edit.as_mut() else { return };
+        let lang = self.lang;
+        let (mut close, mut save) = (false, false);
+        let resp = egui::Modal::new(egui::Id::new("upload-ignore")).frame(Self::sheet_frame()).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.label(RichText::new(tr(lang, "up.ignore_title")).size(22.0).family(bold()));
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(tr(lang, "up.ignore_hint")).size(12.5).color(SECONDARY)).wrap());
+            ui.add_space(10.0);
+            egui::Frame::new().fill(theme::white(14)).corner_radius(egui::CornerRadius::same(12)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::TextEdit::multiline(text)
+                        .font(egui::FontId::new(13.0, egui::FontFamily::Monospace))
+                        .hint_text("*.md\ndrafts/\n!keep.zip")
+                        .desired_rows(8)
+                        .desired_width(f32::INFINITY)
+                        .frame(false),
+                );
+            });
+            ui.add_space(10.0);
+            ui.label(RichText::new(tr(lang, "up.ignore_builtin")).size(12.0).color(SECONDARY));
+            ui.add(egui::Label::new(RichText::new(uploadcheck::BUILT_IN).size(11.5).color(theme::TERTIARY).monospace()).wrap());
+            ui.add_space(16.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill_button(ui, tr(lang, "cfg.save"), ButtonStyle::Filled(BLUE), true).clicked() {
+                    save = true;
+                }
+                if pill_button(ui, tr(lang, "common.cancel"), ButtonStyle::Plain(SECONDARY), true).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if save {
+            let lines: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+            self.store.upload_ignore = lines;
+            self.save();
+            self.ignore_edit = None;
+            // what is left out has changed: the checks say so again
+            if self.upload.is_some() {
+                self.acts.push(Act::CheckUpload);
+            }
+        } else if close || resp.should_close() {
+            self.ignore_edit = None;
+        }
+    }
+
     /// The "upload to the Workshop" sheet: what will be sent and where, the visibility, a change note; then the progress and the result.
     fn upload_sheet(&mut self, ctx: &egui::Context) {
         let report = self.upload_report();
@@ -3964,9 +4062,18 @@ impl App {
         let failed_now = matches!(f.result, Some(Err(_)));
         let checks_h = if failed_now { (room * 0.3).max(70.0) } else { room };
         let explain_h = (room - checks_h).max(120.0);
+        let mut edit_rules = false;
         let resp = egui::Modal::new(egui::Id::new("upload-mod")).frame(Self::sheet_frame()).show(ctx, |ui| {
             ui.set_width(480.0);
-            ui.label(RichText::new(tr(lang, "up.title")).size(22.0).family(bold()));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr(lang, "up.title")).size(22.0).family(bold()));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // what uploads leave out: the user's own rules
+                    if circle_button(ui, Icon::Settings, theme::white(22), LABEL, !running).on_hover_text(tr(lang, "up.ignore_title")).clicked() {
+                        edit_rules = true;
+                    }
+                });
+            });
             ui.add_space(4.0);
             ui.label(RichText::new(&f.m.name).size(15.0).color(LABEL));
             ui.add_space(10.0);
@@ -4139,7 +4246,11 @@ impl App {
         if let Some(url) = open {
             open_link(&url);
         }
-        if (close || resp.should_close()) && !running {
+        if edit_rules {
+            self.ignore_edit = Some(self.store.upload_ignore.join("\n"));
+            return;
+        }
+        if (close || resp.should_close()) && !running && self.ignore_edit.is_none() {
             self.upload = None;
         } else if start {
             self.acts.push(Act::StartUpload);
@@ -4483,16 +4594,22 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 780.0])
-            .with_min_inner_size([980.0, 640.0])
-            .with_title("Stellaris Launcher")
-            .with_icon(theme::icon())
-            .with_decorations(false)
-            .with_maximized(std::env::args().any(|a| a == "--maximized")),
-        ..Default::default()
-    };
+    // where the window was last time, when that is still on a monitor (one may have been unplugged since)
+    let place = Store::load().ok().and_then(|s| s.window).filter(|p| {
+        let top = ((p.x + p.w / 2.0) * p.scale) as i32;
+        stl_core::gamesettings::on_a_monitor(top, ((p.y + 20.0) * p.scale) as i32) && p.w >= 400.0 && p.h >= 300.0
+    });
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(place.map(|p| [p.w, p.h]).unwrap_or([1180.0, 780.0]))
+        .with_min_inner_size([980.0, 640.0])
+        .with_title("Stellaris Launcher")
+        .with_icon(theme::icon())
+        .with_decorations(false)
+        .with_maximized(std::env::args().any(|a| a == "--maximized") || place.is_some_and(|p| p.maximized));
+    if let Some(p) = place {
+        viewport = viewport.with_position([p.x, p.y]);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Stellaris Launcher",
         options,

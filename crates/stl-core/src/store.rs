@@ -18,6 +18,24 @@ pub struct PlaysetPlugin {
     pub enabled: bool,
 }
 
+/// The launcher window's place: its normal position and size (in points), whether it was maximized, and the scale it was on.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowPlace {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    #[serde(default)]
+    pub maximized: bool,
+    /// pixels per point where it was
+    #[serde(default = "one")]
+    pub scale: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playset {
     pub id: String,
@@ -71,6 +89,12 @@ pub struct Store {
     /// the plugin indexes (`plugins.jsonl` URLs) to read; None = the default one (`pluginindex::DEFAULT_INDEX`)
     #[serde(default)]
     pub plugin_indexes: Option<Vec<String>>,
+    /// what Workshop uploads leave out besides the built-in list, one pattern a line (`uploadcheck::Rules`)
+    #[serde(default)]
+    pub upload_ignore: Vec<String>,
+    /// where the launcher's window was when it was last moved or resized
+    #[serde(default)]
+    pub window: Option<WindowPlace>,
     /// the alternative executable of `launcher-settings.json` to start (None = the standard one)
     #[serde(default)]
     pub alternative: Option<usize>,
