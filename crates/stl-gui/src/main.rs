@@ -3034,7 +3034,6 @@ impl App {
     fn page_settings(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let acts = Acts::default();
-        ui.add_space(8.0);
         let mut area = egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]);
         if let Some(o) = self.dev_scroll.take() {
             area = area.vertical_scroll_offset(o);
@@ -3462,7 +3461,7 @@ impl eframe::App for App {
                 theme::fade_to_backdrop(ui.ctx(), ui.painter(), Rect::from_min_max(pos2(screen.left(), screen.bottom() - 150.0), screen.max), true, 1.0);
                 if view.is_positive() {
                     let top = Rect::from_min_max(pos2(screen.left(), view.top()), pos2(screen.right(), view.top() + 56.0));
-                    theme::fade_to_backdrop(ui.ctx(), ui.painter(), top, false, (scrolled / 40.0).clamp(0.0, 1.0));
+                    theme::fade_to_window(ui.ctx(), ui.painter(), top, false, (scrolled / 40.0).clamp(0.0, 1.0));
                 }
             });
         }
@@ -4647,11 +4646,15 @@ impl App {
             Some((sharp, frost)) => {
                 painter.image(sharp.handle.id(), screen, theme::cover_uv(screen.size(), sharp.size, anchor), Color32::WHITE);
                 theme::set_glass(ctx, theme::GlassCtx { tex: Some(frost.handle.id()), window: screen, uv: theme::cover_uv(screen.size(), frost.size, anchor) });
-                (Color32::from_black_alpha(95), Color32::from_black_alpha(205))
+                let (top, bottom) = (Color32::from_black_alpha(95), Color32::from_black_alpha(205));
+                theme::set_backdrop(ctx, theme::BackdropCtx { tex: Some(sharp.handle.id()), window: screen, uv: theme::cover_uv(screen.size(), sharp.size, anchor), top, bottom });
+                (top, bottom)
             }
             None => {
                 theme::set_glass(ctx, theme::GlassCtx { tex: None, window: screen, uv: Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) });
-                (Color32::from_rgb(24, 28, 52), Color32::from_rgb(6, 7, 14))
+                let (top, bottom) = (Color32::from_rgb(24, 28, 52), Color32::from_rgb(6, 7, 14));
+                theme::set_backdrop(ctx, theme::BackdropCtx { tex: None, window: screen, uv: Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), top, bottom });
+                (top, bottom)
             }
         };
         let mut mesh = egui::Mesh::default();

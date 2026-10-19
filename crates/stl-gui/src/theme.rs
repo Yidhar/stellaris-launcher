@@ -204,6 +204,75 @@ pub fn glass_shapes(ctx: &egui::Context, rect: Rect, radius: f32) -> Shape {
     Shape::Vec(shapes)
 }
 
+/// How the window's backdrop is painted: the artwork (cover fit) and the shade over it, from its top to its bottom.
+#[derive(Clone, Copy)]
+pub struct BackdropCtx {
+    pub tex: Option<TextureId>,
+    pub window: Rect,
+    pub uv: Rect,
+    pub top: Color32,
+    pub bottom: Color32,
+}
+
+fn backdrop_id() -> egui::Id {
+    egui::Id::new("stl-backdrop")
+}
+
+pub fn set_backdrop(ctx: &egui::Context, b: BackdropCtx) {
+    ctx.data_mut(|d| d.insert_temp(backdrop_id(), b));
+}
+
+/// The window's own backdrop painted again over `rect`, from nothing at one end (the top when `downwards`) to all of it at the other: what
+/// is under it melts into the backdrop exactly as it looks around it (the title bar's).
+pub fn fade_to_window(ctx: &egui::Context, painter: &egui::Painter, rect: Rect, downwards: bool, strength: f32) {
+    let Some(b) = ctx.data(|d| d.get_temp::<BackdropCtx>(backdrop_id())) else { return };
+    if strength <= 0.0 {
+        return;
+    }
+    let stops = [(0.0f32, 0.0f32), (0.4, 0.45), (0.75, 0.85), (1.0, 1.0)];
+    let map = |p: Pos2| {
+        let t = vec2((p.x - b.window.left()) / b.window.width().max(1.0), (p.y - b.window.top()) / b.window.height().max(1.0));
+        pos2(b.uv.left() + b.uv.width() * t.x, b.uv.top() + b.uv.height() * t.y)
+    };
+    // the shade at a height of the window
+    let shade = |y: f32| {
+        let t = ((y - b.window.top()) / b.window.height().max(1.0)).clamp(0.0, 1.0);
+        let l = |a: u8, z: u8| egui::lerp(a as f32..=z as f32, t);
+        [l(b.top.r(), b.bottom.r()), l(b.top.g(), b.bottom.g()), l(b.top.b(), b.bottom.b()), l(b.top.a(), b.bottom.a())]
+    };
+    let mut art = egui::Mesh::with_texture(b.tex.unwrap_or_default());
+    let mut over = egui::Mesh::default();
+    for (k, (at, a)) in stops.iter().enumerate() {
+        let at = if downwards { *at } else { 1.0 - *at };
+        let y = egui::lerp(rect.top()..=rect.bottom(), at);
+        let a = a * strength;
+        let v = (a * 255.0) as u8;
+        let [r, g, bl, sa] = shade(y);
+        // premultiplied: the shade's own alpha, then the fade's
+        let shade_color = Color32::from_rgba_premultiplied((r * a) as u8, (g * a) as u8, (bl * a) as u8, (sa * a) as u8);
+        for x in [rect.left(), rect.right()] {
+            let pos = pos2(x, y);
+            if b.tex.is_some() {
+                art.vertices.push(egui::epaint::Vertex { pos, uv: map(pos), color: Color32::from_rgba_premultiplied(v, v, v, v) });
+            }
+            over.vertices.push(egui::epaint::Vertex { pos, uv: egui::epaint::WHITE_UV, color: shade_color });
+        }
+        if k > 0 {
+            let i = (k as u32) * 2;
+            for m in [&mut art, &mut over] {
+                if !m.vertices.is_empty() {
+                    m.add_triangle(i - 2, i - 1, i);
+                    m.add_triangle(i - 1, i, i + 1);
+                }
+            }
+        }
+    }
+    if !art.vertices.is_empty() {
+        painter.add(Shape::mesh(art));
+    }
+    painter.add(Shape::mesh(over));
+}
+
 /// The bottom of a page that runs on under the tab bar: from nothing at the top of `rect` to the blurred, darkened backdrop of the glass at its
 /// bottom, so what scrolls there blurs and fades away instead of being cut off by a line.
 pub fn fade_to_backdrop(ctx: &egui::Context, painter: &egui::Painter, rect: Rect, downwards: bool, strength: f32) {
