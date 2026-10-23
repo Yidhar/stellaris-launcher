@@ -156,7 +156,7 @@ mod workshop_sync_tests {
         got.sort();
         assert_eq!(got, vec![("mod/ugc_111.mod".to_string(), Synced::Added), ("mod/ugc_222.mod".to_string(), Synced::Added)]);
         let a = String::from_utf8(std::fs::read(data.join("mod").join("ugc_111.mod")).unwrap()).unwrap();
-        let folder = content.join("111").to_string_lossy().replace('\\', "/");
+        let folder = disk_spelling(&content.join("111")).to_string_lossy().replace('\\', "/");
         assert_eq!(a, format!("version=\"1\"\r\nname=\"A\"\npath=\"{folder}\"\nremote_file_id=\"111\""));
         let m = parse_descriptor(&data.join("mod").join("ugc_111.mod"), &a, &data);
         assert_eq!((m.kind, m.name.as_str(), m.problem.is_none()), (Kind::Workshop, "A", true));
@@ -234,6 +234,14 @@ pub fn workshop_descriptor(descriptor: &[u8], folder: &Path, id: &str) -> Vec<u8
     out
 }
 
+/// A folder as the disk spells it (case, long names): Steam's list of libraries is lower case, the official launcher writes the real one.
+fn disk_spelling(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p)
+        .ok()
+        .and_then(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| s.as_bytes().get(1) == Some(&b':')).map(PathBuf::from))
+        .unwrap_or_else(|| p.to_path_buf())
+}
+
 /// Writes the descriptor of every downloaded Workshop item that has none in the mod folder, or an outdated one, as the official launcher does
 /// when it starts: an item subscribed to since is in the mods without going through it.
 pub fn sync_workshop(data_dir: &Path) -> Vec<(String, Synced)> {
@@ -266,12 +274,7 @@ pub fn sync_workshop_from(data_dir: &Path, content: &[PathBuf]) -> Vec<(String, 
             }
             // still downloading, or not a mod: nothing to load
             let Ok(desc) = std::fs::read(e.path().join("descriptor.mod")) else { continue };
-            // Steam's list of libraries is lower case: the folder as the disk spells it, like the official launcher writes it
-            let folder = std::fs::canonicalize(e.path())
-                .ok()
-                .and_then(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| s.as_bytes().get(1) == Some(&b':')).map(PathBuf::from))
-                .unwrap_or_else(|| e.path());
-            let want = workshop_descriptor(&desc, &folder, &id);
+            let want = workshop_descriptor(&desc, &disk_spelling(&e.path()), &id);
             let file = mod_dir.join(format!("ugc_{id}.mod"));
             let what = match std::fs::read(&file) {
                 Ok(have) if norm(&have) == norm(&want) => continue,
