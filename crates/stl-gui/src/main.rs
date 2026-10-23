@@ -407,6 +407,8 @@ struct App {
     dev_scroll: Option<f32>,
     /// the window moved or changed size this long ago: its place is saved once it has kept still a moment
     window_moved: Option<Instant>,
+    /// the window had the focus last frame: coming back to it (from subscribing in Steam) looks for new Workshop items
+    focused: bool,
     /// the search in the playset drop-down (shown when there are many) and in the list of the Playsets page
     playset_filter: String,
     ps_filter: String,
@@ -541,6 +543,7 @@ impl App {
             settings_view: None,
             dev_scroll: None,
             window_moved: None,
+            focused: true,
             playset_filter: String::new(),
             ps_filter: String::new(),
             focus_playset_filter: false,
@@ -692,6 +695,8 @@ impl App {
         self.game = Game::open(explicit.as_deref()).map_err(|e| format!("{e:#}"));
         match &self.game {
             Ok(g) => {
+                // Workshop items subscribed to since are mods now
+                mods::sync_workshop(&g.data_dir);
                 self.mods = mods::scan(&g.data_dir);
                 self.dlcs = dlc::scan(&g.dir);
                 self.dlc_current = dlcload::disabled_dlcs_of(&dlcload::read(&g.dlc_load_path()).map(|x| x.1).unwrap_or_default());
@@ -1662,6 +1667,7 @@ impl App {
             Act::EditUploadIgnore => self.ignore_edit = Some(IgnoreEdit::from_store(&self.store.upload_ignore, &self.store.upload_builtin_off)),
             Act::RescanMods => {
                 if let Ok(g) = &self.game {
+                    mods::sync_workshop(&g.data_dir);
                     self.mods = mods::scan(&g.data_dir);
                 }
                 self.mod_times.clear();
@@ -3437,6 +3443,15 @@ impl eframe::App for App {
         }
 
         self.note_window_place(ctx);
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.focused {
+            if let Ok(g) = &self.game {
+                if !mods::sync_workshop(&g.data_dir).is_empty() {
+                    self.acts.push(Act::RescanMods);
+                }
+            }
+        }
+        self.focused = focused;
         egui::TopBottomPanel::top("titlebar").exact_height(42.0).show_separator_line(false).frame(egui::Frame::NONE).show(ctx, |ui| self.title_bar(ctx, ui));
         let near_bottom = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y > ctx.screen_rect().bottom() - 130.0);
         if near_bottom || self.page != self.shown_page || ctx.memory(|m| m.any_popup_open()) {

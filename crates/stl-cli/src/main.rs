@@ -316,6 +316,9 @@ fn run() -> Result<()> {
         }
         Cmd::Mods { all, ironman } => {
             let game = open_game(&cli, &store)?;
+            for (id, what) in mods::sync_workshop(&game.data_dir) {
+                println!("{} {id}", if what == mods::Synced::Added { "+" } else { "~" });
+            }
             let known = mods::scan(&game.data_dir);
             if *ironman {
                 let rules = stl_core::ironman::rules(&game.dir);

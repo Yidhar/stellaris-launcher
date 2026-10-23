@@ -125,6 +125,8 @@ pub struct Report {
 
 /// The enabled mods of a playset that the game can load, in order, and what had to be left out, and warnings.
 pub fn resolve_mods(game: &Game, playset: &crate::store::Playset) -> (Vec<String>, Vec<(String, String)>, Vec<String>) {
+    // what the official launcher would have written for the Workshop items is there, up to date
+    mods::sync_workshop(&game.data_dir);
     let known = mods::scan(&game.data_dir);
     let mut ids = Vec::new();
     let mut skipped = Vec::new();

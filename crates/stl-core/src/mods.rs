@@ -136,6 +136,40 @@ pub fn supports(supported: &str, game_version: &str) -> bool {
 }
 
 #[cfg(test)]
+mod workshop_sync_tests {
+    use super::*;
+
+    #[test]
+    fn writes_the_descriptor_of_a_new_item_and_refreshes_an_outdated_one() {
+        let t = std::env::temp_dir().join(format!("stl-wsync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let (data, content) = (t.join("data"), t.join("281990"));
+        std::fs::create_dir_all(data.join("mod")).unwrap();
+        for (id, desc) in [("111", "version=\"1\"\r\nname=\"A\"\r\npath=\"C:/author/a\"\r\nremote_file_id=\"111\"\r\n"), ("222", "name=\"B\"\nsupported_version=\"v4.5.*\"")] {
+            std::fs::create_dir_all(content.join(id)).unwrap();
+            std::fs::write(content.join(id).join("descriptor.mod"), desc).unwrap();
+        }
+        // being downloaded: no descriptor yet; not an item
+        std::fs::create_dir_all(content.join("333")).unwrap();
+        std::fs::create_dir_all(content.join("notes")).unwrap();
+        let mut got = sync_workshop_from(&data, &[content.clone()]);
+        got.sort();
+        assert_eq!(got, vec![("mod/ugc_111.mod".to_string(), Synced::Added), ("mod/ugc_222.mod".to_string(), Synced::Added)]);
+        let a = String::from_utf8(std::fs::read(data.join("mod").join("ugc_111.mod")).unwrap()).unwrap();
+        let folder = content.join("111").to_string_lossy().replace('\\', "/");
+        assert_eq!(a, format!("version=\"1\"\r\nname=\"A\"\npath=\"{folder}\"\nremote_file_id=\"111\""));
+        let m = parse_descriptor(&data.join("mod").join("ugc_111.mod"), &a, &data);
+        assert_eq!((m.kind, m.name.as_str(), m.problem.is_none()), (Kind::Workshop, "A", true));
+        // nothing changed: nothing written
+        assert!(sync_workshop_from(&data, &[content.clone()]).is_empty());
+        // the author changes it
+        std::fs::write(content.join("222").join("descriptor.mod"), "name=\"B\"\nsupported_version=\"v4.6.*\"").unwrap();
+        assert_eq!(sync_workshop_from(&data, &[content.clone()]), vec![("mod/ugc_222.mod".to_string(), Synced::Updated)]);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -166,6 +200,90 @@ mod tests {
         assert_eq!(local.kind, Kind::Local);
         assert_eq!(local.path.as_deref(), Some(data.join(r"mod\mine").as_path()));
     }
+}
+
+/// What became of a Workshop item's descriptor in the mod folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Synced {
+    /// subscribed since: it had none
+    Added,
+    /// its author changed the descriptor (name, version, supported version…)
+    Updated,
+}
+
+/// The `ugc_<id>.mod` of a downloaded Workshop item, as the official launcher writes it: the item's own `descriptor.mod` with `path=` (the
+/// downloaded folder, with `/`) and `remote_file_id=` put last.
+pub fn workshop_descriptor(descriptor: &[u8], folder: &Path, id: &str) -> Vec<u8> {
+    let ours = |line: &[u8]| {
+        let l = line.trim_ascii_start();
+        ["path", "remote_file_id"].iter().any(|k| l.strip_prefix(k.as_bytes()).is_some_and(|rest| rest.trim_ascii_start().starts_with(b"=")))
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(descriptor.len() + 160);
+    for line in descriptor.split(|b| *b == b'\n').filter(|l| !ours(l)) {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    while out.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        out.pop();
+    }
+    if !out.is_empty() {
+        out.push(b'\n');
+    }
+    let folder = folder.to_string_lossy().replace('\\', "/");
+    out.extend_from_slice(format!("path=\"{folder}\"\nremote_file_id=\"{id}\"").as_bytes());
+    out
+}
+
+/// Writes the descriptor of every downloaded Workshop item that has none in the mod folder, or an outdated one, as the official launcher does
+/// when it starts: an item subscribed to since is in the mods without going through it.
+pub fn sync_workshop(data_dir: &Path) -> Vec<(String, Synced)> {
+    let content: Vec<PathBuf> = crate::paths::steam_libraries().into_iter().map(|lib| lib.join("workshop").join("content").join("281990")).collect();
+    sync_workshop_from(data_dir, &content)
+}
+
+/// `sync_workshop` with the folders that hold the items (`…\workshop\content\281990`) given. Returns each descriptor written: its `id` as in
+/// `Mod::id` and what happened.
+pub fn sync_workshop_from(data_dir: &Path, content: &[PathBuf]) -> Vec<(String, Synced)> {
+    // without it Stellaris has not run yet: the official launcher would not write either
+    let mod_dir = data_dir.join("mod");
+    if !mod_dir.is_dir() {
+        return Vec::new();
+    }
+    let norm = |b: &[u8]| -> Vec<u8> {
+        let mut v: Vec<u8> = b.iter().copied().filter(|c| *c != b'\r').collect();
+        while v.last().is_some_and(|c| c.is_ascii_whitespace()) {
+            v.pop();
+        }
+        v
+    };
+    let mut out = Vec::new();
+    for dir in content {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let id = e.file_name().to_string_lossy().to_string();
+            if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            // still downloading, or not a mod: nothing to load
+            let Ok(desc) = std::fs::read(e.path().join("descriptor.mod")) else { continue };
+            // Steam's list of libraries is lower case: the folder as the disk spells it, like the official launcher writes it
+            let folder = std::fs::canonicalize(e.path())
+                .ok()
+                .and_then(|c| c.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| s.as_bytes().get(1) == Some(&b':')).map(PathBuf::from))
+                .unwrap_or_else(|| e.path());
+            let want = workshop_descriptor(&desc, &folder, &id);
+            let file = mod_dir.join(format!("ugc_{id}.mod"));
+            let what = match std::fs::read(&file) {
+                Ok(have) if norm(&have) == norm(&want) => continue,
+                Ok(_) => Synced::Updated,
+                Err(_) => Synced::Added,
+            };
+            if std::fs::write(&file, &want).is_ok() {
+                out.push((format!("mod/ugc_{id}.mod"), what));
+            }
+        }
+    }
+    out
 }
 
 /// The folders where Steam keeps the downloaded copy of a Workshop item of Stellaris.
