@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/stl-core", "crates/stl-cli", "crates/stl-gui", "crates/stl-notice"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 license = "MIT"
 authors = ["Yidhar"]
