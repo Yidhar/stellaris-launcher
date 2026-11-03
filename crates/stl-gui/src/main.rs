@@ -175,6 +175,9 @@ enum Act {
     AddPlayset(String),
     DeletePlayset(usize),
     AskDelete(usize),
+    /// start renaming a playset in its row
+    AskRename(usize),
+    RenamePlayset(usize, String),
     Import,
     ModFlag(usize, bool),
     ModRemove(usize),
@@ -383,6 +386,10 @@ struct App {
     new_name: String,
     /// the playset whose delete button was clicked once (the second click deletes)
     confirm_delete: Option<usize>,
+    /// the playset whose name is being edited in its row, the text so far, and whether the field has had the focus yet
+    ps_rename: Option<(usize, String, bool)>,
+    /// the right-click menu of a playset in the list: which, and where
+    ps_list_menu: Option<(usize, egui::Pos2)>,
     /// the search over the mods of the playset on show
     ps_mod_filter: String,
     /// the mod (its id) being dragged to another place in the playset
@@ -530,6 +537,8 @@ impl App {
             filter: String::new(),
             new_name: String::new(),
             confirm_delete: None,
+            ps_rename: None,
+            ps_list_menu: None,
             ps_mod_filter: String::new(),
             ps_drag: None,
             ps_drag_gen: 0,
@@ -631,6 +640,13 @@ impl App {
                 app.acts.push(Act::EditUploadIgnore);
             } else if a == "--row-tools" {
                 app.dev_row_tools = true;
+            } else if let Some(v) = a.strip_prefix("--ps-rename=") {
+                // development: the n-th playset's name being edited
+                app.acts.push(Act::AskRename(v.parse().unwrap_or(0)));
+            } else if let Some(v) = a.strip_prefix("--ps-list-menu=") {
+                // development: the right-click menu of the n-th playset
+                app.ps_list_menu = Some((v.parse().unwrap_or(0), pos2(200.0, 220.0)));
+                app.dev_menu = true;
             } else if let Some(v) = a.strip_prefix("--row-menu=") {
                 // development: the right-click menu of the n-th mod, open at a point
                 if let Some(m) = app.store.playsets.get(app.store.active_index()).and_then(|p| p.mods.get(v.parse::<usize>().unwrap_or(0))) {
@@ -1440,6 +1456,24 @@ impl App {
                 Err(e) => self.say(format!("{e:#}")),
             },
             Act::AskDelete(i) => self.confirm_delete = Some(i),
+            Act::AskRename(i) => {
+                if let Some(p) = self.store.playsets.get(i) {
+                    self.ps_rename = Some((i, p.name.clone(), false));
+                    self.confirm_delete = None;
+                }
+            }
+            Act::RenamePlayset(i, name) => {
+                let old = self.store.playsets.get(i).map(|p| p.name.clone()).unwrap_or_default();
+                if name.trim() != old {
+                    match self.store.rename_playset(i, &name) {
+                        Ok(()) => {
+                            self.save();
+                            self.say(format!("renamed the playset {old} to {}", self.store.playsets[i].name));
+                        }
+                        Err(e) => self.say(format!("{e:#}")),
+                    }
+                }
+            }
             Act::DeletePlayset(i) => {
                 if i < self.store.playsets.len() {
                     let n = self.store.playsets[i].name.clone();
@@ -2126,6 +2160,8 @@ impl App {
                 self.confirm_delete = None;
             }
             let confirming = self.confirm_delete;
+            let mut menu_at: Option<(usize, egui::Pos2)> = None;
+            let ps_rename = &mut self.ps_rename;
             egui::ScrollArea::vertical().id_salt("ps-list").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let mut rows = Rows::new();
@@ -2139,12 +2175,32 @@ impl App {
                     let mods_on = p.mods.iter().filter(|m| m.enabled).count().to_string();
                     let plugins_on = p.plugins.iter().filter(|x| x.enabled).count().to_string();
                     let sure = confirming == Some(i);
-                    let r = rows.row(ui, 58.0, if can_delete { if sure { 64.0 } else { 30.0 } } else { 0.0 }, true, |ui| {
+                    let renaming = ps_rename.as_ref().is_some_and(|r| r.0 == i);
+                    let r = rows.row(ui, 58.0, if can_delete && !renaming { if sure { 64.0 } else { 30.0 } } else { 0.0 }, true, |ui| {
+                        if renaming {
+                            // the name, edited in place: Enter or a click elsewhere keeps it, Esc leaves it as it was
+                            let Some((_, text, focused)) = ps_rename.as_mut() else { return };
+                            let w = ui.available_width() - 4.0;
+                            let f = theme::text_field(ui, text, tr(lang, "ps.new"), w);
+                            if !*focused {
+                                f.request_focus();
+                                *focused = true;
+                            } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                *ps_rename = None;
+                            } else if f.lost_focus() {
+                                acts.push(Act::RenamePlayset(i, text.clone()));
+                                *ps_rename = None;
+                            }
+                            return;
+                        }
                         stack(ui, 58.0, 38.0, |ui| {
-                            ui.add(egui::Label::new(RichText::new(&p.name).size(15.5).family(bold())).truncate());
+                            ui.add(egui::Label::new(RichText::new(&p.name).size(15.5).family(bold())).truncate().selectable(false));
                             ui.label(RichText::new(tr_args(lang, "ps.counts", &[&mods_on, &plugins_on])).size(12.0).color(SECONDARY));
                         });
                     }, |ui| {
+                        if renaming {
+                            return;
+                        }
                         // quiet until the pointer is on it; the first click asks, the second deletes
                         let hint = if sure { tr(lang, "ps.delete_sure_hint") } else { tr(lang, "ps.delete") };
                         if theme::delete_button(ui, sure, tr(lang, "ps.delete_short")).on_hover_text(hint).clicked() {
@@ -2155,11 +2211,42 @@ impl App {
                             }
                         }
                     });
-                    if r.clicked() {
+                    if renaming {
+                        continue;
+                    }
+                    let r = r.on_hover_text_at_pointer(tr(lang, "ps.rename_hint"));
+                    if r.double_clicked() {
+                        acts.push(Act::AskRename(i));
+                    } else if r.clicked() {
                         acts.push(Act::SetActive(i));
+                    }
+                    if r.secondary_clicked() {
+                        menu_at = r.interact_pointer_pos().map(|at| (i, at));
                     }
                 }
             });
+            // the right-click menu of a playset
+            let menu_id = egui::Id::new("ps-list-menu");
+            if self.ps_list_menu.is_some() && std::mem::take(&mut self.dev_menu) {
+                ui.memory_mut(|mem| mem.open_popup(menu_id));
+            }
+            if let Some(m) = menu_at {
+                self.ps_list_menu = Some(m);
+                ui.memory_mut(|mem| mem.open_popup(menu_id));
+            }
+            if let Some((i, at)) = self.ps_list_menu {
+                let shown = theme::menu_at(ui, menu_id, at, Rect::NOTHING, 180.0, |ui| {
+                    if theme::menu_item(ui, tr(lang, "ps.rename"), false).clicked() {
+                        acts.push(Act::AskRename(i));
+                    }
+                    if can_delete && theme::menu_item(ui, tr(lang, "ps.delete"), false).clicked() {
+                        acts.push(Act::AskDelete(i));
+                    }
+                });
+                if shown.is_none() {
+                    self.ps_list_menu = None;
+                }
+            }
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 if pill_button(ui, tr(lang, "ps.import"), ButtonStyle::Plain(BLUE), self.game.is_ok()).clicked() {

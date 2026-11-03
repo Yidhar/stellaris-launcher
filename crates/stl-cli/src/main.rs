@@ -148,6 +148,8 @@ enum PlaysetCmd {
     Use { name: String },
     /// delete a playset
     Remove { name: String },
+    /// give a playset another name
+    Rename { name: String, new_name: String },
     /// add mods to the end of the active playset (by name or descriptor)
     Add { mods: Vec<String> },
     /// take mods out of the active playset
@@ -394,6 +396,13 @@ fn run() -> Result<()> {
                     store.remove_playset(i)?;
                     store.save()?;
                     println!("removed {n}");
+                }
+                PlaysetCmd::Rename { name, new_name } => {
+                    let i = store.find(name).with_context(|| format!("no playset called {name}"))?;
+                    let old = store.playsets[i].name.clone();
+                    store.rename_playset(i, new_name)?;
+                    store.save()?;
+                    println!("renamed {old} to {}", store.playsets[i].name);
                 }
                 PlaysetCmd::Add { mods: names } | PlaysetCmd::Rm { mods: names } | PlaysetCmd::Enable { mods: names } | PlaysetCmd::Disable { mods: names } => {
                     let idx = store.active_index();

@@ -205,6 +205,20 @@ impl Store {
         Ok(self.playsets.len() - 1)
     }
 
+    /// Gives a playset another name (its id, which the active playset is kept by, stays). Names are unique, ignoring case.
+    pub fn rename_playset(&mut self, index: usize, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a playset needs a name");
+        }
+        if self.playsets.iter().enumerate().any(|(i, p)| i != index && p.name.to_lowercase() == name.to_lowercase()) {
+            bail!("there is already a playset called {name}");
+        }
+        let Some(p) = self.playsets.get_mut(index) else { bail!("no such playset") };
+        p.name = name.to_string();
+        Ok(())
+    }
+
     pub fn set_active(&mut self, index: usize) {
         self.active = Some(self.playsets[index].id.clone());
     }
@@ -307,6 +321,21 @@ mod tests {
         assert_eq!(again.find("IRONMAN"), Some(i));
         assert!(s.add_playset("ironman").is_err());
         let _ = std::fs::remove_dir_all(s.path.parent().unwrap());
+    }
+
+    #[test]
+    fn renames_a_playset_keeping_it_active() {
+        let mut s = Store::default();
+        let a = s.add_playset("Alpha").unwrap();
+        s.add_playset("Beta").unwrap();
+        s.set_active(a);
+        s.rename_playset(a, "  Gamma ").unwrap();
+        assert_eq!((s.playsets[a].name.as_str(), s.active_index()), ("Gamma", a));
+        // its own name in another case is fine; another playset's is not; nor nothing
+        s.rename_playset(a, "gamma").unwrap();
+        assert!(s.rename_playset(a, "beta").is_err());
+        assert!(s.rename_playset(a, "   ").is_err());
+        assert_eq!(s.playsets[a].name, "gamma");
     }
 
     #[test]
