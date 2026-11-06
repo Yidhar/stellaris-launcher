@@ -78,17 +78,77 @@ impl ConfigEditor {
     }
 }
 
-/// Update checks of the plugins, and an update being installed.
+/// What is to be done to the plugins, in the order it was asked for, one at a time: two at once could work on the same folder.
+struct JobQueue<J> {
+    waiting: std::collections::VecDeque<(String, J)>,
+    running: Option<String>,
+}
+
+impl<J> Default for JobQueue<J> {
+    fn default() -> Self {
+        JobQueue { waiting: Default::default(), running: None }
+    }
+}
+
+impl<J> JobQueue<J> {
+    fn has(&self, id: &str) -> bool {
+        self.running.as_deref() == Some(id) || self.waiting.iter().any(|(i, _)| i == id)
+    }
+
+    fn is_idle(&self) -> bool {
+        self.running.is_none() && self.waiting.is_empty()
+    }
+
+    /// Queues a job, unless that plugin is in the queue already.
+    fn add(&mut self, id: &str, job: J) {
+        if !self.has(id) {
+            self.waiting.push_back((id.to_string(), job));
+        }
+    }
+
+    /// The job to start now, when none is running.
+    fn next(&mut self) -> Option<(String, J)> {
+        if self.running.is_some() {
+            return None;
+        }
+        let next = self.waiting.pop_front()?;
+        self.running = Some(next.0.clone());
+        Some(next)
+    }
+}
+
+enum PluginJob {
+    Update(stl_core::updates::Available),
+    Get(stl_core::pluginindex::Entry),
+}
+
+/// An update found earlier that the plugin has by now (installed from the Plugins tab of the indexes, by `stl`, or while the check was on the
+/// way) is no update any more. `version` gives the version installed.
+fn settle_updates(found: &mut std::collections::HashMap<String, Result<Option<stl_core::updates::Available>, String>>, version: impl Fn(&str) -> Option<String>) {
+    for (id, r) in found.iter_mut() {
+        let settled = matches!(r, Ok(Some(a)) if version(id).is_some_and(|v| !stl_core::updates::newer(&a.release.version, &v)));
+        if settled {
+            *r = Ok(None);
+        }
+    }
+}
+
+/// Update checks of the plugins, and the queue of plugins to install or update, which both tabs of the page share.
 #[derive(Default)]
 struct PluginUpdates {
     /// per plugin id: the newer release, or nothing when up to date, or why the check failed
     found: std::collections::HashMap<String, Result<Option<stl_core::updates::Available>, String>>,
     checking: Option<Receiver<(String, Result<Option<stl_core::updates::Available>, String>)>>,
-    installing: Option<(String, Receiver<Result<String, String>>)>,
+    jobs: JobQueue<PluginJob>,
+    /// the job running: an update or an install, and its result
+    doing: Option<(bool, Receiver<Result<String, String>>)>,
+    /// something of this round of jobs was put in place
+    any_done: bool,
+    /// how the jobs went, since the queue last started
     message: Option<(String, bool)>,
 }
 
-/// The plugin indexes: what they list, read on a worker thread; a plugin being installed from them.
+/// The plugin indexes: what they list, read on a worker thread.
 #[derive(Default)]
 struct IndexView {
     rx: Option<Receiver<(Vec<stl_core::pluginindex::Entry>, Vec<(String, String)>)>>,
@@ -96,8 +156,6 @@ struct IndexView {
     /// the indexes that could not be read, and why
     failed: Vec<(String, String)>,
     loaded: bool,
-    getting: Option<(String, Receiver<Result<String, String>>)>,
-    message: Option<(String, bool)>,
     /// an index address being typed in Settings
     new_url: String,
 }
@@ -634,6 +692,21 @@ impl App {
                 app.confirm_delete = v.parse().ok();
             } else if let Some(v) = a.strip_prefix("--plugins-tab=") {
                 app.plugins_tab = v.parse().unwrap_or(0);
+            } else if a == "--plugin-queue-demo" {
+                // development: the first plugin being updated (for good), the others queued
+                let ids: Vec<String> = app.plugins.iter().map(|p| p.manifest.id.clone()).collect();
+                if let Some((first, rest)) = ids.split_first() {
+                    let (tx, rx) = channel();
+                    std::mem::forget(tx);
+                    app.updates.jobs.running = Some(first.clone());
+                    app.updates.doing = Some((true, rx));
+                    for id in rest {
+                        let line = format!(r#"{{"id":"{id}","name":"x","author":"x","description":"d","version":"1","download":"https://x/x.zip","sha256":"{}","repository":"https://x/x"}}"#, "0".repeat(64));
+                        if let Some(e) = stl_core::pluginindex::parse(&line, "").0.pop() {
+                            app.updates.jobs.add(id, PluginJob::Get(e));
+                        }
+                    }
+                }
             } else if let Some(v) = a.strip_prefix("--settings-scroll=") {
                 app.dev_scroll = v.parse().ok();
             } else if a == "--upload-ignore" {
@@ -996,19 +1069,62 @@ impl App {
         });
     }
 
+    /// Queues the update found for a plugin.
     fn update_plugin(&mut self, id: &str) {
-        if self.updates.installing.is_some() {
-            return;
-        }
-        let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id).cloned() else { return };
         let Some(Ok(Some(a))) = self.updates.found.get(id).cloned() else { return };
-        let (tx, rx) = channel();
-        self.updates.installing = Some((id.to_string(), rx));
-        self.updates.message = None;
-        std::thread::spawn(move || {
-            let r = stl_core::updates::apply(&p, &a).map(|n| n.manifest.version).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(r);
-        });
+        self.queue_plugin_job(id, PluginJob::Update(a));
+    }
+
+    fn queue_plugin_job(&mut self, id: &str, job: PluginJob) {
+        if self.updates.jobs.is_idle() {
+            self.updates.message = None;
+            self.updates.any_done = false;
+        }
+        self.updates.jobs.add(id, job);
+        self.next_plugin_job();
+    }
+
+    /// Starts the next job of the queue on a worker thread, when none is running.
+    fn next_plugin_job(&mut self) {
+        while self.updates.doing.is_none() {
+            let Some((id, job)) = self.updates.jobs.next() else { return };
+            let (tx, rx) = channel();
+            let work: Box<dyn FnOnce() -> anyhow::Result<Plugin> + Send> = match job {
+                PluginJob::Update(a) => {
+                    let Some(p) = self.plugins.iter().find(|p| p.manifest.id == id).cloned() else {
+                        self.updates.jobs.running = None;
+                        continue;
+                    };
+                    self.updates.doing = Some((true, rx));
+                    Box::new(move || stl_core::updates::apply(&p, &a))
+                }
+                PluginJob::Get(e) => {
+                    self.updates.doing = Some((false, rx));
+                    Box::new(move || stl_core::pluginindex::install(&e))
+                }
+            };
+            std::thread::spawn(move || {
+                let r = work().map(|n| n.manifest.version).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(r);
+            });
+        }
+    }
+
+    /// The word for a plugin's button while it is in the queue.
+    fn job_label(&self, id: &str) -> Option<&'static str> {
+        if !self.updates.jobs.has(id) {
+            return None;
+        }
+        Some(tr(self.lang, match self.updates.doing {
+            Some((update, _)) if self.updates.jobs.running.as_deref() == Some(id) => {
+                if update {
+                    "pl.updating"
+                } else {
+                    "pl.getting"
+                }
+            }
+            _ => "pl.queued",
+        }))
     }
 
     /// Reads the plugin indexes on a worker thread.
@@ -1024,19 +1140,10 @@ impl App {
         });
     }
 
-    /// Installs (or updates) a plugin of the indexes on a worker thread.
+    /// Queues the install (or update) of a plugin of the indexes.
     fn get_plugin(&mut self, id: &str) {
-        if self.index.getting.is_some() {
-            return;
-        }
         let Some(e) = self.index.entries.iter().find(|e| e.id == id).cloned() else { return };
-        let (tx, rx) = channel();
-        self.index.getting = Some((id.to_string(), rx));
-        self.index.message = None;
-        std::thread::spawn(move || {
-            let r = stl_core::pluginindex::install(&e).map(|p| p.manifest.version).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(r);
-        });
+        self.queue_plugin_job(id, PluginJob::Get(e));
     }
 
     fn drain_index(&mut self) {
@@ -1046,33 +1153,6 @@ impl App {
             self.index.entries = entries;
             self.index.failed = failed;
             self.index.loaded = true;
-        }
-        let mut finished = None;
-        if let Some((id, rx)) = &self.index.getting {
-            if let Ok(r) = rx.try_recv() {
-                finished = Some((id.clone(), r));
-            }
-        }
-        if let Some((id, r)) = finished {
-            self.index.getting = None;
-            match r {
-                Ok(v) => {
-                    let mut msg = tr_args(self.lang, "pl.got", &[&id, &v]);
-                    if !self.running.is_empty() {
-                        msg = format!("{msg} · {}", tr(self.lang, "pl.next_start"));
-                    }
-                    self.index.message = Some((msg, true));
-                    self.say(format!("installed {id} {v} from a plugin index"));
-                }
-                Err(e) => {
-                    self.index.message = Some((e.clone(), false));
-                    self.say(format!("could not install {id}: {e}"));
-                }
-            }
-            if let Ok((p, problems)) = plugins::list() {
-                self.plugins = p;
-                self.plugin_problems = problems;
-            }
         }
     }
 
@@ -1093,34 +1173,42 @@ impl App {
         for (id, r) in done {
             self.updates.found.insert(id, r);
         }
-        let mut finished = None;
-        if let Some((id, rx)) = &self.updates.installing {
-            if let Ok(r) = rx.try_recv() {
-                finished = Some((id.clone(), r));
-            }
-        }
-        if let Some((id, r)) = finished {
-            self.updates.installing = None;
-            match r {
+        let finished = self.updates.doing.as_ref().and_then(|(update, rx)| match rx.try_recv() {
+            Ok(r) => Some((*update, r)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((*update, Err("the worker stopped".to_string()))),
+        });
+        if let Some((update, r)) = finished {
+            self.updates.doing = None;
+            let id = self.updates.jobs.running.take().unwrap_or_default();
+            let (line, ok) = match r {
                 Ok(v) => {
-                    self.updates.found.insert(id.clone(), Ok(None));
-                    let mut msg = tr_args(self.lang, "pl.updated", &[&id, &v]);
-                    if !self.running.is_empty() {
-                        msg = format!("{msg} · {}", tr(self.lang, "pl.next_start"));
-                    }
-                    self.updates.message = Some((msg, true));
-                    self.say(format!("updated {id} to {v}"));
+                    self.updates.any_done = true;
+                    self.say(format!("{} {id} {v}", if update { "updated" } else { "installed" }));
+                    (tr_args(self.lang, if update { "pl.updated" } else { "pl.got" }, &[&id, &v]), true)
                 }
                 Err(e) => {
-                    self.updates.message = Some((e.clone(), false));
-                    self.say(format!("could not update {id}: {e}"));
+                    self.say(format!("could not install {id}: {e}"));
+                    (e, false)
                 }
-            }
+            };
+            self.updates.message = Some(match self.updates.message.take() {
+                Some((before, was_ok)) => (format!("{before} · {line}"), was_ok && ok),
+                None => (line, ok),
+            });
             if let Ok((p, problems)) = plugins::list() {
                 self.plugins = p;
                 self.plugin_problems = problems;
             }
+            self.next_plugin_job();
+            if self.updates.jobs.is_idle() && self.updates.any_done && !self.running.is_empty() {
+                if let Some((msg, _)) = &mut self.updates.message {
+                    *msg = format!("{msg} · {}", tr(self.lang, "pl.next_start"));
+                }
+            }
         }
+        let plugins = &self.plugins;
+        settle_updates(&mut self.updates.found, |id| plugins.iter().find(|p| p.manifest.id == id).map(|p| p.manifest.version.clone()));
     }
 
     /// Looks at every mod's files for what the game checksums, on a worker thread (a big mod has thousands of files).
@@ -2923,7 +3011,12 @@ impl App {
                     acts.push(Act::CheckUpdates);
                 }
                 if let Some((msg, ok)) = &self.updates.message {
-                    ui.label(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED }));
+                    // several jobs make a long line: it leaves room for the buttons
+                    let w = (ui.available_width() - 280.0).max(80.0);
+                    ui.scope(|ui| {
+                        ui.set_max_width(w);
+                        ui.add(egui::Label::new(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED })).truncate()).on_hover_text(msg);
+                    });
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if pill_button(ui, tr(lang, "pl.install"), ButtonStyle::Tinted(Color32::WHITE), true).clicked() {
@@ -2956,8 +3049,8 @@ impl App {
                     let has_config = !p.manifest.config.is_empty() || p.config_dir().is_dir();
                     let page = p.manifest.homepage.clone().filter(|h| h.starts_with("http")).or_else(|| p.manifest.update.as_ref().and_then(|u| stl_core::updates::repo_of(&u.github)).map(|r| format!("https://github.com/{r}")));
                     let update_ready = matches!(self.updates.found.get(&p.manifest.id), Some(Ok(Some(_)))) && !p.linked;
-                    let installing = self.updates.installing.as_ref().is_some_and(|(i, _)| i == &p.manifest.id);
-                    rows.row(ui, h, 300.0, false, |ui| {
+                    let job = self.job_label(&p.manifest.id);
+                    rows.row(ui, h, 340.0, false, |ui| {
                         stack(ui, h, if has_text { 64.0 } else { 44.0 }, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&p.manifest.name).size(15.5).family(bold()));
@@ -2993,7 +3086,7 @@ impl App {
                             acts.push(Act::PluginFlag(p.manifest.id.clone(), v));
                         }
                         ui.add_space(6.0);
-                        if pill_button(ui, tr(lang, "pl.remove"), ButtonStyle::Plain(RED), true).clicked() {
+                        if pill_button(ui, tr(lang, "pl.remove"), ButtonStyle::Plain(RED), job.is_none()).clicked() {
                             acts.push(Act::PluginRemove(p.manifest.id.clone()));
                         }
                         if has_config && circle_button(ui, Icon::Settings, theme::white(26), LABEL, true).on_hover_text(tr(lang, "cfg.edit")).clicked() {
@@ -3004,10 +3097,9 @@ impl App {
                                 acts.push(Act::Open(url.clone()));
                             }
                         }
-                        if update_ready || installing {
+                        if update_ready || job.is_some() {
                             ui.add_space(4.0);
-                            let label = if installing { tr(lang, "pl.updating") } else { tr(lang, "pl.update") };
-                            if pill_button(ui, label, ButtonStyle::Filled(BLUE), !installing).clicked() {
+                            if pill_button(ui, job.unwrap_or(tr(lang, "pl.update")), ButtonStyle::Filled(BLUE), job.is_none()).clicked() {
                                 acts.push(Act::UpdatePlugin(p.manifest.id.clone()));
                             }
                         }
@@ -3038,8 +3130,8 @@ impl App {
             if loading {
                 ui.label(RichText::new(tr(lang, "pl.browse_loading")).size(12.5).color(SECONDARY));
             }
-            if let Some((msg, ok)) = &self.index.message {
-                ui.add(egui::Label::new(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED })).truncate());
+            if let Some((msg, ok)) = &self.updates.message {
+                ui.add(egui::Label::new(RichText::new(msg).size(12.5).color(if *ok { GREEN } else { RED })).truncate()).on_hover_text(msg);
             }
         });
         theme::divider(ui);
@@ -3058,7 +3150,7 @@ impl App {
             let mut rows = Rows::new();
             for e in &self.index.entries {
                 let state = stl_core::pluginindex::state(e, &self.plugins);
-                let getting = self.index.getting.as_ref().is_some_and(|(i, _)| i == &e.id);
+                let job = self.job_label(&e.id);
                 let h = 92.0;
                 rows.row(ui, h, 240.0, false, |ui| {
                     stack(ui, h, 70.0, |ui| {
@@ -3096,18 +3188,17 @@ impl App {
                         acts.push(Act::Open(e.page().to_string()));
                     }
                     ui.add_space(4.0);
-                    let busy = self.index.getting.is_some();
                     match &state {
-                        _ if getting => {
-                            pill_button(ui, tr(lang, "pl.getting"), ButtonStyle::Filled(BLUE), false);
+                        _ if job.is_some() => {
+                            pill_button(ui, job.unwrap_or_default(), ButtonStyle::Filled(BLUE), false);
                         }
                         State::NotInstalled => {
-                            if pill_button(ui, tr(lang, "pl.get"), ButtonStyle::Filled(BLUE), !busy).clicked() {
+                            if pill_button(ui, tr(lang, "pl.get"), ButtonStyle::Filled(BLUE), true).clicked() {
                                 acts.push(Act::GetPlugin(e.id.clone()));
                             }
                         }
                         State::Older(_) => {
-                            if pill_button(ui, &tr_args(lang, "pl.get_update", &[e.version.trim_start_matches('v')]), ButtonStyle::Filled(BLUE), !busy).clicked() {
+                            if pill_button(ui, &tr_args(lang, "pl.get_update", &[e.version.trim_start_matches('v')]), ButtonStyle::Filled(BLUE), true).clicked() {
                                 acts.push(Act::GetPlugin(e.id.clone()));
                             }
                         }
@@ -3480,7 +3571,7 @@ impl eframe::App for App {
         if self.ironman_rx.is_some() {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
-        if self.updates.checking.is_some() || self.updates.installing.is_some() || self.index.rx.is_some() || self.index.getting.is_some() {
+        if self.updates.checking.is_some() || self.updates.doing.is_some() || self.index.rx.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
         // the indexes are read the first time their tab is shown
@@ -4855,6 +4946,48 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::version_parts;
+
+    #[test]
+    fn plugin_jobs_run_one_at_a_time_in_order() {
+        let mut q = super::JobQueue::default();
+        assert!(q.is_idle());
+        q.add("a", 1);
+        q.add("b", 2);
+        q.add("a", 3);
+        assert_eq!(q.next(), Some(("a".to_string(), 1)));
+        // running: nothing else starts, and it cannot be queued again
+        q.add("a", 4);
+        assert_eq!(q.next(), None);
+        assert!(q.has("a") && q.has("b") && !q.is_idle());
+        q.running = None;
+        assert_eq!(q.next(), Some(("b".to_string(), 2)));
+        q.running = None;
+        assert_eq!(q.next(), None);
+        assert!(q.is_idle());
+    }
+
+    #[test]
+    fn an_update_the_plugin_has_by_now_is_settled() {
+        use stl_core::updates::{Available, Release};
+        let offer = |v: &str| {
+            let release = Release { tag: format!("v{v}"), version: v.to_string(), page: String::new(), notes: String::new(), prerelease: false, assets: Vec::new() };
+            Ok(Some(Available { release, asset: Default::default(), checksum: None }))
+        };
+        let mut found = std::collections::HashMap::new();
+        found.insert("same".to_string(), offer("0.4.0"));
+        found.insert("newer".to_string(), offer("0.5.0"));
+        found.insert("gone".to_string(), offer("0.5.0"));
+        found.insert("failed".to_string(), Err("no network".to_string()));
+        super::settle_updates(&mut found, |id| match id {
+            "same" => Some("0.4.0".to_string()),
+            "newer" => Some("0.4.0".to_string()),
+            _ => None,
+        });
+        assert_eq!(found["same"], Ok(None));
+        assert!(matches!(found["newer"], Ok(Some(_))));
+        assert!(matches!(found["gone"], Ok(Some(_))));
+        assert!(found["failed"].is_err());
+    }
 
     /// Writes the title bar's mark as egui draws it (its triangles, with the soft edge, at 150 % scaling) to the file `STL_DUMP_MARK`
     /// names: `tools/make_icon.py` draws the icons from it, so that they show the same shape. Run again after changing the mark:
