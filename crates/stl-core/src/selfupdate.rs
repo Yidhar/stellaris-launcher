@@ -1,22 +1,46 @@
-//! The launcher updating itself from its GitHub releases.
+//! The launcher updating itself from its mirror, or from its GitHub releases when the mirror cannot be reached.
 //!
-//! 1. `check` asks GitHub for the latest release (pre-releases are not offered) and compares its tag with this build's version.
-//! 2. `stage` downloads its zip (`stellaris-launcher-v<version>.zip`), checks it against the `.zip.sha256` published beside it (an update
-//!    without one is refused) and unpacks it into `%APPDATA%\stellaris-launcher\update\<version>\`. The running launcher is not touched.
+//! 1. `check` reads the mirror's `latest.json` (`MIRROR`, Cloudflare R2). It holds the release's manifest and an Ed25519 signature of it,
+//!    which must verify against `MIRROR_KEY`: the private half stays on the release machine (`scripts/publish_mirror.py`), so whoever
+//!    can write to the bucket still cannot ship an update. A mirror that cannot be read or whose manifest does not verify is passed over
+//!    for GitHub's latest release (pre-releases are not offered). Either way the version is compared with this build's.
+//! 2. `stage` downloads the zip (`stellaris-launcher-v<version>.zip`), checks it against the SHA-256 in the signed manifest, or for a
+//!    GitHub release the `.zip.sha256` published beside it (an update without one is refused), and unpacks it into
+//!    `%APPDATA%\stellaris-launcher\update\<version>\`. The running launcher is not touched.
 //! 3. `install` puts the staged files next to the running exe. Windows does not let a running exe be overwritten but does let it be renamed:
 //!    each file being replaced is first renamed to `<name>.old`, then the new one is copied in; if a copy fails, everything is put back.
 //!    The caller then starts the new exe and exits; the next start removes the `.old` files (`cleanup`).
 //!
-//! A build run from a cargo `target\` folder is never replaced (set `STL_UPDATE_FORCE=1` to test). `STL_UPDATE_REPO` and `STL_UPDATE_API`
-//! point the check somewhere else (another repository, or a local server standing in for GitHub).
+//! A build run from a cargo `target\` folder is never replaced (set `STL_UPDATE_FORCE=1` to test). `STL_UPDATE_MIRROR` (a URL, or `off`),
+//! `STL_UPDATE_REPO` and `STL_UPDATE_API` point the check somewhere else (a local server standing in for the mirror or GitHub).
 
 use crate::updates::{self, Release};
-use crate::{bail, net, paths, Context, Result};
+use crate::{anyhow, bail, net, paths, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Where the releases are published.
 pub const REPO: &str = "Yidhar/stellaris-launcher";
+/// The launcher's own copy of each release: readable by anyone, written only when releasing.
+pub const MIRROR: &str = "https://dl.stellarismod.com/launcher";
+/// The public key the mirror's manifest must be signed with (`scripts/update_key.py --public`).
+const MIRROR_KEY: &str = "7f7d933edf9acc4354e06350e99e80ab9f31d2aae6fd723ab3f63c1eec8a0c51";
+/// What a manifest names itself, so that one signed for something else is not taken for the launcher's.
+const PRODUCT: &str = "stellaris-launcher";
+
+/// The mirror, unless `STL_UPDATE_MIRROR=off`.
+pub fn mirror() -> Option<String> {
+    match std::env::var("STL_UPDATE_MIRROR") {
+        Ok(s) if s.trim().eq_ignore_ascii_case("off") => None,
+        Ok(s) if !s.trim().is_empty() => Some(s.trim().trim_end_matches('/').to_string()),
+        _ => Some(MIRROR.to_string()),
+    }
+}
+
+/// The mirror's host, for telling the user where updates come from.
+pub fn mirror_host() -> String {
+    mirror().map(|m| m.split("://").nth(1).unwrap_or(&m).split('/').next().unwrap_or("").to_string()).unwrap_or_else(|| "-".into())
+}
 /// The files of a release that make up the program (the rest of the zip is documentation and examples, copied when present).
 const PROGRAM: [&str; 2] = ["stellaris-launcher.exe", "stl.exe"];
 
@@ -36,11 +60,98 @@ fn api() -> String {
 pub struct Available {
     pub release: Release,
     pub zip: (String, String),
-    pub checksum: (String, String),
+    pub checksum: Checksum,
 }
 
-/// The newer release, if there is one.
+/// What the zip is checked against.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Checksum {
+    /// a `.sha256` file to download (name, URL)
+    File(String, String),
+    /// the SHA-256 in the mirror's signed manifest
+    Signed(String),
+}
+
+/// The newer release, if there is one: from the mirror, or from GitHub when the mirror fails.
 pub fn check() -> Result<Option<Available>> {
+    let Some(base) = mirror() else { return check_github() };
+    match check_mirror(&base) {
+        Ok(found) => Ok(found),
+        Err(m) => check_github().map_err(|g| anyhow!("{g:#} (and the mirror {base}: {m:#})")),
+    }
+}
+
+fn check_mirror(base: &str) -> Result<Option<Available>> {
+    let body = net::http_get(&format!("{base}/latest.json"), 15_000, 1 << 20).with_context(|| format!("cannot read {base}/latest.json"))?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&hex::<32>(MIRROR_KEY).context("MIRROR_KEY")?).context("MIRROR_KEY")?;
+    let a = read_mirror(&String::from_utf8_lossy(&body), base, &key)?;
+    if last_installed().is_some_and(|v| v == a.release.version) || !updates::newer(&a.release.version, current_version()) {
+        return Ok(None);
+    }
+    Ok(Some(a))
+}
+
+fn hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    let s = s.trim();
+    if s.len() != N * 2 || !s.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The release in a mirror's `latest.json`, once its signature verifies against `key`.
+fn read_mirror(text: &str, base: &str, key: &ed25519_dalek::VerifyingKey) -> Result<Available> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        manifest: String,
+        signature: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct File {
+        path: String,
+        sha256: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        product: String,
+        version: String,
+        tag: String,
+        #[serde(default)]
+        page: String,
+        #[serde(default)]
+        notes: String,
+        zip: File,
+    }
+    let env: Envelope = serde_json::from_str(text.trim_start_matches('\u{feff}')).context("the mirror's latest.json is not a signed manifest")?;
+    let sig = hex::<64>(&env.signature).context("the mirror's latest.json has no valid signature")?;
+    key.verify_strict(env.manifest.as_bytes(), &ed25519_dalek::Signature::from_bytes(&sig))
+        .map_err(|_| anyhow!("the mirror's latest.json is not signed with the launcher's release key"))?;
+    let m: Manifest = serde_json::from_str(&env.manifest).context("the mirror's manifest cannot be read")?;
+    if m.product != PRODUCT {
+        bail!("the mirror's manifest is for {}, not {PRODUCT}", m.product);
+    }
+    if m.tag != format!("v{}", m.version) {
+        bail!("the mirror's manifest says version {} but tag {}", m.version, m.tag);
+    }
+    let path = m.zip.path.trim();
+    let name = path.rsplit('/').next().unwrap_or("").to_string();
+    let safe = !path.is_empty() && !path.starts_with('/') && !path.contains(['\\', ':', '?', '#']) && !path.split('/').any(|s| s.is_empty() || s == "." || s == "..");
+    if !safe || !updates::wildcard("stellaris-launcher-*.zip", &name) {
+        bail!("the mirror's manifest names an unexpected file ({path})");
+    }
+    let sha = m.zip.sha256.trim().to_lowercase();
+    if hex::<32>(&sha).is_none() {
+        bail!("the mirror's manifest has no valid SHA-256 for {name}");
+    }
+    let release = Release { tag: m.tag, version: m.version, page: m.page, notes: m.notes, prerelease: false, assets: Vec::new() };
+    Ok(Available { release, zip: (name, format!("{}/{path}", base.trim_end_matches('/'))), checksum: Checksum::Signed(sha) })
+}
+
+fn check_github() -> Result<Option<Available>> {
     let repo = repo();
     let body = match net::http_get(&format!("{}/repos/{repo}/releases/latest", api()), 15_000, 2 << 20) {
         Ok(b) => b,
@@ -72,7 +183,7 @@ fn pick(release: Release, installed: &str) -> Result<Option<Available>> {
     }
     let zip = release.assets.iter().find(|(n, _)| updates::wildcard("stellaris-launcher-*.zip", n)).cloned()
         .with_context(|| format!("release {} has no stellaris-launcher-*.zip", release.tag))?;
-    let checksum = release.assets.iter().find(|(n, _)| n.eq_ignore_ascii_case(&format!("{}.sha256", zip.0))).cloned()
+    let checksum = release.assets.iter().find(|(n, _)| n.eq_ignore_ascii_case(&format!("{}.sha256", zip.0))).map(|(n, u)| Checksum::File(n.clone(), u.clone()))
         .with_context(|| format!("release {} publishes no {}.sha256, so its download cannot be checked", release.tag, zip.0))?;
     Ok(Some(Available { release, zip, checksum }))
 }
@@ -102,10 +213,15 @@ fn program_root(dir: &Path) -> Option<PathBuf> {
 /// Downloads, checks and unpacks a release. Safe to run while the launcher runs; nothing next to the exe changes.
 pub fn stage(a: &Available) -> Result<Staged> {
     let bytes = net::http_get(&a.zip.1, 120_000, 256 << 20).with_context(|| format!("cannot download {}", a.zip.0))?;
-    let text = String::from_utf8_lossy(&net::http_get(&a.checksum.1, 15_000, 1 << 16).with_context(|| format!("cannot download {}", a.checksum.0))?).to_string();
-    let want = text.split_whitespace().next().unwrap_or("").to_lowercase();
+    let want = match &a.checksum {
+        Checksum::Signed(h) => h.clone(),
+        Checksum::File(name, url) => {
+            let text = String::from_utf8_lossy(&net::http_get(url, 15_000, 1 << 16).with_context(|| format!("cannot download {name}"))?).to_string();
+            text.split_whitespace().next().unwrap_or("").to_lowercase()
+        }
+    };
     let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    if want != got {
+    if want.is_empty() || want != got {
         bail!("{} does not match its published SHA-256 (expected {want}, got {got})", a.zip.0);
     }
     let root = staging_root()?;
@@ -303,6 +419,49 @@ mod tests {
         assert!(pick(release("v9.0.0", &[zip, sha], true), "0.1.0").unwrap().is_none(), "a pre-release");
         assert!(pick(release("v9.0.0", &[zip], false), "0.1.0").is_err(), "no checksum");
         assert!(pick(release("v9.0.0", &["other.zip"], false), "0.1.0").is_err(), "no zip");
+    }
+
+    fn signed(key: &ed25519_dalek::SigningKey, manifest: &str) -> String {
+        use ed25519_dalek::Signer;
+        let sig: String = key.sign(manifest.as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        serde_json::json!({ "manifest": manifest, "signature": sig }).to_string()
+    }
+
+    fn manifest(product: &str, tag: &str, path: &str) -> String {
+        serde_json::json!({
+            "product": product, "version": tag.trim_start_matches('v'), "tag": tag, "page": "https://x/p", "notes": "n",
+            "zip": { "path": path, "sha256": "AB".repeat(32), "size": 1 },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_release_key_is_a_valid_public_key() {
+        assert!(ed25519_dalek::VerifyingKey::from_bytes(&hex::<32>(MIRROR_KEY).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn takes_only_a_mirror_manifest_signed_with_the_release_key() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]);
+        let public = key.verifying_key();
+        let good = manifest(PRODUCT, "v9.0.0", "v9.0.0/stellaris-launcher-v9.0.0.zip");
+
+        let a = read_mirror(&signed(&key, &good), "https://m/launcher/", &public).unwrap();
+        assert_eq!(a.release.version, "9.0.0");
+        assert_eq!(a.zip, ("stellaris-launcher-v9.0.0.zip".to_string(), "https://m/launcher/v9.0.0/stellaris-launcher-v9.0.0.zip".to_string()));
+        assert_eq!(a.checksum, Checksum::Signed("ab".repeat(32)));
+
+        assert!(read_mirror(&signed(&other, &good), "https://m", &public).is_err(), "another key");
+        let tampered = signed(&key, &good).replace("9.0.0", "9.0.1");
+        assert!(read_mirror(&tampered, "https://m", &public).is_err(), "changed after signing");
+        assert!(read_mirror(&good, "https://m", &public).is_err(), "not signed at all");
+        assert!(read_mirror(&signed(&key, &manifest("something-else", "v9.0.0", "v9.0.0/stellaris-launcher-v9.0.0.zip")), "https://m", &public).is_err(), "another product");
+        for path in ["../x/stellaris-launcher-v9.0.0.zip", "/v9/stellaris-launcher-v9.0.0.zip", "https://evil/stellaris-launcher-v9.0.0.zip", "v9.0.0/other.zip", "v9.0.0//stellaris-launcher-v9.0.0.zip"] {
+            assert!(read_mirror(&signed(&key, &manifest(PRODUCT, "v9.0.0", path)), "https://m", &public).is_err(), "{path}");
+        }
+        let mismatched = manifest(PRODUCT, "v9.0.0", "v9.0.0/stellaris-launcher-v9.0.0.zip").replace("\"tag\":\"v9.0.0\"", "\"tag\":\"v9.0.1\"");
+        assert!(read_mirror(&signed(&key, &mismatched), "https://m", &public).is_err(), "tag and version disagree");
     }
 
     #[test]

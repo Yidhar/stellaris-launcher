@@ -28,11 +28,14 @@ stl launch [--continue] [--playset X]   write dlc_load.json, start the game, loa
 stl stop                                close the game
 stl check [--playset X] [--mod Y]       problems of a playset's mods, and what overrides what (docs/CONFLICTS.md)
 stl sort [--playset X] [--apply]        a load order where each mod comes after what it needs and what it patches
-stl self-update [--check]               update the launcher from its GitHub releases (with the window closed)
+stl self-update [--check]               update the launcher from its mirror or GitHub releases (with the window closed)
 ```
 
-**Updates.** The window looks for a newer release of the launcher when it starts (and every six hours while it runs), downloads it in the
-background, checks it against the `.sha256` published beside the zip and keeps it in `%APPDATA%\stellaris-launcher\update`. A button in the title
+**Updates.** The window looks for a newer release of the launcher when it starts (and every six hours while it runs): first on its mirror,
+`https://dl.stellarismod.com/launcher/`, whose manifest must carry the launcher's release signature (an Ed25519 key that only the release
+machine holds, so the mirror can serve files but cannot make an update), then, when the mirror cannot be reached, on GitHub. It downloads the
+release in the background, checks it against the SHA-256 in the signed manifest (or the `.sha256` published beside the zip on GitHub) and keeps
+it in `%APPDATA%\stellaris-launcher\update`. A button in the title
 bar then shows the release notes and restarts into the new version; or the next start installs it before the window opens. The running exe is
 renamed to `.old` (Windows allows that, not overwriting it) and removed on the following start. Switch it off in Settings → Launcher updates.
 
@@ -59,7 +62,7 @@ Either way it then updates itself from the releases (below). Your playsets and s
 - Your playsets are ours (`%APPDATA%\stellaris-launcher\playsets.json`), imported once from the official database, which is never written.
   Each playset can also switch DLC off (`disabled_dlcs` of `dlc_load.json`, which is what the official launcher edits); a playset that never set
   it leaves the file's list alone. `dlc_signature` is the game's own and is never touched.
-- **It updates itself** from its GitHub releases (above); the Paradox Launcher's own updater is not involved.
+- **It updates itself** from its signed mirror or its GitHub releases (above); the Paradox Launcher's own updater is not involved.
 - **DLL plugins are first class**: a manifest next to the DLL, per-playset on/off, a check that the plugin was made for the installed game build,
   loaded once the game's window exists.
 

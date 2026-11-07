@@ -3681,7 +3681,7 @@ impl App {
                     }
                 });
             });
-            theme::footnote(ui, &tr_args(lang, "upd.note", &[&stl_core::selfupdate::repo()]));
+            theme::footnote(ui, &tr_args(lang, "upd.note", &[&stl_core::selfupdate::mirror_host(), &stl_core::selfupdate::repo()]));
             // about
             theme::section(ui, tr(lang, "set.about"));
             glass(ui, 16.0, 16.0, |ui| {

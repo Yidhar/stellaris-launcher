@@ -808,7 +808,7 @@ fn run() -> Result<()> {
         Cmd::SelfUpdate { check } => {
             use stl_core::selfupdate as su;
             stl_core::selfupdate::cleanup();
-            println!("stellaris-launcher {} (releases: github.com/{})", su::current_version(), su::repo());
+            println!("stellaris-launcher {} (releases: {}, else github.com/{})", su::current_version(), su::mirror().unwrap_or_else(|| "no mirror".into()), su::repo());
             let staged = match su::staged() {
                 Some(s) => s,
                 None => match su::check()? {
