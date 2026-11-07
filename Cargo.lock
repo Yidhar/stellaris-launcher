@@ -2729,7 +2729,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stl-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "stl-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "stl-gui"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "stl-notice"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "windows-sys 0.59.0",
 ]
