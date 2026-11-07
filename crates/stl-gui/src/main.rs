@@ -117,6 +117,30 @@ impl<J> JobQueue<J> {
     }
 }
 
+enum FetchMsg {
+    Progress(workshop::FetchProgress),
+    Done(Result<Vec<(u64, String)>, String>),
+}
+
+/// A playset made from a file, waiting for the Workshop items it lacks.
+struct ImportJob {
+    /// the id of the playset
+    playset: String,
+    name: String,
+    shared: import::Shared,
+    want: Vec<u64>,
+}
+
+/// The playset files whose mods are being fetched, one file at a time.
+#[derive(Default)]
+struct PlaysetImports {
+    waiting: std::collections::VecDeque<ImportJob>,
+    running: Option<(ImportJob, Receiver<FetchMsg>)>,
+    progress: Option<workshop::FetchProgress>,
+    /// how the last one went
+    message: Option<(String, bool)>,
+}
+
 enum PluginJob {
     Update(stl_core::updates::Available),
     Get(stl_core::pluginindex::Entry),
@@ -237,6 +261,13 @@ enum Act {
     AskRename(usize),
     RenamePlayset(usize, String),
     Import,
+    /// choose playset files to import
+    AskImportFile,
+    /// a playset to a file the user chooses
+    ExportPlayset(usize),
+    /// a playset's file onto the clipboard
+    CopyPlayset(usize),
+    ImportFiles(Vec<PathBuf>),
     ModFlag(usize, bool),
     ModRemove(usize),
     ModMove(usize, i32),
@@ -487,6 +518,7 @@ struct App {
     make: Option<MakeForm>,
     config: Option<ConfigEditor>,
     updates: PluginUpdates,
+    imports: PlaysetImports,
     /// the Plugins page: 0 installed, 1 the plugin indexes
     plugins_tab: usize,
     index: IndexView,
@@ -620,6 +652,7 @@ impl App {
             make: None,
             config: None,
             updates: PluginUpdates::default(),
+            imports: PlaysetImports::default(),
             plugins_tab: 0,
             index: IndexView::default(),
             self_update: SelfUpdate::default(),
@@ -692,6 +725,19 @@ impl App {
                 app.confirm_delete = v.parse().ok();
             } else if let Some(v) = a.strip_prefix("--plugins-tab=") {
                 app.plugins_tab = v.parse().unwrap_or(0);
+            } else if let Some(f) = a.strip_prefix("--import-file=") {
+                app.import_files(vec![PathBuf::from(f)]);
+            } else if a == "--import-demo" {
+                // development: a playset file's mods coming down
+                let text = r#"{"game":"stellaris","name":"Shared","mods":[{"displayName":"A rather long name of a mod from the Workshop","steamId":"7","position":0,"enabled":true}]}"#;
+                if let Ok(shared) = import::parse_shared(text, "stellaris") {
+                    let (tx, rx) = channel();
+                    std::mem::forget(tx);
+                    app.imports.running = Some((ImportJob { playset: String::new(), name: shared.name.clone(), shared, want: vec![7] }, rx));
+                    app.imports.progress = Some(workshop::FetchProgress { downloading: true, index: 2, total: 12, id: 7, bytes: 30, size: 100 });
+                }
+            } else if a == "--import-message" {
+                app.imports.message = Some((tr_args(app.lang, "ps.import_some", &["Shared", "2", "the Steam API did not start: Steam must be running and signed in to an account that owns Stellaris"]), false));
             } else if a == "--plugin-queue-demo" {
                 // development: the first plugin being updated (for good), the others queued
                 let ids: Vec<String> = app.plugins.iter().map(|p| p.manifest.id.clone()).collect();
@@ -1524,6 +1570,139 @@ impl App {
         }
     }
 
+    /// A playset's name, its file, and how many local mods the file leaves out (each is logged).
+    fn exported(&mut self, i: usize) -> Option<(String, String, usize)> {
+        let game = self.game.as_ref().ok()?;
+        let p = self.store.playsets.get(i)?;
+        let (text, local) = import::export_shared(p, &self.mods, &game.settings.game_id);
+        let name = p.name.clone();
+        for n in &local {
+            self.say(format!("{name}: left out of the export, a local mod: {n}"));
+        }
+        Some((name, text, local.len()))
+    }
+
+    fn exported_line(&self, key: &str, name: &str, local: usize) -> (String, bool) {
+        if local == 0 {
+            (tr_args(self.lang, key, &[name]), true)
+        } else {
+            (tr_args(self.lang, "ps.export_local", &[name, &local.to_string()]), false)
+        }
+    }
+
+    /// Makes a playset of each file at once, in the file's order, and queues what it lacks from the Workshop.
+    fn import_files(&mut self, paths: Vec<PathBuf>) {
+        let Ok(game) = self.game.clone() else { return };
+        mods::sync_workshop(&game.data_dir);
+        self.mods = mods::scan(&game.data_dir);
+        for path in paths {
+            let file = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let made = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|text| import::parse_shared(&String::from_utf8_lossy(&text), &game.settings.game_id)).and_then(|shared| {
+                let i = import::add_shared(&mut self.store, &shared)?;
+                Ok((i, shared))
+            });
+            let (i, shared) = match made {
+                Ok(x) => x,
+                Err(e) => {
+                    self.say(format!("{file}: {e:#}"));
+                    self.imports.message = Some((tr_args(self.lang, "ps.import_bad", &[&file, &format!("{e:#}")]), false));
+                    continue;
+                }
+            };
+            self.store.set_active(i);
+            self.ps_mod_filter.clear();
+            self.save();
+            let (playset, name) = (self.store.playsets[i].id.clone(), self.store.playsets[i].name.clone());
+            let want = shared.missing_steam(&self.mods);
+            self.say(format!("playset {name} made from {file}: {} mods, {} to get from the Workshop", shared.mods.len(), want.len()));
+            let job = ImportJob { playset, name, shared, want };
+            if job.want.is_empty() {
+                self.finish_import(job, Vec::new());
+            } else {
+                self.imports.waiting.push_back(job);
+            }
+        }
+        self.next_import();
+    }
+
+    fn next_import(&mut self) {
+        if self.imports.running.is_some() {
+            return;
+        }
+        let Some(job) = self.imports.waiting.pop_front() else { return };
+        let Ok(game) = self.game.clone() else { return };
+        let (tx, rx) = channel();
+        let want = job.want.clone();
+        std::thread::spawn(move || {
+            let progress = tx.clone();
+            let r = workshop::fetch(&game.dir, &want, &mut |p| {
+                let _ = progress.send(FetchMsg::Progress(p));
+            });
+            let _ = tx.send(FetchMsg::Done(r.map_err(|e| format!("{e:#}"))));
+        });
+        self.imports.progress = None;
+        self.imports.running = Some((job, rx));
+    }
+
+    /// What came down gets its descriptor, and the playset goes back to the file's order.
+    fn finish_import(&mut self, job: ImportJob, failed: Vec<(u64, String)>) {
+        if let Ok(g) = &self.game {
+            mods::sync_workshop(&g.data_dir);
+            self.mods = mods::scan(&g.data_dir);
+        }
+        self.acts.push(Act::RescanMods);
+        if let Some(p) = self.store.playsets.iter_mut().find(|p| p.id == job.playset) {
+            job.shared.apply(p);
+            self.save();
+        }
+        for (id, why) in &failed {
+            self.say(format!("{}: {} not got: {why}", job.name, job.shared.name_of(*id).unwrap_or_default()));
+        }
+        let pdx = job.shared.missing_pdx(&self.mods);
+        let pdx_names: Vec<&str> = pdx.iter().map(|m| m.display_name.as_str()).collect();
+        for n in &pdx_names {
+            self.say(format!("{}: {n} is a Paradox mod: subscribe to it in the official launcher", job.name));
+        }
+        let lacking = job.shared.missing_steam(&self.mods).len() + pdx.len();
+        let line = if lacking == 0 {
+            (tr_args(self.lang, "ps.import_done", &[&job.name]), true)
+        } else {
+            let why = failed.first().map(|f| f.1.clone()).unwrap_or_else(|| pdx_names.join(", "));
+            (tr_args(self.lang, "ps.import_some", &[&job.name, &lacking.to_string(), &why]), false)
+        };
+        self.say(line.0.clone());
+        self.imports.message = Some(line);
+    }
+
+    fn drain_imports(&mut self, ctx: &egui::Context) {
+        let mut done = None;
+        if let Some((_, rx)) = &self.imports.running {
+            ctx.request_repaint_after(Duration::from_millis(200));
+            loop {
+                match rx.try_recv() {
+                    Ok(FetchMsg::Progress(p)) => self.imports.progress = Some(p),
+                    Ok(FetchMsg::Done(r)) => {
+                        done = Some(r);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        done = Some(Err("the worker stopped".to_string()));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(r) = done {
+            if let Some((job, _)) = self.imports.running.take() {
+                self.imports.progress = None;
+                let failed = r.unwrap_or_else(|e| job.want.iter().map(|id| (*id, e.clone())).collect());
+                self.finish_import(job, failed);
+            }
+            self.next_import();
+        }
+    }
+
     fn apply(&mut self, ctx: &egui::Context, act: Act) {
         let active = self.store.active_index();
         match act {
@@ -1571,6 +1750,34 @@ impl App {
                     }
                 }
                 self.confirm_delete = None;
+            }
+            Act::AskImportFile => {
+                if let Some(files) = rfd::FileDialog::new().set_title(tr(self.lang, "ps.import_file")).add_filter("JSON", &["json"]).pick_files() {
+                    self.import_files(files);
+                }
+            }
+            Act::ImportFiles(files) => self.import_files(files),
+            Act::ExportPlayset(i) => {
+                let Some((name, text, local)) = self.exported(i) else { return };
+                let file: String = name.chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c }).collect();
+                let dialog = rfd::FileDialog::new().set_title(tr(self.lang, "ps.export")).set_file_name(format!("{file}.json")).add_filter("JSON", &["json"]);
+                if let Some(path) = dialog.save_file() {
+                    match std::fs::write(&path, text) {
+                        Ok(()) => {
+                            self.say(format!("exported {name} to {}", path.display()));
+                            self.imports.message = Some(self.exported_line("ps.export_done", &name, local));
+                        }
+                        Err(e) => {
+                            self.say(format!("could not write {}: {e}", path.display()));
+                            self.imports.message = Some((format!("{}: {e}", path.display()), false));
+                        }
+                    }
+                }
+            }
+            Act::CopyPlayset(i) => {
+                let Some((name, text, local)) = self.exported(i) else { return };
+                ctx.copy_text(text);
+                self.imports.message = Some(self.exported_line("ps.export_copied", &name, local));
             }
             Act::Import => {
                 self.import_official();
@@ -2240,9 +2447,10 @@ impl App {
                 theme::search_field(ui, &mut self.ps_filter, tr(lang, "mods.search"), w);
                 ui.add_space(8.0);
             }
-            // the playsets; the import from the official launcher at the foot
+            // the playsets; the imports at the foot
             let q = self.ps_filter.to_lowercase();
-            let list_h = (ui.available_height() - 44.0).max(60.0);
+            let import_line = self.imports.running.is_some() || self.imports.message.is_some();
+            let list_h = (ui.available_height() - if import_line { 124.0 } else { 84.0 }).max(60.0);
             let can_delete = self.store.playsets.len() > 1;
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.confirm_delete = None;
@@ -2327,6 +2535,12 @@ impl App {
                     if theme::menu_item(ui, tr(lang, "ps.rename"), false).clicked() {
                         acts.push(Act::AskRename(i));
                     }
+                    if theme::menu_item(ui, tr(lang, "ps.export"), false).clicked() {
+                        acts.push(Act::ExportPlayset(i));
+                    }
+                    if theme::menu_item(ui, tr(lang, "ps.export_copy"), false).clicked() {
+                        acts.push(Act::CopyPlayset(i));
+                    }
                     if can_delete && theme::menu_item(ui, tr(lang, "ps.delete"), false).clicked() {
                         acts.push(Act::AskDelete(i));
                     }
@@ -2336,7 +2550,27 @@ impl App {
                 }
             }
             ui.add_space(8.0);
+            if let Some((job, _)) = &self.imports.running {
+                let p = self.imports.progress;
+                let line = match p {
+                    Some(p) if p.downloading => tr_args(lang, "ps.import_downloading", &[&(p.index + 1).to_string(), &p.total.to_string(), job.shared.name_of(p.id).unwrap_or_default()]),
+                    Some(p) => tr_args(lang, "ps.import_subscribing", &[&(p.index + 1).to_string(), &p.total.to_string()]),
+                    None => tr_args(lang, "ps.import_subscribing", &["1", &job.want.len().to_string()]),
+                };
+                ui.add(egui::Label::new(RichText::new(line).size(12.0).color(SECONDARY)).truncate().selectable(false));
+                let frac = p.filter(|p| p.downloading).map(|p| {
+                    let item = if p.size > 0 { p.bytes as f32 / p.size as f32 } else { 0.0 };
+                    (p.index as f32 + item) / p.total.max(1) as f32
+                });
+                theme::progress_bar(ui, frac, ui.input(|i| i.time));
+            } else if let Some((line, ok)) = &self.imports.message {
+                let color = if *ok { SECONDARY } else { ORANGE };
+                ui.add(egui::Label::new(RichText::new(line).size(12.0).color(color)).truncate().selectable(false)).on_hover_text(line);
+            }
             ui.vertical_centered(|ui| {
+                if pill_button(ui, tr(lang, "ps.import_file"), ButtonStyle::Plain(BLUE), self.game.is_ok()).on_hover_text(tr(lang, "ps.import_file_hint")).clicked() {
+                    acts.push(Act::AskImportFile);
+                }
                 if pill_button(ui, tr(lang, "ps.import"), ButtonStyle::Plain(BLUE), self.game.is_ok()).clicked() {
                     acts.push(Act::Import);
                 }
@@ -3566,6 +3800,13 @@ impl eframe::App for App {
         self.drain_check(ctx);
         self.drain_upload();
         self.drain_updates();
+        self.drain_imports(ctx);
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        let dropped: Vec<PathBuf> = dropped.into_iter().filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json"))).collect();
+        if !dropped.is_empty() {
+            self.page = Page::Playsets;
+            self.acts.push(Act::ImportFiles(dropped));
+        }
         self.drain_index();
         self.drain_ironman();
         if self.ironman_rx.is_some() {

@@ -1,9 +1,10 @@
-//! Uploading a mod to the Steam Workshop, the way the official launcher and the game's own uploader do it: through the Steamworks API
+//! Subscribing to Workshop items, and uploading a mod to the Steam Workshop, the way the official launcher and the game's own uploader do it: through the Steamworks API
 //! (`steam_api64.dll`, which the game ships), as the Steam user who is logged in. Nothing here sees a password: Steam must be running and
 //! signed in, and it does the talking.
 //!
 //! The library is loaded from the game folder and its flat C functions are called by name; the interface versions are the ones that library
-//! exports (`SteamUGC016`, `SteamUtils010`, `SteamUser021`). Calls that answer later (create, submit) are polled with `IsAPICallCompleted`.
+//! exports (`SteamUGC016`, `SteamUtils010`, `SteamUser021`), or `Session::open`'s older set. Calls that answer later (create, submit) are
+//! polled with `IsAPICallCompleted`.
 
 use crate::{bail, Context, Result};
 use std::ffi::{c_char, c_void, CString};
@@ -136,6 +137,13 @@ struct SubmitItemUpdateResult {
 }
 
 #[repr(C)]
+#[derive(Default)]
+struct SubscribeResult {
+    result: i32,
+    id: u64,
+}
+
+#[repr(C)]
 struct ParamStringArray {
     strings: *const *const c_char,
     count: i32,
@@ -253,6 +261,7 @@ pub fn eresult_name(r: i32) -> &'static str {
     }
 }
 
+const REMOTE_STORAGE_SUBSCRIBE_RESULT: i32 = 1313;
 const CREATE_ITEM_RESULT: i32 = 3403;
 const SUBMIT_ITEM_UPDATE_RESULT: i32 = 3404;
 
@@ -281,7 +290,9 @@ struct Api {
 
 impl Api {
     fn load(game_dir: &Path) -> Result<Api> {
-        let dll = game_dir.join("steam_api64.dll");
+        // a wrapper in the game folder keeps the real library under this name, and need not pass on everything used here
+        let original = game_dir.join("steam_api64_o.dll");
+        let dll = if original.is_file() { original } else { game_dir.join("steam_api64.dll") };
         if !dll.is_file() {
             bail!("{} is missing (the Workshop needs the Steam version of the game)", dll.display());
         }
@@ -335,11 +346,23 @@ impl Session {
             if !init() {
                 bail!("the Steam API did not start: Steam must be running and signed in to an account that owns Stellaris");
             }
-            let utils: unsafe extern "C" fn() -> *mut c_void = api.f("SteamAPI_SteamUtils_v010")?;
-            let ugc: unsafe extern "C" fn() -> *mut c_void = api.f("SteamAPI_SteamUGC_v016")?;
-            let user: unsafe extern "C" fn() -> *mut c_void = api.f("SteamAPI_SteamUser_v021")?;
+            let (utils, ugc, user) = match api.f::<unsafe extern "C" fn() -> *mut c_void>("SteamAPI_SteamUtils_v010") {
+                Ok(utils) => {
+                    let ugc: unsafe extern "C" fn() -> *mut c_void = api.f("SteamAPI_SteamUGC_v016")?;
+                    let user: unsafe extern "C" fn() -> *mut c_void = api.f("SteamAPI_SteamUser_v021")?;
+                    (utils(), ugc(), user())
+                }
+                // a 2019 library, the one a wrapper may keep: its flat functions fit these versions and no others (a later ISteamUGC has other
+                // methods in those slots), and it has no functions that hand out the interfaces
+                Err(_) => {
+                    let h_user: unsafe extern "C" fn() -> i32 = api.f("SteamAPI_GetHSteamUser")?;
+                    let find: unsafe extern "C" fn(i32, *const c_char) -> *mut c_void = api.f("SteamInternal_FindOrCreateUserInterface")?;
+                    let h = h_user();
+                    (find(h, c"SteamUtils009".as_ptr()), find(h, c"STEAMUGC_INTERFACE_VERSION013".as_ptr()), find(h, c"SteamUser020".as_ptr()))
+                }
+            };
             let run_callbacks = api.f("SteamAPI_RunCallbacks")?;
-            let s = Session { utils: utils(), ugc: ugc(), user: user(), run_callbacks, api };
+            let s = Session { utils, ugc, user, run_callbacks, api };
             if s.utils.is_null() || s.ugc.is_null() || s.user.is_null() {
                 bail!("the Steam API started but did not give its interfaces");
             }
@@ -572,6 +595,97 @@ fn query_details(s: &Session, id: u64) -> Result<ItemDetails> {
     }
 }
 
+// `EItemState`
+const STATE_SUBSCRIBED: u32 = 1;
+const STATE_INSTALLED: u32 = 4;
+const STATE_NEEDS_UPDATE: u32 = 8;
+const STATE_DOWNLOADING: u32 = 16;
+const STATE_DOWNLOAD_PENDING: u32 = 32;
+
+/// How long an item may show no movement at all before it is given up on.
+const FETCH_STALL: Duration = Duration::from_secs(300);
+
+/// How `fetch` is getting on: item `index` (from 0) of `total`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FetchProgress {
+    pub downloading: bool,
+    pub index: usize,
+    pub total: usize,
+    pub id: u64,
+    pub bytes: u64,
+    pub size: u64,
+}
+
+fn is_ready(state: u32) -> bool {
+    state & STATE_INSTALLED != 0 && state & (STATE_NEEDS_UPDATE | STATE_DOWNLOADING | STATE_DOWNLOAD_PENDING) == 0
+}
+
+/// Subscribes the signed-in Steam user to the items and has Steam download them, one at a time. Returns the items that did not make it, with
+/// why. When Steam stops moving (its downloads are paused, say) the rest stay in its queue and are reported, not waited for one by one.
+pub fn fetch(game_dir: &Path, ids: &[u64], progress: &mut dyn FnMut(FetchProgress)) -> Result<Vec<(u64, String)>> {
+    let _one = STEAM.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::open(game_dir)?;
+    let mut failed = Vec::new();
+    let mut subscribed = Vec::new();
+    unsafe {
+        let subscribe: unsafe extern "C" fn(*mut c_void, u64) -> u64 = s.api.f("SteamAPI_ISteamUGC_SubscribeItem")?;
+        let state: unsafe extern "C" fn(*mut c_void, u64) -> u32 = s.api.f("SteamAPI_ISteamUGC_GetItemState")?;
+        let download: unsafe extern "C" fn(*mut c_void, u64, bool) -> bool = s.api.f("SteamAPI_ISteamUGC_DownloadItem")?;
+        let info: unsafe extern "C" fn(*mut c_void, u64, *mut u64, *mut u64) -> bool = s.api.f("SteamAPI_ISteamUGC_GetItemDownloadInfo")?;
+        for (index, &id) in ids.iter().enumerate() {
+            progress(FetchProgress { downloading: false, index, total: ids.len(), id, bytes: 0, size: 0 });
+            if state(s.ugc, id) & STATE_SUBSCRIBED != 0 {
+                subscribed.push(id);
+                continue;
+            }
+            let r: Result<SubscribeResult> = s.wait(subscribe(s.ugc, id), REMOTE_STORAGE_SUBSCRIBE_RESULT, Duration::from_secs(30), || {});
+            match r {
+                Ok(r) if r.result == 1 => subscribed.push(id),
+                Ok(r) if r.result == 9 => failed.push((id, "there is no such Workshop item (it may have been removed)".to_string())),
+                Ok(r) => failed.push((id, result_text(r.result))),
+                Err(e) => failed.push((id, format!("{e:#}"))),
+            }
+        }
+        let mut stalled = false;
+        for (index, &id) in subscribed.iter().enumerate() {
+            if stalled {
+                failed.push((id, "still in Steam's download queue".to_string()));
+                continue;
+            }
+            if is_ready(state(s.ugc, id)) {
+                continue;
+            }
+            if !download(s.ugc, id, true) {
+                failed.push((id, "Steam would not download it".to_string()));
+                continue;
+            }
+            let mut seen = (0u32, 0u64);
+            let mut moved = Instant::now();
+            loop {
+                (s.run_callbacks)();
+                let st = state(s.ugc, id);
+                if is_ready(st) {
+                    break;
+                }
+                let (mut bytes, mut size) = (0u64, 0u64);
+                info(s.ugc, id, &mut bytes, &mut size);
+                progress(FetchProgress { downloading: true, index, total: subscribed.len(), id, bytes, size });
+                if (st, bytes) != seen {
+                    seen = (st, bytes);
+                    moved = Instant::now();
+                }
+                if moved.elapsed() > FETCH_STALL {
+                    stalled = true;
+                    failed.push((id, "Steam stopped downloading it; it stays in Steam's queue".to_string()));
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+    Ok(failed)
+}
+
 /// What Steam's client says about an item (the owner sees private items too).
 pub fn details(game_dir: &Path, id: u64) -> Result<ItemDetails> {
     let _one = STEAM.lock().unwrap_or_else(|e| e.into_inner());
@@ -598,6 +712,16 @@ mod tests {
         assert_eq!(std::mem::size_of::<SubmitItemUpdateResult>(), 16);
         assert_eq!(std::mem::offset_of!(SubmitItemUpdateResult, id), 8);
         assert_eq!(std::mem::offset_of!(CreateItemResult, needs_agreement), 16);
+        assert_eq!(std::mem::size_of::<SubscribeResult>(), 16);
+        assert_eq!(std::mem::offset_of!(SubscribeResult, id), 8);
+    }
+
+    #[test]
+    fn an_item_is_ready_when_nothing_is_left_to_do() {
+        assert!(is_ready(STATE_SUBSCRIBED | STATE_INSTALLED));
+        assert!(!is_ready(STATE_SUBSCRIBED));
+        assert!(!is_ready(STATE_SUBSCRIBED | STATE_INSTALLED | STATE_NEEDS_UPDATE));
+        assert!(!is_ready(STATE_SUBSCRIBED | STATE_INSTALLED | STATE_DOWNLOADING));
     }
 
     #[test]

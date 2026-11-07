@@ -150,6 +150,21 @@ enum PlaysetCmd {
     Remove { name: String },
     /// give a playset another name
     Rename { name: String, new_name: String },
+    /// make a playset from a JSON file of the official launcher, subscribe to the Workshop mods missing here and download them
+    Import {
+        file: PathBuf,
+        /// only make the playset
+        #[arg(long)]
+        no_download: bool,
+    },
+    /// write a playset as a JSON file the official launcher and this one import (local mods are left out)
+    Export {
+        /// the playset; the active one by default
+        name: Option<String>,
+        /// the file; printed when not given
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// add mods to the end of the active playset (by name or descriptor)
     Add { mods: Vec<String> },
     /// take mods out of the active playset
@@ -396,6 +411,58 @@ fn run() -> Result<()> {
                     store.remove_playset(i)?;
                     store.save()?;
                     println!("removed {n}");
+                }
+                PlaysetCmd::Import { file, no_download } => {
+                    use stl_core::import;
+                    let g = game.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                    let text = std::fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
+                    let shared = import::parse_shared(&String::from_utf8_lossy(&text), &g.settings.game_id)?;
+                    mods::sync_workshop(&g.data_dir);
+                    let here = mods::scan(&g.data_dir);
+                    let i = import::add_shared(&mut store, &shared)?;
+                    store.set_active(i);
+                    store.save()?;
+                    let want = shared.missing_steam(&here);
+                    println!("{}: {} mods, {} missing from the Workshop", store.playsets[i].name, shared.mods.len(), want.len());
+                    if !want.is_empty() && !no_download {
+                        let mut shown = None;
+                        let failed = stl_core::workshop::fetch(&g.dir, &want, &mut |p| {
+                            if shown != Some((p.downloading, p.index)) {
+                                shown = Some((p.downloading, p.index));
+                                println!("{} {}/{} {}", if p.downloading { "downloading" } else { "subscribing" }, p.index + 1, p.total, shared.name_of(p.id).unwrap_or_default());
+                            }
+                        })?;
+                        for (id, why) in failed {
+                            println!("not got: {} ({why})", shared.name_of(id).unwrap_or_default());
+                        }
+                    }
+                    // what came down is a mod now; the playset is the file's, in the file's order
+                    mods::sync_workshop(&g.data_dir);
+                    let here = mods::scan(&g.data_dir);
+                    shared.apply(&mut store.playsets[i]);
+                    store.save()?;
+                    for m in shared.missing_pdx(&here) {
+                        println!("not got: {} (a Paradox mod: subscribe to it in the official launcher)", m.display_name);
+                    }
+                    println!("{} of {} mods are here", shared.mods.len() - shared.missing_steam(&here).len() - shared.missing_pdx(&here).len(), shared.mods.len());
+                }
+                PlaysetCmd::Export { name, out } => {
+                    let g = game.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                    let i = match name {
+                        Some(n) => store.find(n).with_context(|| format!("no playset called {n}"))?,
+                        None => store.active_index(),
+                    };
+                    let (text, local) = stl_core::import::export_shared(&store.playsets[i], &known, &g.settings.game_id);
+                    match out {
+                        Some(f) => {
+                            std::fs::write(f, text).with_context(|| format!("cannot write {}", f.display()))?;
+                            println!("wrote {}", f.display());
+                        }
+                        None => println!("{text}"),
+                    }
+                    for n in local {
+                        eprintln!("left out, a local mod: {n}");
+                    }
                 }
                 PlaysetCmd::Rename { name, new_name } => {
                     let i = store.find(name).with_context(|| format!("no playset called {name}"))?;
