@@ -50,6 +50,22 @@ pub fn http_get(url: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>>
     request("GET", url, None, timeout_ms, max_bytes)
 }
 
+/// GETs every URL at once; the answers in the order they arrived, each with the index of its URL. For mirrors: the first good answer
+/// comes from the one nearest (or least busy) for this user.
+pub fn http_get_all(urls: &[String], timeout_ms: i32, max_bytes: usize) -> Vec<(usize, Result<Vec<u8>>)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        for (i, url) in urls.iter().enumerate() {
+            let tx = tx.clone();
+            s.spawn(move || {
+                let _ = tx.send((i, http_get(url, timeout_ms, max_bytes)));
+            });
+        }
+    });
+    drop(tx);
+    rx.into_iter().collect()
+}
+
 /// POSTs a form (`a=1&b=2`, already encoded) and returns the body of a 200 answer.
 pub fn http_post_form(url: &str, form: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>> {
     request("POST", url, Some(form.as_bytes()), timeout_ms, max_bytes)

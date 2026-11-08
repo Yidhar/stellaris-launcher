@@ -3,10 +3,11 @@
 //! asset of its own repository) and the zip's SHA-256; installing downloads it, insists on that SHA-256, checks that the zip is that plugin,
 //! and installs it like any plugin folder (the user's `config` kept). The launcher reads the indexes the store names, or the default one.
 //!
-//! The default index is read from its mirror first (`MIRROR_INDEX`, Cloudflare R2): the index repository's CI copies every plugin zip there
-//! and publishes the index with `download` pointing at the copy and `fallback` at the GitHub release asset, signed with a key only that CI
-//! holds (`INDEX_KEY` is its public half). An index that does not verify is not used; then GitHub's copy is read as before. A download is
-//! tried from `download`, then `fallback`, and must match the index's SHA-256 either way.
+//! The default index is read from its mirrors first (`MIRROR_INDEXES`: a Hong Kong server for mainland China that caches Cloudflare R2,
+//! and R2 itself, asked at once): the index repository's CI copies every plugin zip to R2 and publishes the index with `download` pointing
+//! at the copy and `fallback` at the GitHub release asset, signed with a key only that CI holds (`INDEX_KEY` is its public half). An index
+//! that does not verify is not used; when none does, GitHub's copy is read as before. Each plugin is taken at the newest version an index
+//! offers, and downloaded from the mirrors in the order they answered (`Entry::sources`), then `fallback`; it must match the SHA-256.
 
 use crate::game::Game;
 use crate::plugins::{self, Plugin};
@@ -17,18 +18,61 @@ use std::time::{Duration, Instant};
 
 /// The index the launcher reads when the store names none.
 pub const DEFAULT_INDEX: &str = "https://raw.githubusercontent.com/Yidhar/stellaris-plugins/main/plugins.jsonl";
-/// The mirror's signed copy of the default index.
-pub const MIRROR_INDEX: &str = "https://plugins.stellarismod.com/index.json";
+/// The mirrors' signed copies of the default index.
+pub const MIRROR_INDEXES: [&str; 2] = ["https://dl-cn.stellarismod.com/plugins/index.json", "https://plugins.stellarismod.com/index.json"];
+/// Where the signed index says the zips are; another mirror has them at the same path under its own folder.
+const PLUGINS_ORIGIN: &str = "https://plugins.stellarismod.com/";
 /// The public key the mirror's index must be signed with (the private half is a secret of the index repository's CI).
 const INDEX_KEY: &str = "3d5253f5b943d0e56325af7e150e1c39d0a80982f14bc241401bb1baf224d2ef";
 const INDEX_PRODUCT: &str = "stellaris-plugins";
 
-/// The mirror's index, unless `STL_PLUGIN_MIRROR=off` (or another URL for it).
-pub fn mirror_index() -> Option<String> {
+/// The mirrors' indexes (`STL_PLUGIN_MIRROR`: others, separated by commas, or `off` for none).
+pub fn mirror_indexes() -> Vec<String> {
     match std::env::var("STL_PLUGIN_MIRROR") {
-        Ok(s) if s.trim().eq_ignore_ascii_case("off") => None,
-        Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        _ => Some(MIRROR_INDEX.to_string()),
+        Ok(s) if s.trim().eq_ignore_ascii_case("off") => Vec::new(),
+        Ok(s) if !s.trim().is_empty() => s.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect(),
+        _ => MIRROR_INDEXES.iter().map(|m| m.to_string()).collect(),
+    }
+}
+
+/// The plugins of the mirrors' indexes (`(index URL, its plugins)`, in the order they answered): each at the newest version any of them
+/// offers, its copies on those mirrors first (`mirrors`), in that order.
+fn merge(answers: Vec<(String, Vec<Entry>)>) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    for (_, entries) in &answers {
+        for e in entries {
+            match out.iter_mut().find(|x| x.id == e.id) {
+                Some(x) if updates::newer(&e.version, &x.version) => *x = e.clone(),
+                Some(_) => {}
+                None => out.push(e.clone()),
+            }
+        }
+    }
+    for e in &mut out {
+        let Some(rest) = e.download.strip_prefix(PLUGINS_ORIGIN).map(str::to_string) else { continue };
+        for (url, entries) in &answers {
+            let same = entries.iter().any(|x| x.id == e.id && x.version == e.version && x.sha256.eq_ignore_ascii_case(&e.sha256));
+            let dir = url.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            // the origin's own index gives the download itself back, so it takes its place in the order too
+            let copy = format!("{dir}/{rest}");
+            if same && dir.starts_with("https://") && !e.mirrors.contains(&copy) {
+                e.mirrors.push(copy);
+            }
+        }
+    }
+    out
+}
+
+impl Entry {
+    /// Where to download it from, in order: the mirrors' copies, the index's `download`, its `fallback`.
+    pub fn sources(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for u in self.mirrors.iter().chain(std::iter::once(&self.download)).chain(self.fallback.iter()) {
+            if !out.contains(u) {
+                out.push(u.clone());
+            }
+        }
+        out
     }
 }
 
@@ -49,20 +93,34 @@ fn read_mirror(text: &str, key: &ed25519_dalek::VerifyingKey) -> Result<Vec<Entr
     Ok(entries.into_iter().filter(|e| e.fallback.as_deref().map_or(true, |f| f.starts_with("https://"))).collect())
 }
 
-static MIRRORED: Mutex<Option<(Instant, String, Vec<Entry>)>> = Mutex::new(None);
+static MIRRORED: Mutex<Option<(Instant, Vec<String>, Vec<Entry>)>> = Mutex::new(None);
 
-/// The mirror's index, read at most every five minutes (plugin update checks ask for it once per plugin).
+/// The mirrors' index, read at most every five minutes (plugin update checks ask for it once per plugin).
 pub fn fetch_mirror() -> Result<Vec<Entry>> {
-    let url = mirror_index().context("the plugin mirror is switched off")?;
+    let urls = mirror_indexes();
+    if urls.is_empty() {
+        bail!("the plugin mirrors are switched off");
+    }
     if let Some((at, u, entries)) = MIRRORED.lock().ok().and_then(|g| g.clone()) {
-        if u == url && at.elapsed() < Duration::from_secs(300) {
+        if u == urls && at.elapsed() < Duration::from_secs(300) {
             return Ok(entries);
         }
     }
-    let body = net::http_get(&url, 20_000, 8 << 20).with_context(|| format!("cannot read {url}"))?;
-    let entries = read_mirror(&String::from_utf8_lossy(&body), &signed::key(INDEX_KEY).context("INDEX_KEY")?)?;
+    let key = signed::key(INDEX_KEY).context("INDEX_KEY")?;
+    let mut good = Vec::new();
+    let mut errors = Vec::new();
+    for (i, answer) in net::http_get_all(&urls, 20_000, 8 << 20) {
+        match answer.and_then(|body| read_mirror(&String::from_utf8_lossy(&body), &key)) {
+            Ok(entries) => good.push((urls[i].clone(), entries)),
+            Err(e) => errors.push(format!("{}: {e:#}", urls[i])),
+        }
+    }
+    if good.is_empty() {
+        bail!("no plugin mirror answered: {}", errors.join("; "));
+    }
+    let entries = merge(good);
     if let Ok(mut g) = MIRRORED.lock() {
-        *g = Some((Instant::now(), url, entries.clone()));
+        *g = Some((Instant::now(), urls, entries.clone()));
     }
     Ok(entries)
 }
@@ -98,6 +156,9 @@ pub struct Entry {
     /// where else the same zip is (the mirror's index: the GitHub release asset)
     #[serde(default)]
     pub fallback: Option<String>,
+    /// copies on the mirrors, to try first (in the order the mirrors answered)
+    #[serde(skip)]
+    pub mirrors: Vec<String>,
     /// the index it came from
     #[serde(skip)]
     pub index: String,
@@ -214,7 +275,8 @@ pub fn indexes(configured: Option<&Vec<String>>) -> Vec<String> {
 
 /// Downloads a plugin of an index, checks it, and installs it (over an older version: the user's settings kept).
 pub fn install(e: &Entry) -> Result<Plugin> {
-    let urls: Vec<&str> = std::iter::once(e.download.as_str()).chain(e.fallback.as_deref()).collect();
+    let sources = e.sources();
+    let urls: Vec<&str> = sources.iter().map(String::as_str).collect();
     let bytes = updates::download_checked(&urls, &e.sha256, &e.id)?;
     let tmp = std::env::temp_dir().join(format!("stl-get-{}-{}", e.id, std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -257,6 +319,36 @@ mod tests {
         assert_eq!(entries[0].game_builds, vec!["0x6ABEAA3F"]);
         assert_eq!(indexes(None), vec![DEFAULT_INDEX.to_string()]);
         assert_eq!(indexes(Some(&vec![])), Vec::<String>::new());
+    }
+
+    #[test]
+    fn merges_the_mirrors_indexes_newest_first_and_orders_the_copies() {
+        let e = |id: &str, v: &str| Entry {
+            id: id.into(),
+            version: v.into(),
+            sha256: v.repeat(64 / v.len() + 1)[..64].to_string(),
+            download: format!("{PLUGINS_ORIGIN}{id}/v{v}/{id}.zip"),
+            fallback: Some(format!("https://github.com/x/{id}/releases/download/v{v}/{id}.zip")),
+            ..Default::default()
+        };
+        let cn = "https://cn.example/plugins/index.json".to_string();
+        let r2 = format!("{PLUGINS_ORIGIN}index.json");
+        // Hong Kong answered first; its cache has a older but not b's new version
+        let got = merge(vec![(cn.clone(), vec![e("a", "1.0"), e("b", "1.0")]), (r2.clone(), vec![e("a", "1.0"), e("b", "2.0")])]);
+        let a = got.iter().find(|x| x.id == "a").unwrap();
+        assert_eq!(a.sources(), vec![
+            "https://cn.example/plugins/a/v1.0/a.zip".to_string(),
+            format!("{PLUGINS_ORIGIN}a/v1.0/a.zip"),
+            "https://github.com/x/a/releases/download/v1.0/a.zip".to_string(),
+        ]);
+        let b = got.iter().find(|x| x.id == "b").unwrap();
+        assert_eq!(b.version, "2.0", "the newer version wins");
+        assert_eq!(b.sources()[0], format!("{PLUGINS_ORIGIN}b/v2.0/b.zip"), "Hong Kong does not have 2.0 yet");
+        assert_eq!(b.sources().len(), 2);
+        // R2 answered first
+        let got = merge(vec![(r2, vec![e("a", "1.0")]), (cn, vec![e("a", "1.0")])]);
+        assert_eq!(got[0].sources()[0], format!("{PLUGINS_ORIGIN}a/v1.0/a.zip"));
+        assert_eq!(got[0].sources()[1], "https://cn.example/plugins/a/v1.0/a.zip");
     }
 
     #[test]

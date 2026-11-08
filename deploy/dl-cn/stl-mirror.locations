@@ -1,0 +1,53 @@
+# The mirror's locations, included by the server block (dl-cn.conf). Only these two folders are passed on, GET/HEAD only:
+#   /launcher/...  ->  https://dl.stellarismod.com/launcher/...      (the launcher's releases, R2 bucket stellaris-modswiki)
+#   /plugins/...   ->  https://plugins.stellarismod.com/...          (the plugins, R2 bucket stellaris-plugins)
+# Everything there is signed or checked against a signed SHA-256 by the launcher, so this server is trusted with nothing: it only makes
+# the bytes nearer to mainland China. How long a file is kept follows R2's Cache-Control: a year for versioned files (they never
+# change), 60 s for launcher/latest.json and 300 s for plugins/index.json. When R2 cannot be reached, what is cached is served stale.
+
+limit_req zone=stl_mirror_req burst=40 nodelay;
+limit_conn stl_mirror_conn 8;
+
+proxy_cache stl_mirror;
+proxy_cache_key $uri;
+proxy_cache_lock on;
+proxy_cache_lock_timeout 60s;
+proxy_cache_revalidate on;
+proxy_cache_background_update on;
+proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+proxy_cache_valid 404 1m;
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+proxy_set_header User-Agent "stellarismod-dl-cn";
+proxy_set_header Cookie "";
+proxy_hide_header Set-Cookie;
+proxy_ignore_headers Set-Cookie;
+proxy_ssl_server_name on;
+proxy_ssl_verify on;
+proxy_ssl_verify_depth 3;
+proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+proxy_connect_timeout 10s;
+proxy_read_timeout 60s;
+add_header X-Cache-Status $upstream_cache_status always;
+
+location /launcher/ {
+    limit_except GET HEAD { deny all; }
+    proxy_set_header Host dl.stellarismod.com;
+    proxy_ssl_name dl.stellarismod.com;
+    proxy_pass https://dl.stellarismod.com;
+}
+
+location /plugins/ {
+    limit_except GET HEAD { deny all; }
+    proxy_set_header Host plugins.stellarismod.com;
+    proxy_ssl_name plugins.stellarismod.com;
+    proxy_pass https://plugins.stellarismod.com/;
+}
+
+location = /robots.txt {
+    return 200 "User-agent: *\nDisallow: /\n";
+}
+
+location / {
+    return 404;
+}

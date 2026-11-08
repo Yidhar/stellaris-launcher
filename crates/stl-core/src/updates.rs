@@ -31,8 +31,8 @@ pub struct Available {
     pub checksum: Option<String>,
     /// the SHA-256 the download must have (from the mirror's signed index)
     pub sha256: Option<String>,
-    /// where else the same zip is
-    pub fallback: Option<String>,
+    /// other places with the same zip, tried in order when the first fails
+    pub alternates: Vec<String>,
 }
 
 /// The first of `urls` whose download has the SHA-256 `sha256`; the errors of all of them otherwise.
@@ -45,7 +45,7 @@ pub fn download_checked(urls: &[&str], sha256: &str, what: &str) -> Result<Vec<u
                 if got.eq_ignore_ascii_case(sha256.trim()) {
                     return Ok(bytes);
                 }
-                errors.push(format!("{url} does not match the index's SHA-256 (expected {sha256}, got {got})"));
+                errors.push(format!("{url} does not match the expected SHA-256 (expected {sha256}, got {got})"));
             }
             Err(e) => errors.push(format!("cannot download {url}: {e:#}")),
         }
@@ -135,8 +135,10 @@ pub fn check(p: &Plugin) -> Result<Option<Available>> {
             return Ok(None);
         }
         let name = e.download.rsplit('/').next().unwrap_or("").to_string();
+        let mut sources = e.sources().into_iter();
+        let first = sources.next().unwrap_or_else(|| e.download.clone());
         let release = Release { tag: format!("v{}", e.version), version: e.version.clone(), page: e.page().to_string(), notes: String::new(), prerelease: false, assets: Vec::new() };
-        return Ok(Some(Available { release, asset: (name, e.download.clone()), checksum: None, sha256: Some(e.sha256.clone()), fallback: e.fallback.clone() }));
+        return Ok(Some(Available { release, asset: (name, first), checksum: None, sha256: Some(e.sha256.clone()), alternates: sources.collect() }));
     }
     let release = latest_release(&repo)?;
     if !newer(&release.version, &p.manifest.version) {
@@ -146,7 +148,7 @@ pub fn check(p: &Plugin) -> Result<Option<Available>> {
     let asset = release.assets.iter().find(|(n, _)| n.to_lowercase().ends_with(".zip") && wildcard(&pattern, n)).cloned()
         .with_context(|| format!("release {} of {repo} has no zip matching {pattern}", release.tag))?;
     let checksum = release.assets.iter().find(|(n, _)| n.eq_ignore_ascii_case(&format!("{}.sha256", asset.0))).map(|(_, u)| u.clone());
-    Ok(Some(Available { release, asset, checksum, sha256: None, fallback: None }))
+    Ok(Some(Available { release, asset, checksum, sha256: None, alternates: Vec::new() }))
 }
 
 /// The folder in an unpacked zip that holds `stl-plugin.json`: the root, or a single folder inside it.
@@ -184,7 +186,7 @@ pub fn apply(p: &Plugin, a: &Available) -> Result<Plugin> {
     }
     let bytes = match &a.sha256 {
         Some(sha) => {
-            let urls: Vec<&str> = std::iter::once(a.asset.1.as_str()).chain(a.fallback.as_deref()).collect();
+            let urls: Vec<&str> = std::iter::once(a.asset.1.as_str()).chain(a.alternates.iter().map(String::as_str)).collect();
             download_checked(&urls, sha, &a.asset.0)?
         }
         None => net::http_get(&a.asset.1, 60_000, 512 << 20).with_context(|| format!("cannot download {}", a.asset.0))?,

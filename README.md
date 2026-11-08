@@ -32,7 +32,8 @@ stl self-update [--check]               update the launcher from its mirror or G
 ```
 
 **Updates.** The window looks for a newer release of the launcher when it starts (and every six hours while it runs): first on its mirror,
-`https://dl.stellarismod.com/launcher/`, whose manifest must carry the launcher's release signature (an Ed25519 key that only the release
+`https://dl.stellarismod.com/launcher/` and its copy for mainland China, `https://dl-cn.stellarismod.com/launcher/` (both asked at once,
+the first good answer used; `deploy/dl-cn/`), whose manifest must carry the launcher's release signature (an Ed25519 key that only the release
 machine holds, so the mirror can serve files but cannot make an update), then, when the mirror cannot be reached, on GitHub. It downloads the
 release in the background, checks it against the SHA-256 in the signed manifest (or the `.sha256` published beside the zip on GitHub) and keeps
 it in `%APPDATA%\stellaris-launcher\update`. A button in the title

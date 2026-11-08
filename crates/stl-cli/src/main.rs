@@ -808,7 +808,7 @@ fn run() -> Result<()> {
         Cmd::SelfUpdate { check } => {
             use stl_core::selfupdate as su;
             stl_core::selfupdate::cleanup();
-            println!("stellaris-launcher {} (releases: {}, else github.com/{})", su::current_version(), su::mirror().unwrap_or_else(|| "no mirror".into()), su::repo());
+            println!("stellaris-launcher {} (releases: {}, else github.com/{})", su::current_version(), { let m = su::mirrors(); if m.is_empty() { "no mirror".to_string() } else { m.join(", ") } }, su::repo());
             let staged = match su::staged() {
                 Some(s) => s,
                 None => match su::check()? {
@@ -956,7 +956,7 @@ fn run() -> Result<()> {
                         println!("note: {} is made for another game version{}", e.id, v.map(|v| format!(" ({v})")).unwrap_or_default());
                     }
                 }
-                println!("downloading {} {} from {}", e.id, e.version, e.download);
+                println!("downloading {} {} from {}", e.id, e.version, e.sources().join(", then "));
                 let p = idx::install(e)?;
                 println!("installed {} {} into {}", p.manifest.id, p.manifest.version, p.dir.display());
                 println!("load it with: stl plugin enable {}", p.manifest.id);
