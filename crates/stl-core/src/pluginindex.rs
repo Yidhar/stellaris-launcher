@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 /// The index the launcher reads when the store names none.
 pub const DEFAULT_INDEX: &str = "https://raw.githubusercontent.com/Yidhar/stellaris-plugins/main/plugins.jsonl";
 /// The mirror's signed copy of the default index.
-pub const MIRROR_INDEX: &str = "https://dl.stellarismod.com/plugins/index.json";
+pub const MIRROR_INDEX: &str = "https://plugins.stellarismod.com/index.json";
 /// The public key the mirror's index must be signed with (the private half is a secret of the index repository's CI).
 const INDEX_KEY: &str = "3d5253f5b943d0e56325af7e150e1c39d0a80982f14bc241401bb1baf224d2ef";
 const INDEX_PRODUCT: &str = "stellaris-plugins";
