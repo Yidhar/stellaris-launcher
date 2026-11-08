@@ -3,10 +3,14 @@
 //! is sent, and cookies are not kept.
 
 use crate::{bail, Context, Result};
+#[cfg(windows)]
 use std::ffi::OsStr;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
 use windows_sys::Win32::Networking::WinHttp::*;
 
+#[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
@@ -34,7 +38,9 @@ pub fn split_url(url: &str) -> Result<(bool, String, u16, String)> {
     Ok((secure, host.to_string(), port, path.to_string()))
 }
 
+#[cfg(windows)]
 struct Handle(*mut core::ffi::c_void);
+#[cfg(windows)]
 impl Drop for Handle {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -82,6 +88,14 @@ pub fn form_encode(v: &str) -> String {
         .collect()
 }
 
+/// Outside Windows there is no client: every request fails (the wiki's server only parses, it never fetches through here).
+#[cfg(not(windows))]
+fn request(_method: &str, url: &str, _form: Option<&[u8]>, _timeout_ms: i32, _max_bytes: usize) -> Result<Vec<u8>> {
+    split_url(url)?;
+    bail!("HTTP requests need WinHTTP, which only Windows has")
+}
+
+#[cfg(windows)]
 fn request(method: &str, url: &str, form: Option<&[u8]>, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>> {
     let (secure, host, port, path) = split_url(url)?;
     unsafe {

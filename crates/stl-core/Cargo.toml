@@ -12,6 +12,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 ed25519-dalek = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# the launcher is a Windows program; the parsers (mods, plugins, playsets, the plugin index) also build elsewhere, e.g. for the wiki's server
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging",

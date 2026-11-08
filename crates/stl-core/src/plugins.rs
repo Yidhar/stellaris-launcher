@@ -490,6 +490,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn a_held_file_leaves_the_installed_folder_untouched() {
         use std::os::windows::fs::OpenOptionsExt;
         let root = std::env::temp_dir().join(format!("stl-test-swap-{}", std::process::id()));

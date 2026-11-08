@@ -4,6 +4,7 @@ use crate::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// `Documents`, wherever Windows has put it (it can be redirected, e.g. to OneDrive).
+#[cfg(windows)]
 pub fn documents_dir() -> Result<PathBuf> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
@@ -23,6 +24,13 @@ pub fn documents_dir() -> Result<PathBuf> {
     }
 }
 
+/// `~/Documents` (not Windows: no known-folder API).
+#[cfg(not(windows))]
+pub fn documents_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("$HOME is not set")?;
+    Ok(PathBuf::from(home).join("Documents"))
+}
+
 /// Our own data: `%APPDATA%\stellaris-launcher` (settings, playsets, plugins, logs).
 pub fn app_data_dir() -> Result<PathBuf> {
     let base = std::env::var_os("APPDATA").context("%APPDATA% is not set")?;
@@ -31,6 +39,7 @@ pub fn app_data_dir() -> Result<PathBuf> {
 
 /// A string value from the registry (`HKEY_CURRENT_USER` or `HKEY_LOCAL_MACHINE`), read through the API: no `reg.exe`, which as a console
 /// program flashed a console window every time the windowed launcher started it.
+#[cfg(windows)]
 fn registry_string(local_machine: bool, key: &str, value: &str) -> Option<String> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
@@ -45,6 +54,12 @@ fn registry_string(local_machine: bool, key: &str, value: &str) -> Option<String
     let len = (bytes as usize / 2).min(buf.len());
     let s = String::from_utf16_lossy(&buf[..len]).trim_end_matches('\0').to_string();
     (!s.is_empty()).then_some(s)
+}
+
+/// No registry outside Windows.
+#[cfg(not(windows))]
+fn registry_string(_local_machine: bool, _key: &str, _value: &str) -> Option<String> {
+    None
 }
 
 /// Steam's own folder (its logs are under it).
