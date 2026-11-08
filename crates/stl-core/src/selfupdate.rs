@@ -15,7 +15,7 @@
 //! `STL_UPDATE_REPO` and `STL_UPDATE_API` point the check somewhere else (a local server standing in for the mirror or GitHub).
 
 use crate::updates::{self, Release};
-use crate::{anyhow, bail, net, paths, Context, Result};
+use crate::{anyhow, bail, net, paths, signed, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -83,7 +83,7 @@ pub fn check() -> Result<Option<Available>> {
 
 fn check_mirror(base: &str) -> Result<Option<Available>> {
     let body = net::http_get(&format!("{base}/latest.json"), 15_000, 1 << 20).with_context(|| format!("cannot read {base}/latest.json"))?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&hex::<32>(MIRROR_KEY).context("MIRROR_KEY")?).context("MIRROR_KEY")?;
+    let key = signed::key(MIRROR_KEY).context("MIRROR_KEY")?;
     let a = read_mirror(&String::from_utf8_lossy(&body), base, &key)?;
     if last_installed().is_some_and(|v| v == a.release.version) || !updates::newer(&a.release.version, current_version()) {
         return Ok(None);
@@ -91,25 +91,8 @@ fn check_mirror(base: &str) -> Result<Option<Available>> {
     Ok(Some(a))
 }
 
-fn hex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    let s = s.trim();
-    if s.len() != N * 2 || !s.is_ascii() {
-        return None;
-    }
-    let mut out = [0u8; N];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
-}
-
 /// The release in a mirror's `latest.json`, once its signature verifies against `key`.
 fn read_mirror(text: &str, base: &str, key: &ed25519_dalek::VerifyingKey) -> Result<Available> {
-    #[derive(serde::Deserialize)]
-    struct Envelope {
-        manifest: String,
-        signature: String,
-    }
     #[derive(serde::Deserialize)]
     struct File {
         path: String,
@@ -126,11 +109,8 @@ fn read_mirror(text: &str, base: &str, key: &ed25519_dalek::VerifyingKey) -> Res
         notes: String,
         zip: File,
     }
-    let env: Envelope = serde_json::from_str(text.trim_start_matches('\u{feff}')).context("the mirror's latest.json is not a signed manifest")?;
-    let sig = hex::<64>(&env.signature).context("the mirror's latest.json has no valid signature")?;
-    key.verify_strict(env.manifest.as_bytes(), &ed25519_dalek::Signature::from_bytes(&sig))
-        .map_err(|_| anyhow!("the mirror's latest.json is not signed with the launcher's release key"))?;
-    let m: Manifest = serde_json::from_str(&env.manifest).context("the mirror's manifest cannot be read")?;
+    let manifest = signed::open(text, key, "the mirror's latest.json")?;
+    let m: Manifest = serde_json::from_str(&manifest).context("the mirror's manifest cannot be read")?;
     if m.product != PRODUCT {
         bail!("the mirror's manifest is for {}, not {PRODUCT}", m.product);
     }
@@ -144,7 +124,7 @@ fn read_mirror(text: &str, base: &str, key: &ed25519_dalek::VerifyingKey) -> Res
         bail!("the mirror's manifest names an unexpected file ({path})");
     }
     let sha = m.zip.sha256.trim().to_lowercase();
-    if hex::<32>(&sha).is_none() {
+    if signed::hex::<32>(&sha).is_none() {
         bail!("the mirror's manifest has no valid SHA-256 for {name}");
     }
     let release = Release { tag: m.tag, version: m.version, page: m.page, notes: m.notes, prerelease: false, assets: Vec::new() };
@@ -421,11 +401,7 @@ mod tests {
         assert!(pick(release("v9.0.0", &["other.zip"], false), "0.1.0").is_err(), "no zip");
     }
 
-    fn signed(key: &ed25519_dalek::SigningKey, manifest: &str) -> String {
-        use ed25519_dalek::Signer;
-        let sig: String = key.sign(manifest.as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        serde_json::json!({ "manifest": manifest, "signature": sig }).to_string()
-    }
+    use crate::signed::sign as signed;
 
     fn manifest(product: &str, tag: &str, path: &str) -> String {
         serde_json::json!({
@@ -437,7 +413,7 @@ mod tests {
 
     #[test]
     fn the_release_key_is_a_valid_public_key() {
-        assert!(ed25519_dalek::VerifyingKey::from_bytes(&hex::<32>(MIRROR_KEY).unwrap()).is_ok());
+        assert!(signed::key(MIRROR_KEY).is_ok());
     }
 
     #[test]

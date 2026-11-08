@@ -86,6 +86,10 @@ Rules for the plugin:
   Settings, change the list. Each line names a zip in a release of the plugin's own repository and the zip's SHA-256; the launcher downloads
   it, insists on that SHA-256, checks that the zip is the plugin of that id, and installs it as above. A newer version in the index shows as
   an update. To list a plugin there, see that repository's README (a pull request adding one line, checked by its CI).
+  The default index is read from its mirror first, `https://dl.stellarismod.com/plugins/index.json`: the index repository's CI copies each
+  zip there and signs the mirror's index with a key only it holds; the launcher uses it only when the signature verifies with the key built
+  in, and otherwise reads GitHub's `plugins.jsonl`. Downloads try the mirror's copy, then the GitHub asset (`fallback`); both must match the
+  SHA-256. Updates of installed plugins use the mirror's line too when it lists the plugin from the same repository.
 - **Link** (`--link`, "Link a plugin under development"): uses the folder where it is (for development); its `config\` is in that folder.
 - **Launch**: skips (and says why) a plugin that is not installed, whose DLL is missing, or that lists builds not including this one; makes
   missing settings files; starts the game; waits for its window and `delay_ms`; loads each plugin with `LoadLibraryW` in a remote thread. A

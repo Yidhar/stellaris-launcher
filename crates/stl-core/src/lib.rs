@@ -12,6 +12,7 @@ pub mod ironman;
 pub mod conflicts;
 pub mod leveldb;
 pub mod selfupdate;
+pub mod signed;
 pub mod launch;
 pub mod modmake;
 pub mod mods;

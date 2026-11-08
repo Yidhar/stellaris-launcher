@@ -224,6 +224,10 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
 /// Where plugins live: `Documents\Paradox Interactive\Stellaris\plugins\<id>\`, next to the game's own `mod` folder, so that a plugin (or its
 /// loader) finds itself and its settings without the launcher.
 pub fn plugins_dir() -> Result<PathBuf> {
+    // for tests: install somewhere other than the user's own plugins
+    if let Some(d) = std::env::var_os("STL_PLUGINS_DIR").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(d));
+    }
     Ok(paths::documents_dir()?.join("Paradox Interactive").join("Stellaris").join("plugins"))
 }
 

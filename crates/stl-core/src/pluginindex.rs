@@ -2,15 +2,75 @@
 //! github.com/Yidhar/stellaris-plugins, whose `schema/plugin-entry.schema.json` describes it). A line says where the plugin's zip is (a release
 //! asset of its own repository) and the zip's SHA-256; installing downloads it, insists on that SHA-256, checks that the zip is that plugin,
 //! and installs it like any plugin folder (the user's `config` kept). The launcher reads the indexes the store names, or the default one.
+//!
+//! The default index is read from its mirror first (`MIRROR_INDEX`, Cloudflare R2): the index repository's CI copies every plugin zip there
+//! and publishes the index with `download` pointing at the copy and `fallback` at the GitHub release asset, signed with a key only that CI
+//! holds (`INDEX_KEY` is its public half). An index that does not verify is not used; then GitHub's copy is read as before. A download is
+//! tried from `download`, then `fallback`, and must match the index's SHA-256 either way.
 
 use crate::game::Game;
 use crate::plugins::{self, Plugin};
-use crate::{bail, net, pe, updates, Context, Result};
+use crate::{bail, net, pe, signed, updates, Context, Result};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The index the launcher reads when the store names none.
 pub const DEFAULT_INDEX: &str = "https://raw.githubusercontent.com/Yidhar/stellaris-plugins/main/plugins.jsonl";
+/// The mirror's signed copy of the default index.
+pub const MIRROR_INDEX: &str = "https://dl.stellarismod.com/plugins/index.json";
+/// The public key the mirror's index must be signed with (the private half is a secret of the index repository's CI).
+const INDEX_KEY: &str = "3d5253f5b943d0e56325af7e150e1c39d0a80982f14bc241401bb1baf224d2ef";
+const INDEX_PRODUCT: &str = "stellaris-plugins";
+
+/// The mirror's index, unless `STL_PLUGIN_MIRROR=off` (or another URL for it).
+pub fn mirror_index() -> Option<String> {
+    match std::env::var("STL_PLUGIN_MIRROR") {
+        Ok(s) if s.trim().eq_ignore_ascii_case("off") => None,
+        Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        _ => Some(MIRROR_INDEX.to_string()),
+    }
+}
+
+/// The plugins of a signed mirror index (they are given `DEFAULT_INDEX` as their index: the mirror stands in for it).
+fn read_mirror(text: &str, key: &ed25519_dalek::VerifyingKey) -> Result<Vec<Entry>> {
+    #[derive(Deserialize)]
+    struct Signed {
+        product: String,
+        plugins: Vec<serde_json::Value>,
+    }
+    let manifest = signed::open(text, key, "the mirror's plugin index")?;
+    let m: Signed = serde_json::from_str(&manifest).context("the mirror's plugin index cannot be read")?;
+    if m.product != INDEX_PRODUCT {
+        bail!("the mirror's plugin index is for {}, not {INDEX_PRODUCT}", m.product);
+    }
+    let text: String = m.plugins.iter().map(|v| v.to_string() + "\n").collect();
+    let (entries, _) = parse(&text, DEFAULT_INDEX);
+    Ok(entries.into_iter().filter(|e| e.fallback.as_deref().map_or(true, |f| f.starts_with("https://"))).collect())
+}
+
+static MIRRORED: Mutex<Option<(Instant, String, Vec<Entry>)>> = Mutex::new(None);
+
+/// The mirror's index, read at most every five minutes (plugin update checks ask for it once per plugin).
+pub fn fetch_mirror() -> Result<Vec<Entry>> {
+    let url = mirror_index().context("the plugin mirror is switched off")?;
+    if let Some((at, u, entries)) = MIRRORED.lock().ok().and_then(|g| g.clone()) {
+        if u == url && at.elapsed() < Duration::from_secs(300) {
+            return Ok(entries);
+        }
+    }
+    let body = net::http_get(&url, 20_000, 8 << 20).with_context(|| format!("cannot read {url}"))?;
+    let entries = read_mirror(&String::from_utf8_lossy(&body), &signed::key(INDEX_KEY).context("INDEX_KEY")?)?;
+    if let Ok(mut g) = MIRRORED.lock() {
+        *g = Some((Instant::now(), url, entries.clone()));
+    }
+    Ok(entries)
+}
+
+/// The mirror's line for a plugin, when it has one from the same repository as `repo` (`owner/repo`).
+pub fn mirrored(id: &str, repo: &str) -> Option<Entry> {
+    fetch_mirror().ok()?.into_iter().find(|e| e.id == id && updates::repo_of(&e.repository).is_some_and(|r| r.eq_ignore_ascii_case(repo)))
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct Entry {
@@ -35,6 +95,9 @@ pub struct Entry {
     pub license: Option<String>,
     #[serde(default)]
     pub updated: Option<String>,
+    /// where else the same zip is (the mirror's index: the GitHub release asset)
+    #[serde(default)]
+    pub fallback: Option<String>,
     /// the index it came from
     #[serde(skip)]
     pub index: String,
@@ -105,8 +168,15 @@ pub fn parse(text: &str, index: &str) -> (Vec<Entry>, usize) {
     (out, bad)
 }
 
-/// One index, read now.
+/// One index, read now. The default one is read from its mirror when that works.
 pub fn fetch(url: &str) -> Result<Vec<Entry>> {
+    if url == DEFAULT_INDEX {
+        if let Ok(entries) = fetch_mirror() {
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+        }
+    }
     let body = net::http_get(url, 20_000, 8 << 20).with_context(|| format!("cannot read {url}"))?;
     let (entries, bad) = parse(&String::from_utf8_lossy(&body), url);
     if entries.is_empty() && bad > 0 {
@@ -144,11 +214,8 @@ pub fn indexes(configured: Option<&Vec<String>>) -> Vec<String> {
 
 /// Downloads a plugin of an index, checks it, and installs it (over an older version: the user's settings kept).
 pub fn install(e: &Entry) -> Result<Plugin> {
-    let bytes = net::http_get(&e.download, 120_000, 512 << 20).with_context(|| format!("cannot download {}", e.download))?;
-    let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    if !got.eq_ignore_ascii_case(&e.sha256) {
-        bail!("the download of {} does not match the index's SHA-256 (expected {}, got {got})", e.id, e.sha256);
-    }
+    let urls: Vec<&str> = std::iter::once(e.download.as_str()).chain(e.fallback.as_deref()).collect();
+    let bytes = updates::download_checked(&urls, &e.sha256, &e.id)?;
     let tmp = std::env::temp_dir().join(format!("stl-get-{}-{}", e.id, std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
@@ -190,5 +257,34 @@ mod tests {
         assert_eq!(entries[0].game_builds, vec!["0x6ABEAA3F"]);
         assert_eq!(indexes(None), vec![DEFAULT_INDEX.to_string()]);
         assert_eq!(indexes(Some(&vec![])), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_index_key_is_a_valid_public_key() {
+        assert!(signed::key(INDEX_KEY).is_ok());
+    }
+
+    #[test]
+    fn takes_only_a_mirror_index_signed_with_its_key() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
+        let public = key.verifying_key();
+        let line = |id: &str, fallback: &str| serde_json::json!({
+            "id": id, "name": "A", "author": "x", "description": "d", "version": "1.2.0",
+            "download": format!("https://dl.example/plugins/{id}/v1.2.0/{id}.zip"), "fallback": fallback,
+            "sha256": "0".repeat(64), "repository": format!("https://github.com/x/{id}"),
+        });
+        let doc = |product: &str| serde_json::json!({ "product": product, "plugins": [line("a", "https://github.com/x/a/releases/download/v1.2.0/a.zip"), line("b", "http://plain/b.zip")] }).to_string();
+
+        let got = read_mirror(&signed::sign(&key, &doc(INDEX_PRODUCT)), &public).unwrap();
+        assert_eq!(got.len(), 1, "a fallback that is not https is left out");
+        assert_eq!(got[0].id, "a");
+        assert_eq!(got[0].index, DEFAULT_INDEX);
+        assert_eq!(got[0].fallback.as_deref(), Some("https://github.com/x/a/releases/download/v1.2.0/a.zip"));
+
+        assert!(read_mirror(&signed::sign(&other, &doc(INDEX_PRODUCT)), &public).is_err(), "another key");
+        assert!(read_mirror(&signed::sign(&key, &doc(INDEX_PRODUCT)).replace("1.2.0", "1.2.1"), &public).is_err(), "changed after signing");
+        assert!(read_mirror(&signed::sign(&key, &doc("stellaris-launcher")), &public).is_err(), "another product");
+        assert!(read_mirror(&doc(INDEX_PRODUCT), &public).is_err(), "not signed");
     }
 }

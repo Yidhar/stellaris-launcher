@@ -1,6 +1,9 @@
 //! Plugin updates from GitHub releases. A manifest names its repository (`"update": {"github": "owner/repo", "asset": "name-*.zip"}`); the
 //! launcher asks GitHub's public API for the latest release, compares its version with the installed one, and on request downloads the zip,
 //! checks it against a `<asset>.sha256` published beside it (when there is one), and installs it like any plugin folder (keeping `config\`).
+//!
+//! When the mirror's signed plugin index (`pluginindex::fetch_mirror`) lists the plugin from the same repository, that line is used instead:
+//! its version, its copy of the zip on the mirror (the GitHub asset as the fallback) and its SHA-256, which the download must match.
 
 use crate::plugins::{self, Plugin};
 use crate::{bail, net, Context, Result};
@@ -26,6 +29,28 @@ pub struct Available {
     /// the zip to download, and the checksum file beside it if any
     pub asset: (String, String),
     pub checksum: Option<String>,
+    /// the SHA-256 the download must have (from the mirror's signed index)
+    pub sha256: Option<String>,
+    /// where else the same zip is
+    pub fallback: Option<String>,
+}
+
+/// The first of `urls` whose download has the SHA-256 `sha256`; the errors of all of them otherwise.
+pub fn download_checked(urls: &[&str], sha256: &str, what: &str) -> Result<Vec<u8>> {
+    let mut errors = Vec::new();
+    for url in urls {
+        match net::http_get(url, 120_000, 512 << 20) {
+            Ok(bytes) => {
+                let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+                if got.eq_ignore_ascii_case(sha256.trim()) {
+                    return Ok(bytes);
+                }
+                errors.push(format!("{url} does not match the index's SHA-256 (expected {sha256}, got {got})"));
+            }
+            Err(e) => errors.push(format!("cannot download {url}: {e:#}")),
+        }
+    }
+    bail!("{what}: {}", errors.join("; "))
 }
 
 /// `*` matches any run of characters; nothing else is special.
@@ -105,6 +130,14 @@ pub fn latest_release(repo: &str) -> Result<Release> {
 pub fn check(p: &Plugin) -> Result<Option<Available>> {
     let spec = p.manifest.update.as_ref().context("the plugin names no repository to update from")?;
     let repo = repo_of(&spec.github).with_context(|| format!("{:?} is not a GitHub repository", spec.github))?;
+    if let Some(e) = crate::pluginindex::mirrored(&p.manifest.id, &repo) {
+        if !newer(&e.version, &p.manifest.version) {
+            return Ok(None);
+        }
+        let name = e.download.rsplit('/').next().unwrap_or("").to_string();
+        let release = Release { tag: format!("v{}", e.version), version: e.version.clone(), page: e.page().to_string(), notes: String::new(), prerelease: false, assets: Vec::new() };
+        return Ok(Some(Available { release, asset: (name, e.download.clone()), checksum: None, sha256: Some(e.sha256.clone()), fallback: e.fallback.clone() }));
+    }
     let release = latest_release(&repo)?;
     if !newer(&release.version, &p.manifest.version) {
         return Ok(None);
@@ -113,7 +146,7 @@ pub fn check(p: &Plugin) -> Result<Option<Available>> {
     let asset = release.assets.iter().find(|(n, _)| n.to_lowercase().ends_with(".zip") && wildcard(&pattern, n)).cloned()
         .with_context(|| format!("release {} of {repo} has no zip matching {pattern}", release.tag))?;
     let checksum = release.assets.iter().find(|(n, _)| n.eq_ignore_ascii_case(&format!("{}.sha256", asset.0))).map(|(_, u)| u.clone());
-    Ok(Some(Available { release, asset, checksum }))
+    Ok(Some(Available { release, asset, checksum, sha256: None, fallback: None }))
 }
 
 /// The folder in an unpacked zip that holds `stl-plugin.json`: the root, or a single folder inside it.
@@ -149,8 +182,14 @@ pub fn apply(p: &Plugin, a: &Available) -> Result<Plugin> {
     if p.linked {
         bail!("{} is linked to a folder under development; update it there", p.manifest.id);
     }
-    let bytes = net::http_get(&a.asset.1, 60_000, 512 << 20).with_context(|| format!("cannot download {}", a.asset.0))?;
-    if let Some(url) = &a.checksum {
+    let bytes = match &a.sha256 {
+        Some(sha) => {
+            let urls: Vec<&str> = std::iter::once(a.asset.1.as_str()).chain(a.fallback.as_deref()).collect();
+            download_checked(&urls, sha, &a.asset.0)?
+        }
+        None => net::http_get(&a.asset.1, 60_000, 512 << 20).with_context(|| format!("cannot download {}", a.asset.0))?,
+    };
+    if let (None, Some(url)) = (&a.sha256, &a.checksum) {
         let text = String::from_utf8_lossy(&net::http_get(url, 15_000, 1 << 16)?).to_string();
         let want = text.split_whitespace().next().unwrap_or("").to_lowercase();
         let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();

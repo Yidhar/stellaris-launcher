@@ -5212,7 +5212,7 @@ mod tests {
         use stl_core::updates::{Available, Release};
         let offer = |v: &str| {
             let release = Release { tag: format!("v{v}"), version: v.to_string(), page: String::new(), notes: String::new(), prerelease: false, assets: Vec::new() };
-            Ok(Some(Available { release, asset: Default::default(), checksum: None }))
+            Ok(Some(Available { release, asset: Default::default(), checksum: None, sha256: None, fallback: None }))
         };
         let mut found = std::collections::HashMap::new();
         found.insert("same".to_string(), offer("0.4.0"));
