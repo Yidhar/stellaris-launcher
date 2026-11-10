@@ -1,0 +1,119 @@
+//! The words of what the window does with stellarismod.com (its `stl://` links, the account, wiki entries), in the window's languages:
+//! English, 简体, 繁體, 日本語, 한국어, Deutsch, Français, Español, Русский. A test checks every row has all nine with the same `{n}`.
+
+use crate::i18n::Lang;
+
+type Row = (&'static str, [&'static str; 9]);
+
+const T: &[Row] = &[
+    // ---- links
+    ("link.title", ["From stellarismod.com", "来自 stellarismod.com", "來自 stellarismod.com", "stellarismod.com から", "stellarismod.com에서", "Von stellarismod.com", "Depuis stellarismod.com", "Desde stellarismod.com", "С stellarismod.com"]),
+    ("link.loading", ["Reading what the link asks for…", "正在读取链接的内容…", "正在讀取連結的內容…", "リンクの内容を読み込んでいます…", "링크 내용을 읽는 중…", "Lese, worum der Link bittet …", "Lecture de ce que demande le lien…", "Leyendo lo que pide el enlace…", "Читаю, что просит ссылка…"]),
+    ("link.bad", ["This link cannot be used: {0}", "无法使用这个链接：{0}", "無法使用這個連結：{0}", "このリンクは使えません：{0}", "이 링크는 사용할 수 없습니다: {0}", "Dieser Link ist nicht verwendbar: {0}", "Ce lien est inutilisable : {0}", "Este enlace no se puede usar: {0}", "Эту ссылку нельзя использовать: {0}"]),
+    ("link.asks", ["A page asked the launcher to do this. Nothing changes until you go ahead.", "网页请求启动器执行下面的操作。你确认之前不会有任何改动。", "網頁請求啟動器執行下面的操作。你確認之前不會有任何變更。", "Webページがランチャーにこの操作を求めています。続行するまで何も変わりません。", "웹 페이지가 런처에 이 작업을 요청했습니다. 계속하기 전에는 아무것도 바뀌지 않습니다.", "Eine Webseite bittet den Launcher darum. Nichts ändert sich, bevor du fortfährst.", "Une page demande ceci au lanceur. Rien ne change avant que vous continuiez.", "Una página pide esto al lanzador. Nada cambia hasta que continúes.", "Страница просит лаунчер сделать это. Ничего не изменится, пока вы не продолжите."]),
+    ("link.import", ["Make the playset “{0}”?", "创建播放集「{0}」？", "建立播放集「{0}」？", "プレイセット「{0}」を作成しますか？", "플레이셋 \"{0}\"을(를) 만들까요?", "Die Playset „{0}“ anlegen?", "Créer la playset « {0} » ?", "¿Crear la colección «{0}»?", "Создать набор «{0}»?"]),
+    ("link.import_counts", ["{0} mods: {1} from the Workshop, {2} hosted by the site, {3} local. Plugins: {4}.", "共 {0} 个模组：创意工坊 {1} 个、本站托管 {2} 个、本地 {3} 个。插件：{4}。", "共 {0} 個模組：工作坊 {1} 個、本站代管 {2} 個、本機 {3} 個。插件：{4}。", "MOD {0} 個：ワークショップ {1}、サイト配布 {2}、ローカル {3}。プラグイン：{4}。", "모드 {0}개: 창작마당 {1}, 사이트 호스팅 {2}, 로컬 {3}. 플러그인: {4}.", "{0} Mods: {1} aus dem Workshop, {2} von der Seite, {3} lokal. Plugins: {4}.", "{0} mods : {1} du Workshop, {2} hébergés par le site, {3} locaux. Plugins : {4}.", "{0} mods: {1} del Workshop, {2} alojados por el sitio, {3} locales. Plugins: {4}.", "Модов: {0} — из мастерской {1}, с сайта {2}, локальных {3}. Плагины: {4}."]),
+    ("link.import_note", ["Workshop items that are missing are subscribed to and downloaded; the site's packages and plugins are checked against their SHA-256.", "缺少的创意工坊模组会被订阅并下载；本站的模组包和插件会核对 SHA-256。", "缺少的工作坊模組會被訂閱並下載；本站的模組包和插件會核對 SHA-256。", "足りないワークショップのアイテムは購読してダウンロードします。サイトのパッケージとプラグインは SHA-256 で確認します。", "없는 창작마당 항목은 구독하고 내려받습니다. 사이트의 패키지와 플러그인은 SHA-256으로 확인합니다.", "Fehlende Workshop-Einträge werden abonniert und geladen; Pakete und Plugins der Seite werden per SHA-256 geprüft.", "Les objets du Workshop manquants sont suivis et téléchargés ; les paquets et plugins du site sont vérifiés par SHA-256.", "Los objetos del Workshop que faltan se suscriben y descargan; los paquetes y plugins del sitio se comprueban con su SHA-256.", "Недостающие предметы мастерской будут подписаны и скачаны; пакеты и плагины сайта проверяются по SHA-256."]),
+    ("link.import_local", ["Local mods it lists that are not here (nobody can get them for you): {0}", "它列出的本地模组这里没有（无法替你获取）：{0}", "它列出的本機模組這裡沒有（無法替你取得）：{0}", "リストにあるがここにないローカルMOD（取得できません）：{0}", "목록에 있지만 여기에 없는 로컬 모드(받을 수 없음): {0}", "Lokale Mods der Liste, die hier fehlen (niemand kann sie für dich holen): {0}", "Mods locaux listés absents ici (personne ne peut les obtenir pour vous) : {0}", "Mods locales de la lista que no están aquí (nadie puede conseguirlos por ti): {0}", "Локальные моды из списка, которых здесь нет (их не скачать): {0}"]),
+    ("link.add_mod", ["Add {0} to the playset {1}?", "将 {0} 加入播放集 {1}？", "將 {0} 加入播放集 {1}？", "{0} をプレイセット {1} に追加しますか？", "{0}을(를) 플레이셋 {1}에 추가할까요?", "{0} zur Playset {1} hinzufügen?", "Ajouter {0} à la playset {1} ?", "¿Añadir {0} a la colección {1}?", "Добавить {0} в набор {1}?"]),
+    ("link.add_mod_get", ["It is not here yet: the launcher subscribes to it on the Workshop and downloads it.", "这里还没有它：启动器会在创意工坊订阅并下载它。", "這裡還沒有它：啟動器會在工作坊訂閱並下載它。", "まだここにありません。ランチャーがワークショップで購読してダウンロードします。", "아직 여기에 없습니다. 런처가 창작마당에서 구독하고 내려받습니다.", "Er ist noch nicht hier: der Launcher abonniert ihn im Workshop und lädt ihn.", "Il n'est pas encore ici : le lanceur le suit sur le Workshop et le télécharge.", "Aún no está aquí: el lanzador se suscribe en el Workshop y lo descarga.", "Его ещё нет: лаунчер подпишется в мастерской и скачает его."]),
+    ("link.workshop_item", ["the Workshop item {0}", "创意工坊模组 {0}", "工作坊項目 {0}", "ワークショップのアイテム {0}", "창작마당 항목 {0}", "den Workshop-Eintrag {0}", "l'objet du Workshop {0}", "el objeto del Workshop {0}", "предмет мастерской {0}"]),
+    ("link.plugin", ["Install the plugin {0} {1}?", "安装插件 {0} {1}？", "安裝插件 {0} {1}？", "プラグイン {0} {1} をインストールしますか？", "플러그인 {0} {1}을(를) 설치할까요?", "Das Plugin {0} {1} installieren?", "Installer le plugin {0} {1} ?", "¿Instalar el plugin {0} {1}?", "Установить плагин {0} {1}?"]),
+    ("link.plugin_from", ["From {0}, checked against the SHA-256 {1}. A plugin is a DLL that runs inside the game: install only what you trust.", "下载自 {0}，核对 SHA-256 {1}。插件是在游戏里运行的 DLL：只安装你信任的。", "下載自 {0}，核對 SHA-256 {1}。插件是在遊戲裡執行的 DLL：只安裝你信任的。", "{0} から取得し、SHA-256 {1} で確認します。プラグインはゲーム内で動くDLLです。信頼できるものだけを入れてください。", "{0}에서 받아 SHA-256 {1}로 확인합니다. 플러그인은 게임 안에서 실행되는 DLL이니 믿을 수 있는 것만 설치하세요.", "Von {0}, geprüft mit der SHA-256 {1}. Ein Plugin ist eine DLL, die im Spiel läuft: nur Vertrauenswürdiges installieren.", "Depuis {0}, vérifié par le SHA-256 {1}. Un plugin est une DLL exécutée dans le jeu : n'installez que ce qui est sûr.", "Desde {0}, comprobado con el SHA-256 {1}. Un plugin es una DLL que se ejecuta en el juego: instala solo lo que sea de confianza.", "С {0}, проверка по SHA-256 {1}. Плагин — это DLL, работающая в игре: ставьте только то, чему доверяете."]),
+    ("link.hosted", ["Install the mod {0} {1} from the site and add it to the playset {2}?", "从本站安装模组 {0} {1} 并加入播放集 {2}？", "從本站安裝模組 {0} {1} 並加入播放集 {2}？", "サイトから MOD {0} {1} をインストールしてプレイセット {2} に追加しますか？", "사이트에서 모드 {0} {1}을(를) 설치하고 플레이셋 {2}에 추가할까요?", "Den Mod {0} {1} von der Seite installieren und zur Playset {2} hinzufügen?", "Installer le mod {0} {1} depuis le site et l'ajouter à la playset {2} ?", "¿Instalar el mod {0} {1} desde el sitio y añadirlo a la colección {2}?", "Установить мод {0} {1} с сайта и добавить в набор {2}?"]),
+    ("link.index", ["Read the plugin index {0} ({1} plugins) from now on?", "今后读取插件索引 {0}（{1} 个插件）？", "今後讀取插件索引 {0}（{1} 個插件）？", "今後プラグインインデックス {0}（{1} 個）を読み込みますか？", "앞으로 플러그인 색인 {0}(플러그인 {1}개)을 읽을까요?", "Ab jetzt den Plugin-Index {0} ({1} Plugins) lesen?", "Lire désormais l'index de plugins {0} ({1} plugins) ?", "¿Leer a partir de ahora el índice de plugins {0} ({1} plugins)?", "Читать индекс плагинов {0} ({1} шт.) с этого момента?"]),
+    ("link.index_note", ["Add only indexes you trust: the plugins they list are DLLs that run inside the game.", "只添加你信任的索引：它们列出的插件是在游戏里运行的 DLL。", "只新增你信任的索引：它們列出的插件是在遊戲裡執行的 DLL。", "信頼できるインデックスだけを追加してください。載っているプラグインはゲーム内で動くDLLです。", "믿을 수 있는 색인만 추가하세요. 목록의 플러그인은 게임 안에서 실행되는 DLL입니다.", "Nur vertrauenswürdige Indizes hinzufügen: die Plugins darin sind DLLs, die im Spiel laufen.", "N'ajoutez que des index sûrs : leurs plugins sont des DLL exécutées dans le jeu.", "Añade solo índices de confianza: sus plugins son DLL que se ejecutan en el juego.", "Добавляйте только индексы, которым доверяете: их плагины — DLL, работающие в игре."]),
+    ("link.account", ["Sign the launcher in to stellarismod.com?", "让启动器登录 stellarismod.com？", "讓啟動器登入 stellarismod.com？", "ランチャーを stellarismod.com にサインインしますか？", "런처를 stellarismod.com에 로그인할까요?", "Den Launcher bei stellarismod.com anmelden?", "Connecter le lanceur à stellarismod.com ?", "¿Iniciar sesión del lanzador en stellarismod.com?", "Войти в stellarismod.com из лаунчера?"]),
+    ("link.account_note", ["The site allowed this sign-in for the account it is signed in with. Go on only if you started it there yourself.", "网站已允许用它当前登录的账号登录启动器。只有你自己在网站上发起时才继续。", "網站已允許用它目前登入的帳號登入啟動器。只有你自己在網站上發起時才繼續。", "サイトはサインイン中のアカウントでのログインを許可しました。自分でサイトから始めた場合だけ続行してください。", "사이트가 로그인된 계정으로 런처 로그인을 허용했습니다. 직접 사이트에서 시작한 경우에만 계속하세요.", "Die Seite hat diese Anmeldung für das dort angemeldete Konto erlaubt. Nur fortfahren, wenn du sie selbst gestartet hast.", "Le site a autorisé cette connexion pour le compte qui y est connecté. Continuez seulement si vous l'avez lancée vous-même.", "El sitio permitió este inicio de sesión para la cuenta conectada allí. Continúa solo si lo iniciaste tú.", "Сайт разрешил вход для учётной записи, под которой вы там вошли. Продолжайте, только если начали это сами."]),
+    ("link.go", ["Go ahead", "继续", "繼續", "続行", "계속", "Fortfahren", "Continuer", "Continuar", "Продолжить"]),
+    ("link.cancel", ["Cancel", "取消", "取消", "キャンセル", "취소", "Abbrechen", "Annuler", "Cancelar", "Отмена"]),
+    ("link.close", ["Close", "关闭", "關閉", "閉じる", "닫기", "Schließen", "Fermer", "Cerrar", "Закрыть"]),
+    ("link.page", ["Open the page", "打开页面", "開啟頁面", "ページを開く", "페이지 열기", "Seite öffnen", "Ouvrir la page", "Abrir la página", "Открыть страницу"]),
+    ("link.working", ["Working…", "处理中…", "處理中…", "処理中…", "처리 중…", "Läuft …", "En cours…", "Trabajando…", "Выполняется…"]),
+    ("link.done_mod", ["{0} is in the playset {1}.", "{0} 已加入播放集 {1}。", "{0} 已加入播放集 {1}。", "{0} をプレイセット {1} に入れました。", "{0}이(가) 플레이셋 {1}에 들어갔습니다.", "{0} ist in der Playset {1}.", "{0} est dans la playset {1}.", "{0} está en la colección {1}.", "{0} теперь в наборе {1}."]),
+    ("link.done_plugin", ["{0} is being installed (see Plugins). Switch it on in a playset to load it.", "正在安装 {0}（见「插件」页）。在播放集里打开它才会加载。", "正在安裝 {0}（見「插件」頁）。在播放集裡開啟它才會載入。", "{0} をインストールしています（プラグインのページ）。読み込むにはプレイセットでオンにしてください。", "{0}을(를) 설치하는 중입니다(플러그인 페이지). 불러오려면 플레이셋에서 켜세요.", "{0} wird installiert (siehe Plugins). In einer Playset einschalten, damit es geladen wird.", "{0} est en cours d'installation (voir Plugins). Activez-le dans une playset pour le charger.", "Se está instalando {0} (ver Plugins). Actívalo en una colección para cargarlo.", "{0} устанавливается (см. «Плагины»). Включите его в наборе, чтобы он загружался."]),
+    ("link.done_index", ["The index was added.", "已添加该索引。", "已新增該索引。", "インデックスを追加しました。", "색인을 추가했습니다.", "Der Index wurde hinzugefügt.", "L'index a été ajouté.", "Se añadió el índice.", "Индекс добавлен."]),
+    ("link.done_signed", ["Signed in as {0}.", "已登录为 {0}。", "已登入為 {0}。", "{0} としてサインインしました。", "{0}(으)로 로그인했습니다.", "Angemeldet als {0}.", "Connecté en tant que {0}.", "Sesión iniciada como {0}.", "Вход выполнен: {0}."]),
+    ("link.failed", ["It did not work: {0}", "没有成功：{0}", "沒有成功：{0}", "うまくいきませんでした：{0}", "실패했습니다: {0}", "Das hat nicht geklappt: {0}", "Échec : {0}", "No funcionó: {0}", "Не получилось: {0}"]),
+    ("link.import_started", ["The playset {0} was made; what it lacks is being got (see Playsets).", "已创建播放集 {0}，正在获取缺少的内容（见「播放集」页）。", "已建立播放集 {0}，正在取得缺少的內容（見「播放集」頁）。", "プレイセット {0} を作成しました。足りないものを取得しています（プレイセットのページ）。", "플레이셋 {0}을(를) 만들었습니다. 부족한 것을 받는 중입니다(플레이셋 페이지).", "Die Playset {0} wurde angelegt; was fehlt, wird geholt (siehe Playsets).", "La playset {0} a été créée ; ce qui manque est en cours de récupération (voir Playsets).", "Se creó la colección {0}; se está obteniendo lo que falta (ver Colecciones).", "Набор {0} создан; недостающее скачивается (см. «Наборы»)."]),
+    ("link.import_extras", ["{0}: getting {1} from the site…", "{0}：正在从本站获取 {1}…", "{0}：正在從本站取得 {1}…", "{0}：サイトから {1} を取得中…", "{0}: 사이트에서 {1} 받는 중…", "{0}: {1} wird von der Seite geholt …", "{0} : récupération de {1} depuis le site…", "{0}: obteniendo {1} del sitio…", "{0}: скачиваю {1} с сайта…"]),
+    // ---- the account
+    ("acc.section", ["stellarismod.com account", "stellarismod.com 账号", "stellarismod.com 帳號", "stellarismod.com アカウント", "stellarismod.com 계정", "stellarismod.com-Konto", "Compte stellarismod.com", "Cuenta de stellarismod.com", "Учётная запись stellarismod.com"]),
+    ("acc.signed_in", ["Signed in as {0} ({1})", "已登录：{0}（{1}）", "已登入：{0}（{1}）", "サインイン中：{0}（{1}）", "로그인됨: {0} ({1})", "Angemeldet als {0} ({1})", "Connecté : {0} ({1})", "Sesión: {0} ({1})", "Вход: {0} ({1})"]),
+    ("acc.signed_out", ["Not signed in", "未登录", "未登入", "サインインしていません", "로그인하지 않음", "Nicht angemeldet", "Non connecté", "Sin sesión", "Вход не выполнен"]),
+    ("acc.hint", ["Signing in lets the launcher create stellarismod.com entries for the mods you publish. The launcher never sees your password: you allow it on the site, and its token is kept encrypted for this Windows user.", "登录后，启动器可以为你发布的模组在 stellarismod.com 创建词条。启动器不会接触你的密码：你在网站上允许它，令牌加密保存在当前 Windows 用户下。", "登入後，啟動器可以為你發佈的模組在 stellarismod.com 建立詞條。啟動器不會接觸你的密碼：你在網站上允許它，權杖加密儲存在目前的 Windows 使用者下。", "サインインすると、公開したMODの項目を stellarismod.com に作れます。ランチャーはパスワードを扱いません。サイトで許可し、トークンはこのWindowsユーザー用に暗号化して保存します。", "로그인하면 게시한 모드의 항목을 stellarismod.com에 만들 수 있습니다. 런처는 비밀번호를 다루지 않습니다. 사이트에서 허용하면 토큰은 이 Windows 사용자용으로 암호화되어 저장됩니다.", "Angemeldet legt der Launcher Einträge auf stellarismod.com für deine veröffentlichten Mods an. Er sieht dein Passwort nie: du erlaubst ihn auf der Seite, sein Token wird für diesen Windows-Benutzer verschlüsselt gespeichert.", "Connecté, le lanceur peut créer sur stellarismod.com les fiches des mods que vous publiez. Il ne voit jamais votre mot de passe : vous l'autorisez sur le site et son jeton est chiffré pour cet utilisateur Windows.", "Con la sesión iniciada, el lanzador puede crear en stellarismod.com las fichas de los mods que publiques. Nunca ve tu contraseña: lo autorizas en el sitio y su token se guarda cifrado para este usuario de Windows.", "После входа лаунчер сможет создавать на stellarismod.com статьи о публикуемых вами модах. Пароль он не видит: вы разрешаете вход на сайте, а токен хранится зашифрованным для этого пользователя Windows."]),
+    ("acc.sign_in", ["Sign in", "登录", "登入", "サインイン", "로그인", "Anmelden", "Se connecter", "Iniciar sesión", "Войти"]),
+    ("acc.sign_out", ["Sign out", "退出登录", "登出", "サインアウト", "로그아웃", "Abmelden", "Se déconnecter", "Cerrar sesión", "Выйти"]),
+    ("acc.code", ["Allow the launcher on the page that opened. It must show the code {0}.", "在打开的网页上允许启动器登录。页面上显示的代码必须是 {0}。", "在開啟的網頁上允許啟動器登入。頁面上顯示的代碼必須是 {0}。", "開いたページでランチャーを許可してください。表示されるコードは {0} のはずです。", "열린 페이지에서 런처를 허용하세요. 표시되는 코드는 {0}이어야 합니다.", "Erlaube den Launcher auf der geöffneten Seite. Sie muss den Code {0} zeigen.", "Autorisez le lanceur sur la page ouverte. Elle doit afficher le code {0}.", "Autoriza el lanzador en la página abierta. Debe mostrar el código {0}.", "Разрешите лаунчер на открывшейся странице. На ней должен быть код {0}."]),
+    ("acc.reopen", ["Open the page again", "重新打开页面", "重新開啟頁面", "ページをもう一度開く", "페이지 다시 열기", "Seite erneut öffnen", "Rouvrir la page", "Volver a abrir la página", "Открыть страницу снова"]),
+    ("acc.waiting", ["Waiting for the site…", "正在等待网站…", "正在等待網站…", "サイトを待っています…", "사이트를 기다리는 중…", "Warte auf die Seite …", "En attente du site…", "Esperando al sitio…", "Жду ответа сайта…"]),
+    ("acc.refused", ["The sign-in was refused on the site.", "网站上拒绝了这次登录。", "網站上拒絕了這次登入。", "サイトでサインインが拒否されました。", "사이트에서 로그인이 거부되었습니다.", "Die Anmeldung wurde auf der Seite abgelehnt.", "La connexion a été refusée sur le site.", "El inicio de sesión se rechazó en el sitio.", "Вход отклонён на сайте."]),
+    ("acc.expired", ["The code ran out before it was allowed; sign in again.", "代码在允许前已过期，请重新登录。", "代碼在允許前已過期，請重新登入。", "許可される前にコードが期限切れになりました。もう一度サインインしてください。", "허용되기 전에 코드가 만료되었습니다. 다시 로그인하세요.", "Der Code lief ab, bevor er erlaubt wurde; erneut anmelden.", "Le code a expiré avant d'être autorisé ; reconnectez-vous.", "El código caducó antes de autorizarse; vuelve a iniciar sesión.", "Код истёк до подтверждения; войдите снова."]),
+    ("acc.gone", ["The site signed the launcher out (the token was removed or ran out); sign in again.", "网站已让启动器退出登录（令牌被移除或已过期），请重新登录。", "網站已讓啟動器登出（權杖被移除或已過期），請重新登入。", "サイトによってサインアウトされました（トークンが削除または期限切れ）。もう一度サインインしてください。", "사이트가 런처를 로그아웃시켰습니다(토큰 삭제 또는 만료). 다시 로그인하세요.", "Die Seite hat den Launcher abgemeldet (Token entfernt oder abgelaufen); erneut anmelden.", "Le site a déconnecté le lanceur (jeton retiré ou expiré) ; reconnectez-vous.", "El sitio cerró la sesión del lanzador (token retirado o caducado); vuelve a iniciarla.", "Сайт завершил сеанс лаунчера (токен удалён или истёк); войдите снова."]),
+    // ---- wiki entries
+    ("wiki.offer", ["Also create its entry on stellarismod.com", "同时在星海百科创建词条", "同時在星海百科建立詞條", "stellarismod.com にも項目を作る", "stellarismod.com에도 항목 만들기", "Auch den Eintrag auf stellarismod.com anlegen", "Créer aussi sa fiche sur stellarismod.com", "Crear también su ficha en stellarismod.com", "Создать и статью на stellarismod.com"]),
+    ("wiki.sign_in", ["Sign in to stellarismod.com in Settings to create its entry there.", "在设置中登录 stellarismod.com 后即可在那里创建词条。", "在設定中登入 stellarismod.com 後即可在那裡建立詞條。", "設定で stellarismod.com にサインインすると項目を作れます。", "설정에서 stellarismod.com에 로그인하면 항목을 만들 수 있습니다.", "In den Einstellungen bei stellarismod.com anmelden, um dort den Eintrag anzulegen.", "Connectez-vous à stellarismod.com dans les Réglages pour y créer sa fiche.", "Inicia sesión en stellarismod.com en Ajustes para crear allí su ficha.", "Войдите в stellarismod.com в настройках, чтобы создать там статью."]),
+    ("wiki.title", ["An entry on stellarismod.com", "在星海百科创建词条", "在星海百科建立詞條", "stellarismod.com の項目", "stellarismod.com 항목", "Ein Eintrag auf stellarismod.com", "Une fiche sur stellarismod.com", "Una ficha en stellarismod.com", "Статья на stellarismod.com"]),
+    ("wiki.looking", ["Asking the site about the Workshop item {0}…", "正在向网站查询创意工坊条目 {0}…", "正在向網站查詢工作坊項目 {0}…", "ワークショップのアイテム {0} をサイトに問い合わせています…", "창작마당 항목 {0}을(를) 사이트에 묻는 중…", "Frage die Seite nach dem Workshop-Eintrag {0} …", "Interrogation du site sur l'objet {0}…", "Consultando al sitio por el objeto {0}…", "Запрашиваю у сайта предмет {0}…"]),
+    ("wiki.listed", ["The site lists this mod already.", "网站已经收录了这个模组。", "網站已經收錄了這個模組。", "このMODはすでにサイトに載っています。", "이 모드는 이미 사이트에 있습니다.", "Die Seite führt diesen Mod schon.", "Le site répertorie déjà ce mod.", "El sitio ya tiene este mod.", "Этот мод уже есть на сайте."]),
+    ("wiki.pending", ["An entry for this mod waits for review already.", "这个模组已有词条在等待审核。", "這個模組已有詞條在等待審核。", "このMODの項目はすでに審査待ちです。", "이 모드의 항목이 이미 검토를 기다리고 있습니다.", "Ein Eintrag für diesen Mod wartet schon auf Prüfung.", "Une fiche pour ce mod attend déjà une validation.", "Ya hay una ficha de este mod esperando revisión.", "Статья об этом моде уже ждёт проверки."]),
+    ("wiki.category", ["Category", "分类", "分類", "カテゴリー", "분류", "Kategorie", "Catégorie", "Categoría", "Категория"]),
+    ("wiki.parse", ["Read the mod's files for its pages (technologies, events, …) and their icons", "读取模组文件生成页面（科技、事件等）和图标", "讀取模組檔案產生頁面（科技、事件等）和圖示", "MODのファイルからページ（技術・イベントなど）とアイコンを作る", "모드 파일을 읽어 페이지(기술, 이벤트 등)와 아이콘 만들기", "Die Dateien des Mods für seine Seiten (Technologien, Ereignisse …) und Symbole lesen", "Lire les fichiers du mod pour ses pages (technologies, événements…) et leurs icônes", "Leer los archivos del mod para sus páginas (tecnologías, eventos…) y sus iconos", "Прочитать файлы мода для его страниц (технологии, события…) и значков"]),
+    ("wiki.not_author", ["I did not make this mod", "这个模组不是我制作的", "這個模組不是我製作的", "このMODの作者ではありません", "이 모드를 만들지 않았습니다", "Ich habe diesen Mod nicht gemacht", "Je n'ai pas fait ce mod", "No hice este mod", "Этот мод сделал не я"]),
+    ("wiki.create", ["Create the entry", "创建词条", "建立詞條", "項目を作る", "항목 만들기", "Eintrag anlegen", "Créer la fiche", "Crear la ficha", "Создать статью"]),
+    ("wiki.parsing", ["Reading the mod's files…", "正在读取模组文件…", "正在讀取模組檔案…", "MODのファイルを読んでいます…", "모드 파일을 읽는 중…", "Lese die Dateien des Mods …", "Lecture des fichiers du mod…", "Leyendo los archivos del mod…", "Читаю файлы мода…"]),
+    ("wiki.icons", ["Making pictures {0}/{1}…", "正在生成图片 {0}/{1}…", "正在產生圖片 {0}/{1}…", "画像を作成中 {0}/{1}…", "그림 만드는 중 {0}/{1}…", "Erstelle Bilder {0}/{1} …", "Création des images {0}/{1}…", "Creando imágenes {0}/{1}…", "Создаю изображения {0}/{1}…"]),
+    ("wiki.sending", ["Sending the entry…", "正在提交词条…", "正在提交詞條…", "項目を送信しています…", "항목을 보내는 중…", "Sende den Eintrag …", "Envoi de la fiche…", "Enviando la ficha…", "Отправляю статью…"]),
+    ("wiki.published", ["Listed on the site.", "已在网站上收录。", "已在網站上收錄。", "サイトに掲載されました。", "사이트에 등록되었습니다.", "Auf der Seite aufgenommen.", "Publié sur le site.", "Publicado en el sitio.", "Опубликовано на сайте."]),
+    ("wiki.review", ["Sent: it appears on the site once an admin has reviewed it.", "已提交，管理员审核后出现在百科。", "已提交，管理員審核後出現在百科。", "送信しました。管理者の審査後にサイトに表示されます。", "보냈습니다. 관리자가 검토하면 사이트에 표시됩니다.", "Gesendet: er erscheint, sobald ein Admin ihn geprüft hat.", "Envoyé : la fiche apparaîtra après validation par un administrateur.", "Enviado: aparecerá cuando un administrador lo revise.", "Отправлено: статья появится после проверки администратором."]),
+    ("wiki.exists", ["Not created: {0}", "未创建：{0}", "未建立：{0}", "作成されませんでした：{0}", "만들지 않았습니다: {0}", "Nicht angelegt: {0}", "Non créée : {0}", "No se creó: {0}", "Не создано: {0}"]),
+    ("wiki.counts", ["{0} entries from the mod's files, {1} pictures.", "从模组文件读出 {0} 个条目，{1} 张图片。", "從模組檔案讀出 {0} 個條目，{1} 張圖片。", "MODのファイルから {0} 項目、画像 {1} 枚。", "모드 파일에서 항목 {0}개, 그림 {1}개.", "{0} Einträge aus den Dateien des Mods, {1} Bilder.", "{0} entrées tirées des fichiers du mod, {1} images.", "{0} entradas de los archivos del mod, {1} imágenes.", "Из файлов мода: записей {0}, изображений {1}."]),
+];
+
+fn column(lang: Lang) -> usize {
+    match lang {
+        Lang::En => 0,
+        Lang::ZhHans => 1,
+        Lang::ZhHant => 2,
+        Lang::Ja => 3,
+        Lang::Ko => 4,
+        Lang::De => 5,
+        Lang::Fr => 6,
+        Lang::Es => 7,
+        Lang::Ru => 8,
+    }
+}
+
+pub fn t(lang: Lang, key: &str) -> &'static str {
+    T.iter().find(|(k, _)| *k == key).map(|(_, v)| v[column(lang)]).unwrap_or("?")
+}
+
+pub fn ta(lang: Lang, key: &str, args: &[&str]) -> String {
+    let mut s = t(lang, key).to_string();
+    for (i, a) in args.iter().enumerate() {
+        s = s.replace(&format!("{{{i}}}"), a);
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_row_has_every_language_and_the_same_placeholders() {
+        let mut seen = std::collections::HashSet::new();
+        for (k, v) in T {
+            assert!(seen.insert(*k), "{k} twice");
+            for (i, text) in v.iter().enumerate() {
+                assert!(!text.is_empty(), "{k} [{i}] is empty");
+                for n in 0..6 {
+                    let p = format!("{{{n}}}");
+                    assert_eq!(v[0].contains(&p), text.contains(&p), "{k} [{i}]: placeholder {p}");
+                }
+            }
+        }
+        assert_eq!(ta(Lang::En, "link.done_mod", &["A", "B"]), "A is in the playset B.");
+        assert_eq!(t(Lang::Ru, "nope"), "?");
+    }
+}

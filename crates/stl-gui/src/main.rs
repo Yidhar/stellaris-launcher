@@ -5,6 +5,8 @@
 mod assets;
 mod editor;
 mod i18n;
+mod site_i18n;
+mod site_ui;
 mod theme;
 mod upload_i18n;
 
@@ -119,16 +121,22 @@ impl<J> JobQueue<J> {
 
 enum FetchMsg {
     Progress(workshop::FetchProgress),
+    /// a package or plugin of the site got (or not), before the Workshop items
+    Extra(String, Result<(), String>),
     Done(Result<Vec<(u64, String)>, String>),
 }
 
-/// A playset made from a file, waiting for the Workshop items it lacks.
+/// A playset made from a file (or a playset of stellarismod.com), waiting for the Workshop items it lacks.
 struct ImportJob {
     /// the id of the playset
     playset: String,
     name: String,
     shared: import::Shared,
     want: Vec<u64>,
+    /// a site playset's packages and plugins to get (checked against their SHA-256)
+    extras: Vec<site_ui::Extra>,
+    /// those not got: (label, why)
+    extra_failed: Vec<(String, String)>,
 }
 
 /// The playset files whose mods are being fetched, one file at a time.
@@ -565,6 +573,8 @@ struct App {
     assets: Assets,
     news: News,
     acts: Vec<Act>,
+    /// stellarismod.com: its links, the account, wiki entries (site_ui.rs)
+    site: site_ui::SiteUi,
     logo: Option<PathBuf>,
     backgrounds: Vec<(&'static str, PathBuf)>,
 }
@@ -687,8 +697,11 @@ impl App {
             acts: Vec::new(),
             logo: None,
             backgrounds: Vec::new(),
+            site: Default::default(),
         };
         app.reload();
+        // stellarismod.com's links: the one this start was given, and those of later starts (handed over by stl_core::relay)
+        app.start_links(ctx, stl_core::site::link_in_args(std::env::args().skip(1)));
         app.lang = resolve_lang(&app.store, &app.game);
         // for screenshots while developing: --page=1 --seg=1 --lang=ja --popup --many=30 --make --upload=<part of a mod name> --update-sheet --popup=<id>
         for a in std::env::args().skip(1) {
@@ -733,7 +746,7 @@ impl App {
                 if let Ok(shared) = import::parse_shared(text, "stellaris") {
                     let (tx, rx) = channel();
                     std::mem::forget(tx);
-                    app.imports.running = Some((ImportJob { playset: String::new(), name: shared.name.clone(), shared, want: vec![7] }, rx));
+                    app.imports.running = Some((ImportJob { playset: String::new(), name: shared.name.clone(), shared, want: vec![7], extras: Vec::new(), extra_failed: Vec::new() }, rx));
                     app.imports.progress = Some(workshop::FetchProgress { downloading: true, index: 2, total: 12, id: 7, bytes: 30, size: 100 });
                 }
             } else if a == "--import-message" {
@@ -1615,7 +1628,7 @@ impl App {
             let (playset, name) = (self.store.playsets[i].id.clone(), self.store.playsets[i].name.clone());
             let want = shared.missing_steam(&self.mods);
             self.say(format!("playset {name} made from {file}: {} mods, {} to get from the Workshop", shared.mods.len(), want.len()));
-            let job = ImportJob { playset, name, shared, want };
+            let job = ImportJob { playset, name, shared, want, extras: Vec::new(), extra_failed: Vec::new() };
             if job.want.is_empty() {
                 self.finish_import(job, Vec::new());
             } else {
@@ -1629,11 +1642,19 @@ impl App {
         if self.imports.running.is_some() {
             return;
         }
-        let Some(job) = self.imports.waiting.pop_front() else { return };
+        let Some(mut job) = self.imports.waiting.pop_front() else { return };
         let Ok(game) = self.game.clone() else { return };
         let (tx, rx) = channel();
         let want = job.want.clone();
+        let extras = std::mem::take(&mut job.extras);
         std::thread::spawn(move || {
+            for x in &extras {
+                let _ = tx.send(FetchMsg::Extra(x.label(), x.get(&game.data_dir)));
+            }
+            if want.is_empty() {
+                let _ = tx.send(FetchMsg::Done(Ok(Vec::new())));
+                return;
+            }
             let progress = tx.clone();
             let r = workshop::fetch(&game.dir, &want, &mut |p| {
                 let _ = progress.send(FetchMsg::Progress(p));
@@ -1651,6 +1672,7 @@ impl App {
             self.mods = mods::scan(&g.data_dir);
         }
         self.acts.push(Act::RescanMods);
+        self.acts.push(Act::RescanPlugins);
         if let Some(p) = self.store.playsets.iter_mut().find(|p| p.id == job.playset) {
             job.shared.apply(p);
             self.save();
@@ -1658,16 +1680,28 @@ impl App {
         for (id, why) in &failed {
             self.say(format!("{}: {} not got: {why}", job.name, job.shared.name_of(*id).unwrap_or_default()));
         }
+        for (label, why) in &job.extra_failed {
+            self.say(format!("{}: {label} not got from the site: {why}", job.name));
+        }
         let pdx = job.shared.missing_pdx(&self.mods);
         let pdx_names: Vec<&str> = pdx.iter().map(|m| m.display_name.as_str()).collect();
         for n in &pdx_names {
             self.say(format!("{}: {n} is a Paradox mod: subscribe to it in the official launcher", job.name));
         }
-        let lacking = job.shared.missing_steam(&self.mods).len() + pdx.len();
+        let local = job.shared.missing_local(&self.mods);
+        let local_names: Vec<&str> = local.iter().map(|m| m.display_name.as_str()).collect();
+        for n in &local_names {
+            self.say(format!("{}: {n} is not in the mod folder", job.name));
+        }
+        let lacking = job.shared.missing_steam(&self.mods).len() + pdx.len() + local.len() + job.extra_failed.iter().filter(|(l, _)| !job.shared.mods.iter().any(|m| m.display_name == *l)).count();
         let line = if lacking == 0 {
             (tr_args(self.lang, "ps.import_done", &[&job.name]), true)
         } else {
-            let why = failed.first().map(|f| f.1.clone()).unwrap_or_else(|| pdx_names.join(", "));
+            let why = failed
+                .first()
+                .map(|f| f.1.clone())
+                .or_else(|| job.extra_failed.first().map(|(l, w)| format!("{l}: {w}")))
+                .unwrap_or_else(|| pdx_names.iter().chain(local_names.iter()).copied().collect::<Vec<_>>().join(", "));
             (tr_args(self.lang, "ps.import_some", &[&job.name, &lacking.to_string(), &why]), false)
         };
         self.say(line.0.clone());
@@ -1676,11 +1710,16 @@ impl App {
 
     fn drain_imports(&mut self, ctx: &egui::Context) {
         let mut done = None;
-        if let Some((_, rx)) = &self.imports.running {
+        if let Some((job, rx)) = &mut self.imports.running {
             ctx.request_repaint_after(Duration::from_millis(200));
             loop {
                 match rx.try_recv() {
                     Ok(FetchMsg::Progress(p)) => self.imports.progress = Some(p),
+                    Ok(FetchMsg::Extra(label, r)) => {
+                        if let Err(why) = r {
+                            job.extra_failed.push((label, why));
+                        }
+                    }
                     Ok(FetchMsg::Done(r)) => {
                         done = Some(r);
                         break;
@@ -3518,6 +3557,7 @@ impl App {
                 self.index.new_url = typed.into_inner();
             });
             theme::footnote(ui, tr(lang, "set.indexes_hint"));
+            self.account_section(ui);
             if let Ok(g) = &self.game {
                 if !g.settings.alternative_executables.is_empty() {
                     theme::section(ui, tr(lang, "play.mode"));
@@ -3801,6 +3841,7 @@ impl eframe::App for App {
         self.drain_upload();
         self.drain_updates();
         self.drain_imports(ctx);
+        self.drain_site(ctx);
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         let dropped: Vec<PathBuf> = dropped.into_iter().filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json"))).collect();
         if !dropped.is_empty() {
@@ -3944,6 +3985,8 @@ impl eframe::App for App {
         self.check_sheet(ctx);
         self.upload_sheet(ctx);
         self.ignore_sheet(ctx);
+        self.wiki_sheet(ctx);
+        self.link_sheet(ctx);
         self.window_frame(ctx);
         for act in std::mem::take(&mut self.acts) {
             self.apply(ctx, act);
@@ -4599,6 +4642,8 @@ impl App {
     /// The "upload to the Workshop" sheet: what will be sent and where, the visibility, a change note; then the progress and the result.
     fn upload_sheet(&mut self, ctx: &egui::Context) {
         let report = self.upload_report();
+        let signed_in = self.site.session.is_some();
+        let mut wiki: Option<(Mod, u64)> = None;
         let Some(f) = self.upload.as_mut() else { return };
         let lang = self.lang;
         let running = f.rx.is_some();
@@ -4739,6 +4784,15 @@ impl App {
                     if o.needs_agreement && theme::text_link(ui, tr(lang, "up.open_agreement"), 12.5).clicked() {
                         open = Some("https://steamcommunity.com/sharedfiles/workshoplegalagreement".into());
                     }
+                    // stellarismod.com: its entry there too ("同时在星海百科创建词条")
+                    ui.add_space(6.0);
+                    if signed_in {
+                        if theme::text_link(ui, site_i18n::t(lang, "wiki.offer"), 13.0).clicked() {
+                            wiki = Some((f.m.clone(), o.id));
+                        }
+                    } else {
+                        ui.label(RichText::new(site_i18n::t(lang, "wiki.sign_in")).size(12.5).color(SECONDARY));
+                    }
                 }
                 Some(Err(e)) => {
                     ui.add_space(14.0);
@@ -4800,6 +4854,11 @@ impl App {
         });
         if let Some(url) = open {
             open_link(&url);
+        }
+        if let Some((m, id)) = wiki {
+            self.upload = None;
+            self.open_wiki(ctx, m, id);
+            return;
         }
         if edit_rules {
             self.ignore_edit = Some(IgnoreEdit::from_store(&self.store.upload_ignore, &self.store.upload_builtin_off));
@@ -5138,10 +5197,18 @@ fn main() -> eframe::Result<()> {
     if std::env::args().any(|a| a == "--uninstall") {
         return uninstall();
     }
+    // a link of stellarismod.com (Windows starts "<exe>" "%1"): the window already open takes it, and this start ends
+    if let Some(link) = stl_core::site::link_in_args(std::env::args().skip(1)) {
+        if stl_core::relay::hand_over(&link) {
+            return Ok(());
+        }
+    }
     // after an update: the replaced files; and a release downloaded last time is installed now, before anything is shown
     stl_core::selfupdate::cleanup();
     // "Apps & features" and App Paths: written on the first start of a copy from the zip, refreshed when its folder or version changes
     let _ = stl_core::install::register(stl_core::selfupdate::current_version());
+    // stl:// links open this copy (not a development build)
+    let _ = stl_core::install::register_scheme();
     // (--update-sheet, for screenshots while developing, shows the sheet instead)
     let auto = Store::load().map(|s| s.auto_update != Some(false)).unwrap_or(true) && !std::env::args().any(|a| a == "--update-sheet");
     if auto {

@@ -29,7 +29,19 @@ stl stop                                close the game
 stl check [--playset X] [--mod Y]       problems of a playset's mods, and what overrides what (docs/CONFLICTS.md)
 stl sort [--playset X] [--apply]        a load order where each mod comes after what it needs and what it patches
 stl self-update [--check]               update the launcher from its mirror or GitHub releases (with the window closed)
+stl open <stl://…> [--yes]              do what a link of stellarismod.com says (shown and asked first)
+stl import --url <export> | --data <…>  make a playset of stellarismod.com and get what it lacks
+stl login [--code …] / logout / account sign in with a stellarismod.com account (allowed on the site; no password here)
+stl plugin install <id>                 a plugin stellarismod.com hosts (checked against its SHA-256)
+stl wiki-entry <mod>                    create the stellarismod.com entry of a mod published to the Workshop
 ```
+
+**stellarismod.com.** The site's buttons open `stl://` links (registered for your user by the setup, or by the first start of a zip
+copy): import a playset, add a Workshop mod, install a plugin the site hosts, add a plugin index, sign in. A link only *asks*: the window
+shows what it would do and changes nothing until you go ahead, and every download is checked against a SHA-256. A second start with a link
+hands it to the window already open. Signing in (Settings) uses a code you allow on the site, so the launcher never sees your password; its
+token is kept encrypted for your Windows user. Signed in, publishing a mod to the Workshop offers to create its entry on the site too. See
+[docs/SITE.md](docs/SITE.md).
 
 **Updates.** The window looks for a newer release of the launcher when it starts (and every six hours while it runs): first on its mirror,
 `https://dl.stellarismod.com/launcher/` and its copy for mainland China, `https://dl-cn.stellarismod.com/launcher/` (both asked at once,

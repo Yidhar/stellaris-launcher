@@ -180,6 +180,49 @@ pub fn unregister() {
     if read(APP_PATHS, "Path").is_some_and(|p| program_dir().is_some_and(|d| same_dir(&p, &d))) {
         delete_tree(APP_PATHS);
     }
+    if let Some(exe) = program_dir().map(|d| d.join("stellaris-launcher.exe")) {
+        if scheme_exe().is_some_and(|e| same_dir(&e.to_string_lossy(), &exe)) {
+            unregister_scheme();
+        }
+    }
+}
+
+/// The `stl://` links of stellarismod.com: `HKCU\Software\Classes\stl`.
+const SCHEME: &str = r"Software\Classes\stl";
+
+/// The exe Windows starts for `stl://` links, if any.
+pub fn scheme_exe() -> Option<PathBuf> {
+    let cmd = read(&format!(r"{SCHEME}\shell\open\command"), "")?;
+    let cmd = cmd.trim();
+    let exe = match cmd.strip_prefix('"') {
+        Some(r) => r.split('"').next()?,
+        None => cmd.split(' ').next()?,
+    };
+    Some(PathBuf::from(exe))
+}
+
+/// Makes Windows start `exe` for `stl://` links (`"<exe>" "%1"`); nothing is written when it does already.
+pub fn register_scheme_for(exe: &Path) -> Result<bool> {
+    let command = format!("\"{}\" \"%1\"", exe.display());
+    if read(&format!(r"{SCHEME}\shell\open\command"), "").as_deref() == Some(command.as_str()) && read(SCHEME, "URL Protocol").is_some() {
+        return Ok(false);
+    }
+    let k = Key::create(SCHEME)?;
+    k.set("", "URL:Stellaris Launcher")?;
+    k.set("URL Protocol", "")?;
+    Key::create(&format!(r"{SCHEME}\DefaultIcon"))?.set("", &format!("\"{}\",0", exe.display()))?;
+    Key::create(&format!(r"{SCHEME}\shell\open\command"))?.set("", &command)?;
+    Ok(true)
+}
+
+/// What the start of the launcher does: `stl://` opens this copy (not a development build).
+pub fn register_scheme() -> Result<bool> {
+    let Some(dir) = program_dir() else { return Ok(false) };
+    register_scheme_for(&dir.join("stellaris-launcher.exe"))
+}
+
+pub fn unregister_scheme() {
+    delete_tree(SCHEME);
 }
 
 /// The setup's own uninstaller, for a copy the setup installed (`--uninstall` hands over to it).

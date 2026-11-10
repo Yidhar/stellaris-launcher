@@ -13,6 +13,8 @@ pub mod conflicts;
 pub mod leveldb;
 pub mod selfupdate;
 pub mod signed;
+pub mod site;
+pub mod relay;
 pub mod launch;
 pub mod modmake;
 pub mod mods;

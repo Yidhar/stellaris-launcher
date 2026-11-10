@@ -8,6 +8,8 @@ use stl_core::mods::{self, Mod};
 use stl_core::store::{Playset, Store};
 use stl_core::{launch, official, pe, plugins, process};
 
+mod site_cmd;
+
 #[derive(Parser)]
 #[command(name = "stl", version, about = "Stellaris launcher: playsets, mods and DLL plugins, and the game started without the Paradox Launcher")]
 struct Cli {
@@ -130,6 +132,52 @@ enum Cmd {
     },
     /// close the game
     Stop,
+    /// do what an stl:// link of stellarismod.com says (it is shown and asked first, unless --yes)
+    Open {
+        link: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// make a playset from stellarismod.com: its export URL (--url), or the playset a link carries (--data); gets what it lacks
+    Import {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        data: Option<String>,
+        /// only make the playset
+        #[arg(long)]
+        no_download: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// sign in with a stellarismod.com account: allow the launcher on the page it opens (--code: a sign-in the site allowed already)
+    Login {
+        #[arg(long)]
+        code: Option<String>,
+    },
+    /// sign out of stellarismod.com (the site removes the launcher's token)
+    Logout,
+    /// the stellarismod.com account the launcher is signed in with
+    Account,
+    /// create the stellarismod.com wiki entry of a mod published to the Steam Workshop (signed in)
+    WikiEntry {
+        /// the mod (name or descriptor id)
+        r#mod: String,
+        /// its Workshop item (its descriptor's remote_file_id by default)
+        #[arg(long)]
+        workshop: Option<u64>,
+        /// one of the site's categories (the one its tags suggest by default)
+        #[arg(long)]
+        category: Option<String>,
+        /// do not read the mod's files for its wiki pages (technologies, events, …) and their icons
+        #[arg(long)]
+        no_parse: bool,
+        /// the mod is someone else's
+        #[arg(long)]
+        not_author: bool,
+        #[arg(long)]
+        yes: bool,
+    },
     /// load a DLL into the running game by hand
     Inject {
         dll: PathBuf,
@@ -212,11 +260,20 @@ enum DlcCmd {
 
 #[derive(Subcommand)]
 enum PluginCmd {
-    /// install from a folder with stl-plugin.json (copied; --link keeps it where it is)
+    /// install from a folder with stl-plugin.json (copied; --link keeps it where it is), or a plugin stellarismod.com hosts by its id
     Install {
+        /// a folder, or a plugin id of stellarismod.com
         dir: PathBuf,
         #[arg(long)]
         link: bool,
+        /// (a plugin of the site) this release instead of the current one
+        #[arg(long)]
+        version: Option<String>,
+        /// (a plugin of the site) the SHA-256 its zip must have
+        #[arg(long)]
+        sha256: Option<String>,
+        #[arg(long)]
+        yes: bool,
     },
     Remove { id: String },
     /// details of an installed plugin
@@ -417,34 +474,7 @@ fn run() -> Result<()> {
                     let g = game.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
                     let text = std::fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
                     let shared = import::parse_shared(&String::from_utf8_lossy(&text), &g.settings.game_id)?;
-                    mods::sync_workshop(&g.data_dir);
-                    let here = mods::scan(&g.data_dir);
-                    let i = import::add_shared(&mut store, &shared)?;
-                    store.set_active(i);
-                    store.save()?;
-                    let want = shared.missing_steam(&here);
-                    println!("{}: {} mods, {} missing from the Workshop", store.playsets[i].name, shared.mods.len(), want.len());
-                    if !want.is_empty() && !no_download {
-                        let mut shown = None;
-                        let failed = stl_core::workshop::fetch(&g.dir, &want, &mut |p| {
-                            if shown != Some((p.downloading, p.index)) {
-                                shown = Some((p.downloading, p.index));
-                                println!("{} {}/{} {}", if p.downloading { "downloading" } else { "subscribing" }, p.index + 1, p.total, shared.name_of(p.id).unwrap_or_default());
-                            }
-                        })?;
-                        for (id, why) in failed {
-                            println!("not got: {} ({why})", shared.name_of(id).unwrap_or_default());
-                        }
-                    }
-                    // what came down is a mod now; the playset is the file's, in the file's order
-                    mods::sync_workshop(&g.data_dir);
-                    let here = mods::scan(&g.data_dir);
-                    shared.apply(&mut store.playsets[i]);
-                    store.save()?;
-                    for m in shared.missing_pdx(&here) {
-                        println!("not got: {} (a Paradox mod: subscribe to it in the official launcher)", m.display_name);
-                    }
-                    println!("{} of {} mods are here", shared.mods.len() - shared.missing_steam(&here).len() - shared.missing_pdx(&here).len(), shared.mods.len());
+                    site_cmd::import_playset(&mut store, g, &shared, None, *no_download)?;
                 }
                 PlaysetCmd::Export { name, out } => {
                     let g = game.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
@@ -878,7 +908,11 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Plugin { command } => match command {
-            PluginCmd::Install { dir, link } => {
+            PluginCmd::Install { dir, link, version, sha256, yes } => {
+                let id = dir.to_string_lossy().to_string();
+                if !dir.exists() && stl_core::site::safe_segment(&id, 64) {
+                    return site_cmd::install_site_plugin(&id, version.as_deref(), sha256.as_deref(), *yes);
+                }
                 let p = plugins::install(dir, *link)?;
                 println!("{} {} {} ({})", if *link { "linked" } else { "installed" }, p.manifest.id, p.manifest.version, p.dir.display());
             }
@@ -1045,6 +1079,23 @@ fn run() -> Result<()> {
             if !report.failed_plugins.is_empty() {
                 bail!("{} plugin(s) could not be loaded", report.failed_plugins.len());
             }
+        }
+        Cmd::Open { link, yes } => {
+            let game = open_game(&cli, &store);
+            site_cmd::open(&mut store, game.as_ref().map_err(|e| anyhow::anyhow!("{e:#}")), link, *yes)?;
+        }
+        Cmd::Import { url, data, no_download, yes } => {
+            let game = open_game(&cli, &store)?;
+            site_cmd::import(&mut store, &game, url.as_deref(), data.as_deref(), *no_download, *yes)?;
+        }
+        Cmd::Login { code } => site_cmd::login(code.as_deref())?,
+        Cmd::Logout => site_cmd::logout()?,
+        Cmd::Account => site_cmd::account()?,
+        Cmd::WikiEntry { r#mod, workshop, category, no_parse, not_author, yes } => {
+            let game = open_game(&cli, &store)?;
+            let known = mods::scan(&game.data_dir);
+            let m = pick_mod(&known, r#mod)?;
+            site_cmd::wiki_entry(m, *workshop, category.as_deref(), !no_parse, *not_author, *yes)?;
         }
         Cmd::Stop => {
             let pids = process::find_processes("stellaris.exe");

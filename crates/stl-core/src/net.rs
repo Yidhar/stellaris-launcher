@@ -1,6 +1,6 @@
 //! A small HTTP GET over WinHTTP (the system's own client: it brings TLS, the user's proxy settings and certificate store, and costs no crate).
-//! Used for the public news feed and its pictures, GitHub releases, and Steam's public item details (a POST of the item id); nothing else
-//! is sent, and cookies are not kept.
+//! Used for the public news feed and its pictures, GitHub releases, Steam's public item details (a POST of the item id), and
+//! stellarismod.com (`site`: the member's token, playsets, wiki entries); cookies are not kept.
 
 use crate::{bail, Context, Result};
 use std::ffi::OsStr;
@@ -83,9 +83,33 @@ pub fn form_encode(v: &str) -> String {
 }
 
 fn request(method: &str, url: &str, form: Option<&[u8]>, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>> {
+    let body = form.map(|b| ("application/x-www-form-urlencoded", b));
+    let a = send(method, url, &[], body, timeout_ms, max_bytes)?;
+    if a.status != 200 {
+        bail!("{} answered {}", a.host, a.status);
+    }
+    Ok(a.body)
+}
+
+/// An answer of any status (`send`).
+#[derive(Debug, Clone)]
+pub struct Answer {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub host: String,
+}
+
+/// A request with headers (`("Authorization", "Bearer …")`) and an optional body (`(content type, bytes)`), whatever the status of the
+/// answer (redirects are followed). No `Origin` header and no cookies are ever sent.
+pub fn send(method: &str, url: &str, headers: &[(&str, &str)], body: Option<(&str, &[u8])>, timeout_ms: i32, max_bytes: usize) -> Result<Answer> {
     let (secure, host, port, path) = split_url(url)?;
+    for (k, v) in headers {
+        if k.contains([':', '\r', '\n']) || v.contains(['\r', '\n']) {
+            bail!("a header that cannot be sent: {k}");
+        }
+    }
     unsafe {
-        let session = Handle(WinHttpOpen(wide("stellaris-launcher/0.1").as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, std::ptr::null(), std::ptr::null(), 0));
+        let session = Handle(WinHttpOpen(wide(&format!("stellaris-launcher/{}", env!("CARGO_PKG_VERSION"))).as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, std::ptr::null(), std::ptr::null(), 0));
         if session.0.is_null() {
             bail!("WinHttpOpen failed");
         }
@@ -107,12 +131,15 @@ fn request(method: &str, url: &str, form: Option<&[u8]>, timeout_ms: i32, max_by
         if request.0.is_null() {
             bail!("WinHttpOpenRequest failed");
         }
-        let sent = match form {
-            Some(body) => {
-                let headers = wide("Content-Type: application/x-www-form-urlencoded\r\n");
-                WinHttpSendRequest(request.0, headers.as_ptr(), u32::MAX, body.as_ptr() as *const _, body.len() as u32, body.len() as u32, 0)
-            }
-            None => WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0),
+        let mut lines: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+        if let Some((ty, _)) = body {
+            lines.push_str(&format!("Content-Type: {ty}\r\n"));
+        }
+        let wide_lines = wide(&lines);
+        let (hp, hl) = if lines.is_empty() { (std::ptr::null(), 0) } else { (wide_lines.as_ptr(), u32::MAX) };
+        let sent = match body {
+            Some((_, b)) => WinHttpSendRequest(request.0, hp, hl, b.as_ptr() as *const _, b.len() as u32, b.len() as u32, 0),
+            None => WinHttpSendRequest(request.0, hp, hl, std::ptr::null(), 0, 0, 0),
         };
         if sent == 0 {
             bail!("request to {host} failed (no network, or the host did not answer)");
@@ -125,10 +152,7 @@ fn request(method: &str, url: &str, form: Option<&[u8]>, timeout_ms: i32, max_by
         if WinHttpQueryHeaders(request.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, std::ptr::null(), &mut status as *mut u32 as *mut _, &mut len, std::ptr::null_mut()) == 0 {
             bail!("no status line from {host}");
         }
-        if status != 200 {
-            bail!("{host} answered {status}");
-        }
-        let mut body = Vec::new();
+        let mut out = Vec::new();
         loop {
             let mut available = 0u32;
             if WinHttpQueryDataAvailable(request.0, &mut available) == 0 {
@@ -142,12 +166,12 @@ fn request(method: &str, url: &str, form: Option<&[u8]>, timeout_ms: i32, max_by
             if WinHttpReadData(request.0, chunk.as_mut_ptr() as *mut _, available, &mut read) == 0 {
                 bail!("the connection to {host} broke");
             }
-            body.extend_from_slice(&chunk[..read as usize]);
-            if body.len() > max_bytes {
+            out.extend_from_slice(&chunk[..read as usize]);
+            if out.len() > max_bytes {
                 bail!("the answer of {host} is larger than {max_bytes} bytes");
             }
         }
-        Ok(body)
+        Ok(Answer { status: status as u16, body: out, host })
     }
 }
 

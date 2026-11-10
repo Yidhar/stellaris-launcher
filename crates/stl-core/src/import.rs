@@ -80,14 +80,19 @@ pub struct SharedMod {
     pub pdx_id: Option<String>,
     pub position: f64,
     pub enabled: bool,
+    /// a mod that is neither (a playset of stellarismod.com: a local mod or a package the site hosts), by its descriptor id
+    #[serde(skip)]
+    pub local_id: Option<String>,
 }
 
 impl SharedMod {
     /// What the playset lists it as. The official launcher names the descriptor after the item, whichever machine it is on.
     pub fn descriptor(&self) -> String {
-        match &self.steam_id {
-            Some(id) => format!("mod/ugc_{id}.mod"),
-            None => format!("mod/pdx_{}.mod", self.pdx_id.as_deref().unwrap_or_default()),
+        match (&self.steam_id, &self.pdx_id, &self.local_id) {
+            (Some(id), _, _) => format!("mod/ugc_{id}.mod"),
+            (None, Some(id), _) => format!("mod/pdx_{id}.mod"),
+            (None, None, Some(local)) => local.clone(),
+            (None, None, None) => "mod/pdx_.mod".to_string(),
         }
     }
 }
@@ -145,7 +150,12 @@ impl Shared {
 
     /// The Paradox Mods of the file that are not here. Getting those takes a Paradox account, which this launcher does not sign in to.
     pub fn missing_pdx(&self, known: &[Mod]) -> Vec<&SharedMod> {
-        self.mods.iter().filter(|m| m.steam_id.is_none() && !usable(known, &m.descriptor())).collect()
+        self.mods.iter().filter(|m| m.steam_id.is_none() && m.pdx_id.is_some() && !usable(known, &m.descriptor())).collect()
+    }
+
+    /// The mods named by a descriptor id only (`local_id`) that are not here.
+    pub fn missing_local(&self, known: &[Mod]) -> Vec<&SharedMod> {
+        self.mods.iter().filter(|m| m.local_id.is_some() && m.steam_id.is_none() && !usable(known, &m.descriptor())).collect()
     }
 
     pub fn name_of(&self, steam_id: u64) -> Option<&str> {

@@ -83,6 +83,11 @@ Name: "{autodesktop}\Stellaris Launcher"; Filename: "{app}\stellaris-launcher.ex
 ; Win+R "stellaris-launcher"
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\stellaris-launcher.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\stellaris-launcher.exe"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\stellaris-launcher.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"
+; stl:// links of stellarismod.com (the launcher asks before it does what a link says)
+Root: HKCU; Subkey: "Software\Classes\stl"; ValueType: string; ValueName: ""; ValueData: "URL:Stellaris Launcher"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\stl"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\stl\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\stellaris-launcher.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\stl\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\stellaris-launcher.exe"" ""%1"""
 
 [Run]
 Filename: "{app}\stellaris-launcher.exe"; Description: "{cm:LaunchProgram,Stellaris Launcher}"; Flags: nowait postinstall skipifsilent
