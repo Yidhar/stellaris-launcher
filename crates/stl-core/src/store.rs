@@ -86,6 +86,9 @@ pub struct Store {
     /// say in the game which DLL plugins are loaded; None = yes
     #[serde(default)]
     pub ingame_notice: Option<bool>,
+    /// count plugin downloads on stellarismod.com, anonymously (`site::count_plugin_download`); None = yes
+    #[serde(default)]
+    pub share_stats: Option<bool>,
     /// the plugin indexes (`plugins.jsonl` URLs) to read; None = the default one (`pluginindex::DEFAULT_INDEX`)
     #[serde(default)]
     pub plugin_indexes: Option<Vec<String>>,

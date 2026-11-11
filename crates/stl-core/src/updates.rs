@@ -212,6 +212,10 @@ pub fn apply(p: &Plugin, a: &Available) -> Result<Plugin> {
         plugins::install(&root, false)
     })();
     let _ = std::fs::remove_dir_all(&tmp);
+    if let Ok(new) = &result {
+        let sha: String = a.sha256.clone().unwrap_or_else(|| Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect());
+        crate::site::count_plugin_download(&new.manifest.id, &new.manifest.version, &sha, "update", "update");
+    }
     result
 }
 

@@ -296,6 +296,9 @@ pub fn install(e: &Entry) -> Result<Plugin> {
         plugins::install(&root, false)
     })();
     let _ = std::fs::remove_dir_all(&tmp);
+    if let Ok(p) = &result {
+        crate::site::count_plugin_download(&e.id, &p.manifest.version, &e.sha256, "install", crate::site::origin_of(&e.index));
+    }
     result
 }
 

@@ -582,6 +582,22 @@ impl App {
             ui.label(RichText::new(m).size(12.5).color(if *ok { GREEN } else { RED }));
         }
         theme::footnote(ui, t(lang, "acc.hint"));
+        // anonymous plugin download counts (no account, no machine id)
+        let mut share = self.store.share_stats != Some(false);
+        let mut changed = false;
+        glass(ui, 16.0, 0.0, |ui| {
+            let mut rows = Rows::new();
+            rows.row(ui, 48.0, 46.0, false, |ui| {
+                ui.label(t(lang, "stats.share"));
+            }, |ui| {
+                changed = switch(ui, &mut share).changed();
+            });
+        });
+        theme::footnote(ui, t(lang, "stats.hint"));
+        if changed {
+            self.store.share_stats = if share { None } else { Some(false) };
+            self.save();
+        }
         if let Some(u) = reopen {
             open_link(&u);
         }

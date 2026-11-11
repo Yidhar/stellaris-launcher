@@ -554,7 +554,69 @@ pub fn export_plugin_entry(p: &ExportPlugin) -> Result<pluginindex::Entry> {
         "id": p.id, "name": p.name.clone().unwrap_or_else(|| p.id.clone()), "author": "", "description": "",
         "version": p.version.clone().unwrap_or_default(), "download": url, "sha256": sha, "repository": site(),
     });
-    pluginindex::parse(&line.to_string(), &site()).0.pop().with_context(|| format!("the playset's plugin {} cannot be read", p.id))
+    pluginindex::parse(&line.to_string(), &format!("{}{PLAYSET_INDEX}", site())).0.pop().with_context(|| format!("the playset's plugin {} cannot be read", p.id))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// download counts
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/// The `index` an export's plugin entry is given (`export_plugin_entry`): a playset of the site named it.
+const PLAYSET_INDEX: &str = "#playset";
+
+static PENDING_COUNTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether plugin downloads are counted on the site: the store's `share_stats` (None = yes), never with `STL_NO_STATS`, and in a
+/// development build only with `STL_STATS=1` (tests must not count).
+pub fn counting() -> bool {
+    if std::env::var_os("STL_NO_STATS").is_some() {
+        return false;
+    }
+    if cfg!(debug_assertions) && std::env::var("STL_STATS").as_deref() != Ok("1") {
+        return false;
+    }
+    // read without Store::load, which takes in the game's plugin switches (a side effect this thread must not have)
+    crate::store::Store::default_path().and_then(|p| crate::store::Store::load_from(&p)).map(|s| s.share_stats != Some(false)).unwrap_or(true)
+}
+
+/// Where an installed plugin was listed, as a word (an index's own address is not sent).
+pub fn origin_of(index: &str) -> &'static str {
+    if index.ends_with(PLAYSET_INDEX) {
+        "playset"
+    } else if index.starts_with(&site()) {
+        "site"
+    } else if index == pluginindex::DEFAULT_INDEX {
+        "index"
+    } else {
+        "other"
+    }
+}
+
+/// What the count of one download sends: nothing about the user (no account token, no machine id, no index address).
+pub fn count_body(id: &str, version: &str, sha256: &str, kind: &str, origin: &str) -> Value {
+    json!({ "id": id, "version": version, "sha256": sha256.to_ascii_lowercase(), "kind": kind, "origin": origin, "launcher": env!("CARGO_PKG_VERSION") })
+}
+
+/// Counts a plugin download on the site (`POST /stats/plugin-download`), on a thread of its own: a failure is ignored and nothing
+/// waits for it. `kind` is `install` or `update`.
+pub fn count_plugin_download(id: &str, version: &str, sha256: &str, kind: &str, origin: &str) {
+    if !safe_segment(id, 64) || !counting() {
+        return;
+    }
+    let body = count_body(id, version, sha256, kind, origin).to_string();
+    PENDING_COUNTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _ = net::send("POST", &api("/stats/plugin-download"), &[("Accept", "application/json")], Some(("application/json", body.as_bytes())), 5_000, 64 * 1024);
+        PENDING_COUNTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
+/// Waits (at most `max`) for counts still being sent: the command line ends right after an install.
+pub fn flush_counts(max: std::time::Duration) {
+    let until = std::time::Instant::now() + max;
+    while PENDING_COUNTS.load(std::sync::atomic::Ordering::SeqCst) > 0 && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -1231,6 +1293,19 @@ mod tests {
         // a Workshop mod's descriptor is the item's, whatever the id said
         let e = parse_export(&with(r#"{"id":"mod/whatever.mod","workshop_id":"42"}"#)).unwrap();
         assert_eq!(e.mods[0].id, "mod/ugc_42.mod");
+    }
+
+    #[test]
+    fn a_download_count_says_nothing_about_the_user() {
+        let b = count_body("stellaris-live2d", "0.2.1", "ABCD", "install", "site");
+        let keys: Vec<&String> = b.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["id", "kind", "launcher", "origin", "sha256", "version"]);
+        assert_eq!(b["sha256"], "abcd");
+        assert_eq!(origin_of(&format!("{SITE}/api/v1/plugins.jsonl")), "site");
+        assert_eq!(origin_of(&format!("{SITE}{PLAYSET_INDEX}")), "playset");
+        assert_eq!(origin_of(pluginindex::DEFAULT_INDEX), "index");
+        assert_eq!(origin_of("https://my.example/plugins.jsonl"), "other", "a custom index is not named");
+        assert!(!counting(), "tests never count");
     }
 
     #[test]

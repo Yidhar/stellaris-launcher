@@ -346,7 +346,10 @@ fn print_playset(known: &[Mod], p: &Playset, active: bool) {
 }
 
 fn main() {
-    if let Err(e) = run() {
+    let r = run();
+    // an install's anonymous download count (stl_core::site) is sent on a thread: give it a moment before the process ends
+    stl_core::site::flush_counts(std::time::Duration::from_secs(3));
+    if let Err(e) = r {
         eprintln!("stl: {e:#}");
         std::process::exit(1);
     }

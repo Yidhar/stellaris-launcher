@@ -44,6 +44,21 @@ first), optionally the mod's pages read from its files (`POST /creator/parse` wi
 Chinese and English, and `interface/*.gfx`) and their pictures (`POST /creator/icons` in batches of at most 400 files and 12 MB), then
 `POST /creator/entries` with the Workshop requirements as relations. A member's entry waits for an admin (`202`).
 
+## Plugin download counts
+
+Plugins are downloaded from the mirrors, R2 or GitHub, never through the site, so the site counts them when the launcher says so: after
+every plugin installed (`pluginindex::install`: an index, a site link, a playset) or updated (`updates::apply`), on a thread of its own,
+`POST /api/v1/stats/plugin-download` with
+
+```json
+{ "id": "stellaris-live2d", "version": "0.2.1", "sha256": "a040…", "kind": "install", "origin": "site", "launcher": "0.1.14" }
+```
+
+`kind` is `install` or `update`; `origin` where it was listed: `site` (the site's index or links), `index` (the default index), `playset`
+(a site playset), `other` (an index the user added: its address is not sent), `update`. No account token, machine id or index address is
+sent, signed in or not; a failure is ignored. Settings → "Count plugin downloads on stellarismod.com" (`share_stats` in the store) or
+`STL_NO_STATS` turns it off; a development build counts only with `STL_STATS=1`. The command line waits up to 3 s for a count to go out.
+
 ## Testing
 
 `STL_SITE=http://127.0.0.1:<port>` points the launcher at a local copy of the site. `APPDATA` set to a temporary folder keeps the playsets
