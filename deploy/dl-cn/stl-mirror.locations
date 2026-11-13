@@ -30,18 +30,30 @@ proxy_connect_timeout 10s;
 proxy_read_timeout 60s;
 add_header X-Cache-Status $upstream_cache_status always;
 
+# The upstream hosts are variables, so nginx looks them up when a request needs them (through the resolver below) and not when it
+# starts: with the names written into proxy_pass, a DNS failure at the moment of a restart kept nginx, and every site on this server,
+# down (2026-11-13, a restart by unattended upgrades). The server has no IPv6, so only A records are asked for.
+resolver 127.0.0.53 valid=300s ipv6=off;
+resolver_timeout 5s;
+
 location /launcher/ {
     limit_except GET HEAD { deny all; }
+    set $stl_up_dl dl.stellarismod.com;
     proxy_set_header Host dl.stellarismod.com;
     proxy_ssl_name dl.stellarismod.com;
-    proxy_pass https://dl.stellarismod.com;
+    # no URI here: the request's own is passed on as it came
+    proxy_pass https://$stl_up_dl;
 }
 
 location /plugins/ {
     limit_except GET HEAD { deny all; }
+    set $stl_up_plugins plugins.stellarismod.com;
+    # /plugins/x -> /x upstream; the cache key stays /plugins/x, as before the rewrite was needed
+    rewrite ^/plugins/(.*)$ /$1 break;
+    proxy_cache_key /plugins$uri;
     proxy_set_header Host plugins.stellarismod.com;
     proxy_ssl_name plugins.stellarismod.com;
-    proxy_pass https://plugins.stellarismod.com/;
+    proxy_pass https://$stl_up_plugins;
 }
 
 location = /robots.txt {
